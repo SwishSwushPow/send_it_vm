@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{ByteSize, MountSpec, Settings};
+use crate::config::{ByteSize, MountSpec, Resources, Settings};
 
 /// Light and fast per-project Debian VMs on macOS.
 #[derive(Debug, Parser)]
@@ -23,6 +23,9 @@ pub enum Command {
         /// Rebuild the base image even if it already exists
         #[arg(long)]
         force: bool,
+
+        #[command(flatten)]
+        resources: ResourceArgs,
     },
     /// Boot the project's VM and attach to its console
     Run(RunArgs),
@@ -52,8 +55,9 @@ pub enum Command {
     },
 }
 
+/// CPUs and memory, shared by `run` and `provision`.
 #[derive(Debug, Args)]
-pub struct RunArgs {
+pub struct ResourceArgs {
     /// Number of virtual CPUs
     #[arg(long)]
     pub cpus: Option<u32>,
@@ -61,6 +65,21 @@ pub struct RunArgs {
     /// Memory size, e.g. 4G or 512M
     #[arg(long)]
     pub memory: Option<ByteSize>,
+}
+
+impl ResourceArgs {
+    pub fn resources(&self) -> Resources {
+        Resources {
+            cpus: self.cpus,
+            memory: self.memory,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    #[command(flatten)]
+    pub resources: ResourceArgs,
 
     /// Extra directory to share: HOST[:GUEST][:ro|rw] (repeatable).
     /// Without GUEST it is mounted at /mnt/<name>.
@@ -75,8 +94,8 @@ pub struct RunArgs {
 impl RunArgs {
     pub fn settings(&self) -> Settings {
         Settings {
-            cpus: self.cpus,
-            memory: self.memory,
+            cpus: self.resources.cpus,
+            memory: self.resources.memory,
             disk_size: None,
             mounts: self.mounts.clone(),
             expose_git: self.expose_git.then_some(true),
@@ -133,5 +152,17 @@ mod tests {
     fn rejects_bad_values() {
         assert!(Cli::try_parse_from(["sendit", "run", "--memory", "8"]).is_err());
         assert!(Cli::try_parse_from(["sendit", "run", "--mount", "/a:/b:/c"]).is_err());
+    }
+
+    #[test]
+    fn parses_provision_flags() {
+        let cli =
+            Cli::try_parse_from(["sendit", "provision", "--cpus", "6", "--memory", "12G"]).unwrap();
+        let Command::Provision { force, resources } = cli.command else {
+            panic!("expected provision")
+        };
+        assert!(!force);
+        assert_eq!(resources.cpus, Some(6));
+        assert_eq!(resources.memory, Some(ByteSize::gib(12)));
     }
 }

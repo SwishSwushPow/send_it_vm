@@ -38,8 +38,9 @@ fn main() -> Result<()> {
                 Config::load(&paths)?.resolve(&paths, &project, &args.settings(), &cwd)?;
             project_vm::run(&paths, &project, &settings)
         }
-        Command::Provision { force } => {
-            provision::provision(&paths, &Config::load(&paths)?, *force)
+        Command::Provision { force, resources } => {
+            let settings = Config::load(&paths)?.resolve_provision(&resources.resources())?;
+            provision::provision(&paths, &settings, *force)
         }
         Command::Ssh { command } => project_vm::ssh(&paths, &project()?, command),
         Command::Stop => project_vm::stop(&paths, &project()?),

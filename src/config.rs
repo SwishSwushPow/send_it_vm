@@ -4,6 +4,8 @@
 //! Layers, lowest to highest precedence: built-in defaults, top-level keys of
 //! the config file, the matching `[projects."<path>"]` table, CLI flags.
 //! Scalars are overridden by higher layers; mounts accumulate across layers.
+//! Provisioning the base image takes its CPUs and memory from the top-level
+//! keys, then the `[provision]` table, then the flags of `sendit provision`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -143,13 +145,30 @@ pub struct Settings {
     pub expose_git: Option<bool>,
 }
 
+/// Optional CPUs and memory for provisioning (`[provision]` table or CLI flags).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resources {
+    pub cpus: Option<u32>,
+    pub memory: Option<ByteSize>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     #[serde(flatten)]
     pub defaults: Settings,
     #[serde(default)]
+    pub provision: Resources,
+    #[serde(default)]
     pub projects: BTreeMap<PathBuf, Settings>,
+}
+
+/// Fully resolved CPUs and memory for provisioning the base image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProvisionSettings {
+    pub cpus: u32,
+    pub memory: ByteSize,
 }
 
 /// A host directory shared into the guest.
@@ -244,6 +263,20 @@ impl Config {
     }
 }
 
+impl Config {
+    /// Merges the layers that apply to provisioning with the CLI flags.
+    pub fn resolve_provision(&self, cli: &Resources) -> Result<ProvisionSettings> {
+        let mut cpus = self.defaults.cpus.unwrap_or(DEFAULT_CPUS);
+        let mut memory = self.defaults.memory.unwrap_or(DEFAULT_MEMORY);
+        for layer in [&self.provision, cli] {
+            cpus = layer.cpus.unwrap_or(cpus);
+            memory = layer.memory.unwrap_or(memory);
+        }
+        validate_resources(cpus, memory)?;
+        Ok(ProvisionSettings { cpus, memory })
+    }
+}
+
 fn project_guest_path(project: &Project) -> PathBuf {
     let name = project.root.file_name().unwrap_or("project".as_ref());
     Path::new(GUEST_HOME).join(name)
@@ -280,24 +313,26 @@ fn resolve_mount(paths: &Paths, spec: &MountSpec, base: Option<&Path>) -> Result
     })
 }
 
+fn validate_resources(cpus: u32, memory: ByteSize) -> Result<()> {
+    let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    ensure!(
+        (1..=host_cpus).contains(&cpus),
+        "cpus must be between 1 and {host_cpus}, got {cpus}"
+    );
+    ensure!(
+        memory >= MIN_MEMORY,
+        "memory must be at least {MIN_MEMORY}, got {memory}"
+    );
+    ensure!(
+        memory.0.is_multiple_of(ByteSize::mib(1).0),
+        "memory must be a whole number of MiB, got {memory}"
+    );
+    Ok(())
+}
+
 impl VmSettings {
     fn validate(&self) -> Result<()> {
-        let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
-        ensure!(
-            (1..=host_cpus).contains(&self.cpus),
-            "cpus must be between 1 and {host_cpus}, got {}",
-            self.cpus
-        );
-        ensure!(
-            self.memory >= MIN_MEMORY,
-            "memory must be at least {MIN_MEMORY}, got {}",
-            self.memory
-        );
-        ensure!(
-            self.memory.0.is_multiple_of(ByteSize::mib(1).0),
-            "memory must be a whole number of MiB, got {}",
-            self.memory
-        );
+        validate_resources(self.cpus, self.memory)?;
         ensure!(
             self.disk_size >= MIN_DISK_SIZE,
             "disk-size must be at least {MIN_DISK_SIZE}, got {}",
@@ -395,9 +430,39 @@ mod tests {
     }
 
     #[test]
+    fn resolves_provision_resources() {
+        let resolve =
+            |config: &str, cli: Resources| Config::parse(config).unwrap().resolve_provision(&cli);
+        let none = Resources::default;
+        let defaults = ProvisionSettings {
+            cpus: DEFAULT_CPUS,
+            memory: DEFAULT_MEMORY,
+        };
+        assert_eq!(resolve("", none()).unwrap(), defaults);
+
+        let top_level = "cpus = 1\nmemory = \"2G\"\n";
+        let settings = resolve(top_level, none()).unwrap();
+        assert_eq!((settings.cpus, settings.memory), (1, ByteSize::gib(2)));
+
+        let table = format!("{top_level}[provision]\nmemory = \"3G\"\n");
+        let settings = resolve(&table, none()).unwrap();
+        assert_eq!((settings.cpus, settings.memory), (1, ByteSize::gib(3)));
+
+        let cli = Resources {
+            cpus: None,
+            memory: Some(ByteSize::gib(1)),
+        };
+        assert_eq!(resolve(&table, cli).unwrap().memory, ByteSize::gib(1));
+
+        assert!(resolve("[provision]\ncpus = 0", none()).is_err());
+        assert!(resolve("[provision]\nmemory = \"256M\"", none()).is_err());
+    }
+
+    #[test]
     fn rejects_unknown_keys() {
         assert!(Config::parse("cpu = 4").is_err());
         assert!(Config::parse("[projects.\"/x\"]\nram = \"4G\"").is_err());
+        assert!(Config::parse("[provision]\nmounts = []").is_err());
     }
 
     struct Fixture {

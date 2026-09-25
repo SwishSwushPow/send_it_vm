@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{ByteSize, Config, DEFAULT_CPUS, DEFAULT_MEMORY};
+use crate::config::{ByteSize, ProvisionSettings};
 use crate::image;
 use crate::paths::Paths;
 use crate::vm::{self, VmDir, VmSpec};
@@ -104,7 +104,10 @@ pub fn custom_scripts_changed(paths: &Paths) -> Result<bool> {
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let marker: Scripts =
         toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
-    let current: Vec<_> = custom_scripts(paths)?.iter().map(CustomScript::stamp).collect();
+    let current: Vec<_> = custom_scripts(paths)?
+        .iter()
+        .map(CustomScript::stamp)
+        .collect();
     Ok(marker.custom_scripts != current)
 }
 
@@ -140,7 +143,7 @@ fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
     Ok(scripts)
 }
 
-pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
+pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Result<()> {
     if marker(paths).exists() && !force {
         eprintln!(
             "The base image in {} is already provisioned. Use --force to rebuild it.",
@@ -166,7 +169,10 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
 
     let log = work.join("console.log");
     eprintln!(
-        "Provisioning the base image. This takes a few minutes; the console is logged to {}.",
+        "Provisioning the base image ({} CPUs, {} memory). This takes a few minutes; \
+         the console is logged to {}.",
+        settings.cpus,
+        settings.memory,
         paths.display(&log)
     );
     if !scripts.is_empty() {
@@ -178,8 +184,8 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
         );
     }
     let spec = VmSpec {
-        cpus: config.defaults.cpus.unwrap_or(DEFAULT_CPUS),
-        memory: config.defaults.memory.unwrap_or(DEFAULT_MEMORY),
+        cpus: settings.cpus,
+        memory: settings.memory,
         shares: Vec::new(),
         seed: Some(seed),
         provision_log: Some(log.clone()),
