@@ -1,9 +1,9 @@
 #cloud-config
-# Seed for provisioning the send_it base image. @SSH_PUBLIC_KEY@ is filled in by send_it.
+# Seed for provisioning the sendit base image. @SSH_PUBLIC_KEY@ is filled in by sendit.
 hostname: sendit
 users:
   - name: dev
-    gecos: send_it developer
+    gecos: sendit developer
     shell: /bin/bash
     groups: [sudo]
     sudo: "ALL=(ALL) NOPASSWD:ALL"
@@ -11,7 +11,7 @@ users:
     ssh_authorized_keys:
       - @SSH_PUBLIC_KEY@
 ssh_pwauth: false
-# Mirror everything cloud-init runs to /dev/hvc1, which send_it shows and logs.
+# Mirror everything cloud-init runs to /dev/hvc1, which sendit shows and logs.
 # (Not hvc0: the getty there hangs up the tty when it starts, which would
 # kill anything writing to it.)
 output:
@@ -23,5 +23,5 @@ runcmd:
   - [bash, /run/sendit-seed/provision.sh, /run/sendit-seed]
 power_state:
   mode: poweroff
-  message: send_it provisioning finished
+  message: sendit provisioning finished
   timeout: 30

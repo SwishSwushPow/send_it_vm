@@ -56,7 +56,7 @@ fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
         return Ok(());
     }
     if project_vm::state(&dir)? != State::Stopped {
-        bail!("the VM is running; stop it first with `send_it stop`");
+        bail!("the VM is running; stop it first with `sendit stop`");
     }
     let question = format!(
         "Delete {} and everything stored in it? The next `run` starts from a fresh copy of the base image.",
@@ -167,7 +167,7 @@ fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Resu
     let base_state = if provision::marker(paths).exists() {
         "provisioned"
     } else {
-        "run `send_it provision`"
+        "run `sendit provision`"
     };
     let vm_dir = VmDir::new(paths.vm_dir(project));
     let state = if !vm_dir.path().exists() {

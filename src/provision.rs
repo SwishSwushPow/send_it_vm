@@ -36,7 +36,7 @@ const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 #[derive(Serialize)]
 struct Marker<'a> {
     revision: u32,
-    send_it_version: &'a str,
+    sendit_version: &'a str,
     debian_image_sha512: &'a str,
     provisioned_at_unix: u64,
 }
@@ -110,7 +110,7 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
 
     let marker_text = toml::to_string(&Marker {
         revision: BASE_REVISION,
-        send_it_version: env!("CARGO_PKG_VERSION"),
+        sendit_version: env!("CARGO_PKG_VERSION"),
         debian_image_sha512: &image.sha512,
         provisioned_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     })?;
@@ -125,14 +125,14 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Returns the public key of send_it's SSH keypair, generating it first if needed.
+/// Returns the public key of sendit's SSH keypair, generating it first if needed.
 fn ssh_public_key(paths: &Paths) -> Result<String> {
     let dir = paths.ssh_dir();
     let key = dir.join("id_ed25519");
     if !key.exists() {
         fs::create_dir_all(&dir)?;
         let status = Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "send_it", "-f"])
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "sendit", "-f"])
             .arg(&key)
             .status()
             .context("running ssh-keygen")?;

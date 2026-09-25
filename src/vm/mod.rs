@@ -31,7 +31,7 @@ use console::Console;
 /// How long to wait for the guest to shut down after asking it to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// SIGTERM (e.g. from `send_it stop`), SIGHUP (the terminal went away) and
+/// SIGTERM (e.g. from `sendit stop`), SIGHUP (the terminal went away) and
 /// SIGINT received so far. Each one counts like a press of the escape key.
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
 
@@ -49,7 +49,7 @@ fn handle_signals() {
 /// Prints a status line between guest output. Errors are ignored: after a
 /// SIGHUP the terminal is gone, and the VM must still be shut down cleanly.
 fn notice(message: &str) {
-    let _ = write!(std::io::stderr(), "\r\n[send_it] {message}\r\n");
+    let _ = write!(std::io::stderr(), "\r\n[sendit] {message}\r\n");
 }
 
 /// The files making up one VM (the base image or a project VM).
@@ -113,7 +113,7 @@ struct VmState {
 
 define_class!(
     #[unsafe(super(NSObject))]
-    #[name = "SendItVmDelegate"]
+    #[name = "SenditVmDelegate"]
     #[ivars = Rc<VmState>]
     struct VmDelegate;
 

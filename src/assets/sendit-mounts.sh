@@ -1,7 +1,7 @@
 #!/bin/sh
-# Applies send_it's mount manifest. Runs as root on every boot, started by
+# Applies sendit's mount manifest. Runs as root on every boot, started by
 # sendit-mounts.service from the read-only sendit-meta share, so it always
-# matches the send_it version that booted the VM.
+# matches the sendit version that booted the VM.
 # Usage: mount.sh <manifest>
 #
 # Manifest lines, applied in order:

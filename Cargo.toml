@@ -1,5 +1,5 @@
 [package]
-name = "send_it"
+name = "sendit"
 version = "0.1.0"
 edition = "2024"
 

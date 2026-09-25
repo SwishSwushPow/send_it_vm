@@ -1,4 +1,4 @@
-//! Where send_it keeps its state. Nothing is ever written into project folders:
+//! Where sendit keeps its state. Nothing is ever written into project folders:
 //!
 //! - `~/.cache/sendit/`: downloads, the provisioned base image, provisioning scratch
 //! - `~/.sendit/<project>_<uuid>/`: one directory per project VM

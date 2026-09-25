@@ -1,8 +1,8 @@
 #!/bin/bash
-# Provisions the send_it base image. Runs once, as root, from cloud-init.
+# Provisions the sendit base image. Runs once, as root, from cloud-init.
 # Usage: provision.sh <seed dir>
 #
-# The last line printed is a status sentinel that send_it looks for in the
+# The last line printed is a status sentinel that sendit looks for in the
 # console log to decide whether provisioning succeeded.
 set -euxo pipefail
 
@@ -56,7 +56,7 @@ EOF
 # --- Networking -------------------------------------------------------------
 # cloud-init's generated config matches this VM's MAC address, but every
 # project VM gets its own MAC. Replace it with a config that matches by name.
-# Identifying by MAC (instead of a DUID) lets `send_it ssh` find the VM's
+# Identifying by MAC (instead of a DUID) lets `sendit ssh` find the VM's
 # lease in the host's /var/db/dhcpd_leases.
 rm -f /etc/netplan/50-cloud-init.yaml \
     /etc/network/interfaces.d/50-cloud-init \
@@ -104,7 +104,7 @@ EOF
 systemctl enable sendit-growfs.service fstrim.timer
 
 # --- Mounts -----------------------------------------------------------------
-# send_it shares a manifest and the script that applies it (mount.sh) on the
+# sendit shares a manifest and the script that applies it (mount.sh) on the
 # read-only sendit-meta virtiofs share. Run it before anyone can log in.
 cat > /usr/local/sbin/sendit-mounts <<'EOF'
 #!/bin/sh
@@ -117,7 +117,7 @@ EOF
 chmod 755 /usr/local/sbin/sendit-mounts
 cat > /etc/systemd/system/sendit-mounts.service <<'EOF'
 [Unit]
-Description=Mount the directories shared by send_it
+Description=Mount the directories shared by sendit
 After=local-fs.target
 Before=serial-getty@hvc0.service ssh.service systemd-user-sessions.service
 

@@ -6,7 +6,7 @@ use crate::config::{ByteSize, MountSpec, Settings};
 
 /// Light and fast per-project Debian VMs on macOS.
 #[derive(Debug, Parser)]
-#[command(name = "send_it", version)]
+#[command(name = "sendit", version)]
 pub struct Cli {
     /// Project directory [default: current directory]
     #[arg(short = 'C', long = "project", global = true, value_name = "DIR")]
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn parses_run_flags() {
         let cli = Cli::try_parse_from([
-            "send_it",
+            "sendit",
             "run",
             "--cpus",
             "4",
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn passes_ssh_commands_through() {
-        let cli = Cli::try_parse_from(["send_it", "ssh", "ls", "-la", "/workspace"]).unwrap();
+        let cli = Cli::try_parse_from(["sendit", "ssh", "ls", "-la", "/workspace"]).unwrap();
         let Command::Ssh { command } = cli.command else {
             panic!("expected ssh")
         };
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_values() {
-        assert!(Cli::try_parse_from(["send_it", "run", "--memory", "8"]).is_err());
-        assert!(Cli::try_parse_from(["send_it", "run", "--mount", "/a:/b:/c"]).is_err());
+        assert!(Cli::try_parse_from(["sendit", "run", "--memory", "8"]).is_err());
+        assert!(Cli::try_parse_from(["sendit", "run", "--mount", "/a:/b:/c"]).is_err());
     }
 }

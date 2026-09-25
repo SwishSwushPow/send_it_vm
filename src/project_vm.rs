@@ -6,7 +6,7 @@
 //! new ones on first boot and saves them, so every VM has its own. The VM is
 //! built in `.<id>.partial/` and only renamed into place once complete.
 //!
-//! While a VM runs, its `send_it run` process holds a lock on `run/lock` and
+//! While a VM runs, its `sendit run` process holds a lock on `run/lock` and
 //! has written its PID there; that is how the other commands find it.
 
 use std::fs::{self, File};
@@ -37,7 +37,7 @@ pub struct Metadata {
     #[serde(default = "provision::first_revision")]
     pub base_revision: u32,
     #[serde(default)]
-    pub send_it_version: String,
+    pub sendit_version: String,
     #[serde(default)]
     pub created_at_unix: u64,
 }
@@ -55,7 +55,7 @@ pub fn metadata(dir: &VmDir) -> Result<Metadata> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Stopped,
-    /// Running under this `send_it run` process. The PID is missing for a
+    /// Running under this `sendit run` process. The PID is missing for a
     /// moment while the process starts up.
     Running(Option<u32>),
 }
@@ -109,8 +109,8 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
     }
     ensure!(
         metadata(&dir)?.base_revision >= provision::BASE_REVISION,
-        "{} was created from an older base image that this version of send_it \
-         can't run; `send_it reset` deletes it so the next run starts over from \
+        "{} was created from an older base image that this version of sendit \
+         can't run; `sendit reset` deletes it so the next run starts over from \
          the current base image",
         paths.display(dir.path())
     );
@@ -150,7 +150,7 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
     // SAFETY: plain syscall; the PID comes from the running VM's lock file.
     if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } != 0 {
         return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("signalling send_it process {pid}"));
+            .with_context(|| format!("signalling sendit process {pid}"));
     }
     eprintln!("Shutting down the VM…");
     let start = Instant::now();
@@ -172,7 +172,7 @@ pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
     let dir = VmDir::new(paths.vm_dir(project));
     ensure!(
         state(&dir)? != State::Stopped,
-        "the VM is not running; start it with `send_it run`"
+        "the VM is not running; start it with `sendit run`"
     );
     let mac = fs::read_to_string(dir.mac())
         .with_context(|| format!("reading {}", dir.mac().display()))?;
@@ -214,11 +214,11 @@ pub fn delete(dir: &VmDir) -> Result<()> {
 fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
     ensure!(
         provision::marker(paths).exists(),
-        "there is no base image yet; run `send_it provision` first"
+        "there is no base image yet; run `sendit provision` first"
     );
     ensure!(
         provision::base_revision(paths)? >= provision::BASE_REVISION,
-        "the base image is outdated; rebuild it with `send_it provision --force`"
+        "the base image is outdated; rebuild it with `sendit provision --force`"
     );
     let base = VmDir::new(paths.base_dir());
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
@@ -232,7 +232,7 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
     let metadata = toml::to_string(&Metadata {
         project_path: project.root.clone(),
         base_revision: provision::BASE_REVISION,
-        send_it_version: env!("CARGO_PKG_VERSION").into(),
+        sendit_version: env!("CARGO_PKG_VERSION").into(),
         created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     })?;
     fs::write(metadata_file(&partial), metadata)?;
@@ -249,7 +249,7 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
         .len();
     if current > settings.disk_size.0 {
         eprintln!(
-            "warning: the disk of {} is already {} and can't shrink to {}; `send_it reset` recreates it",
+            "warning: the disk of {} is already {} and can't shrink to {}; `sendit reset` recreates it",
             paths.display(dir.path()),
             ByteSize(current),
             settings.disk_size
