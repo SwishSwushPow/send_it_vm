@@ -27,11 +27,6 @@ apt-get -y install --no-install-recommends \
 apt-get -y autoremove --purge
 apt-get clean
 
-# --- Rust -------------------------------------------------------------------
-sudo -u "$user" -H bash -c \
-    'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs |
-         sh -s -- -y --profile minimal -c clippy -c rustfmt'
-
 # --- Identity ---------------------------------------------------------------
 hostnamectl set-hostname sendit
 sed -i '/^127\.0\.1\.1\s/d' /etc/hosts
@@ -167,9 +162,10 @@ systemctl enable sendit-ssh-hostkeys.service ssh.service
 # --- Custom scripts ---------------------------------------------------------
 # The user's scripts from ~/.config/sendit/provision-scripts, in name order.
 # They run as the login user in a login shell from its home directory, so
-# they see the same environment as the console (e.g. cargo on the PATH), and
-# use sudo for anything that needs root. sudo keeps DEBIAN_FRONTEND meanwhile,
-# so apt-get doesn't stop at configuration prompts.
+# they see the same environment as the console (e.g. PATH changes earlier
+# scripts made in ~/.profile), and use sudo for anything that needs root.
+# sudo keeps DEBIAN_FRONTEND meanwhile, so apt-get doesn't stop at
+# configuration prompts.
 echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
 while read -r file name; do
     echo "sendit: running custom script $name"
