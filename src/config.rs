@@ -13,21 +13,25 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
+use clap::Args;
 use serde::Deserialize;
 
 use crate::paths::{Paths, Project};
 use crate::util;
 
-pub const DEFAULT_CPUS: u32 = 2;
-pub const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
-pub const DEFAULT_DISK_SIZE: ByteSize = ByteSize::gib(64);
+const DEFAULT_CPUS: u32 = 2;
+const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
+const DEFAULT_DISK_SIZE: ByteSize = ByteSize::gib(64);
 
 const MIN_MEMORY: ByteSize = ByteSize::mib(512);
 const MIN_DISK_SIZE: ByteSize = ByteSize::gib(8);
 
+/// The guest's login user, created by `assets/user-data.yaml`.
+pub const GUEST_USER: &str = "dev";
+
 /// The guest user's home directory. The project directory is mounted below
 /// it under its own name, e.g. `~/Code/app` at `/home/dev/app`.
-pub const GUEST_HOME: &str = "/home/dev";
+const GUEST_HOME: &str = "/home/dev";
 
 /// A size in bytes, written with a binary unit: `512M`, `4G`, `64GiB`, `1T`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -41,6 +45,24 @@ impl ByteSize {
 
     pub const fn gib(n: u64) -> Self {
         Self(n << 30)
+    }
+}
+
+impl ByteSize {
+    /// Formats the size for humans, rounded to one decimal, e.g. `1.8 GiB`.
+    pub fn approx(self) -> String {
+        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+        let mut size = self.0 as f64;
+        let mut unit = 0;
+        while size >= 1024.0 && unit < UNITS.len() - 1 {
+            size /= 1024.0;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{} B", self.0)
+        } else {
+            format!("{size:.1} {}", UNITS[unit])
+        }
     }
 }
 
@@ -145,11 +167,17 @@ pub struct Settings {
     pub expose_git: Option<bool>,
 }
 
-/// Optional CPUs and memory for provisioning (`[provision]` table or CLI flags).
-#[derive(Clone, Debug, Default, Deserialize)]
+/// Optional CPUs and memory: the `[provision]` table, or the flags that
+/// `run` and `provision` share.
+#[derive(Args, Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
+    /// Number of virtual CPUs
+    #[arg(long)]
     pub cpus: Option<u32>,
+
+    /// Memory size, e.g. 4G or 512M
+    #[arg(long)]
     pub memory: Option<ByteSize>,
 }
 
@@ -272,9 +300,7 @@ impl Config {
         settings.validate()?;
         Ok(settings)
     }
-}
 
-impl Config {
     /// Merges the layers that apply to provisioning with the CLI flags.
     pub fn resolve_provision(&self, cli: &Resources) -> Result<ProvisionSettings> {
         let mut cpus = self.defaults.cpus.unwrap_or(DEFAULT_CPUS);
@@ -398,6 +424,7 @@ impl VmSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempDir;
     use std::fs;
 
     impl Config {
@@ -423,6 +450,18 @@ mod tests {
         assert_eq!(ByteSize::gib(64).to_string(), "64 GiB");
         assert_eq!(ByteSize::mib(1536).to_string(), "1536 MiB");
         assert_eq!(ByteSize(100).to_string(), "100 B");
+    }
+
+    #[test]
+    fn formats_approximate_sizes() {
+        assert_eq!(ByteSize(512).approx(), "512 B");
+        assert_eq!(ByteSize(1536).approx(), "1.5 KiB");
+        assert_eq!(ByteSize(1_932_735_283).approx(), "1.8 GiB");
+    }
+
+    #[test]
+    fn guest_home_belongs_to_guest_user() {
+        assert_eq!(GUEST_HOME, format!("/home/{GUEST_USER}"));
     }
 
     #[test]
@@ -507,29 +546,23 @@ mod tests {
         dir: PathBuf,
         paths: Paths,
         project: Project,
+        _temp: TempDir,
     }
 
     impl Fixture {
         fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("sendit-test-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
+            let temp = TempDir::new(name);
+            let dir = temp.path().to_path_buf();
             fs::create_dir_all(dir.join("home/extra")).unwrap();
             fs::create_dir_all(dir.join("proj")).unwrap();
-            let dir = dir.canonicalize().unwrap();
             let paths = Paths::new(dir.join("home"));
             let project = Project::at(&dir.join("proj")).unwrap();
             Self {
                 dir,
                 paths,
                 project,
+                _temp: temp,
             }
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
         }
     }
 

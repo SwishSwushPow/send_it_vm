@@ -1,4 +1,8 @@
 //! Building the `VZVirtualMachineConfiguration` for a VM directory.
+//!
+//! objc2-virtualization marks every method `unsafe`. Unless a `SAFETY`
+//! comment says otherwise, the `unsafe` blocks here only call them with
+//! valid, retained objects on the main thread.
 
 use std::ffi::CString;
 use std::fs;
@@ -12,7 +16,7 @@ use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
 use objc2_virtualization::*;
 
-use super::{VmDir, VmSpec};
+use super::{VmDir, VmSpec, ns_message};
 use crate::mounts::Share;
 use crate::util::if_exists;
 
@@ -22,6 +26,8 @@ pub fn build(
     serial_ports: &[&VZSerialPortAttachment],
 ) -> Result<Retained<VZVirtualMachineConfiguration>> {
     unsafe {
+        // `Config::resolve` has checked these against the host already; the
+        // framework's own limits are the ones that count, though.
         let min_cpus = VZVirtualMachineConfiguration::minimumAllowedCPUCount();
         let max_cpus = VZVirtualMachineConfiguration::maximumAllowedCPUCount();
         ensure!(
@@ -141,21 +147,21 @@ fn directory_share(share: &Share) -> Result<Retained<VZDirectorySharingDeviceCon
 
 /// Loads the VM's persistent machine identifier, creating it on first use.
 fn machine_identifier(path: &Path) -> Result<Retained<VZGenericMachineIdentifier>> {
-    unsafe {
-        let bytes =
-            if_exists(fs::read(path)).with_context(|| format!("reading {}", path.display()))?;
-        if let Some(bytes) = bytes {
-            return VZGenericMachineIdentifier::initWithDataRepresentation(
+    load_or_create(
+        path,
+        "machine identifier",
+        |bytes| unsafe {
+            VZGenericMachineIdentifier::initWithDataRepresentation(
                 VZGenericMachineIdentifier::alloc(),
-                &NSData::with_bytes(&bytes),
+                &NSData::with_bytes(bytes),
             )
-            .with_context(|| format!("invalid machine identifier in {}", path.display()));
-        }
-        let id = VZGenericMachineIdentifier::new();
-        fs::write(path, id.dataRepresentation().to_vec())
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok(id)
-    }
+        },
+        || {
+            let id = unsafe { VZGenericMachineIdentifier::new() };
+            let bytes = unsafe { id.dataRepresentation() }.to_vec();
+            (id, bytes)
+        },
+    )
 }
 
 fn efi_variable_store(path: &Path) -> Result<Retained<VZEFIVariableStore>> {
@@ -178,21 +184,42 @@ fn efi_variable_store(path: &Path) -> Result<Retained<VZEFIVariableStore>> {
 
 /// Loads the VM's persistent MAC address, creating a random one on first use.
 fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
-    unsafe {
-        let text = if_exists(fs::read_to_string(path))
-            .with_context(|| format!("reading {}", path.display()))?;
-        if let Some(text) = text {
-            return VZMACAddress::initWithString(
-                VZMACAddress::alloc(),
-                &NSString::from_str(text.trim()),
-            )
-            .with_context(|| format!("invalid MAC address in {}", path.display()));
-        }
-        let mac = VZMACAddress::randomLocallyAdministeredAddress();
-        fs::write(path, mac.string().to_string())
-            .with_context(|| format!("writing {}", path.display()))?;
-        Ok(mac)
+    load_or_create(
+        path,
+        "MAC address",
+        |bytes| {
+            let text = std::str::from_utf8(bytes).ok()?;
+            unsafe {
+                VZMACAddress::initWithString(
+                    VZMACAddress::alloc(),
+                    &NSString::from_str(text.trim()),
+                )
+            }
+        },
+        || {
+            let mac = unsafe { VZMACAddress::randomLocallyAdministeredAddress() };
+            let text = unsafe { mac.string() }.to_string();
+            (mac, text.into_bytes())
+        },
+    )
+}
+
+/// Loads a value the VM keeps across boots from `path` with `parse`, or
+/// on first use makes one with `create` and saves its bytes there.
+fn load_or_create<T>(
+    path: &Path,
+    what: &str,
+    parse: impl FnOnce(&[u8]) -> Option<T>,
+    create: impl FnOnce() -> (T, Vec<u8>),
+) -> Result<T> {
+    if let Some(bytes) =
+        if_exists(fs::read(path)).with_context(|| format!("reading {}", path.display()))?
+    {
+        return parse(&bytes).with_context(|| format!("invalid {what} in {}", path.display()));
     }
+    let (value, bytes) = create();
+    fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    Ok(value)
 }
 
 /// A file URL for `path`, built from its bytes so that paths which aren't
@@ -210,6 +237,6 @@ fn file_url(path: &Path) -> Result<Retained<NSURL>> {
     })
 }
 
-pub fn ns_error(error: Retained<NSError>) -> anyhow::Error {
-    anyhow::anyhow!("{}", error.localizedDescription())
+fn ns_error(error: Retained<NSError>) -> anyhow::Error {
+    anyhow::anyhow!(ns_message(&error))
 }

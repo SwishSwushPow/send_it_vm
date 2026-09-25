@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ByteSize, VmSettings};
+use crate::config::{ByteSize, GUEST_USER, VmSettings};
 use crate::image;
 use crate::mounts;
 use crate::paths::{Paths, Project};
@@ -54,12 +54,13 @@ impl Metadata {
     }
 }
 
-fn metadata_file(dir: &VmDir) -> PathBuf {
-    dir.path().join("project.toml")
+/// The directory of the project's VM.
+pub fn dir(paths: &Paths, project: &Project) -> VmDir {
+    VmDir::new(paths.vm_dir(project))
 }
 
 pub fn metadata(dir: &VmDir) -> Result<Metadata> {
-    let path = metadata_file(dir);
+    let path = dir.metadata();
     util::read_toml(&path)?.with_context(|| format!("{} is missing", path.display()))
 }
 
@@ -72,7 +73,7 @@ pub enum State {
 }
 
 pub fn state(dir: &VmDir) -> Result<State> {
-    let path = lock_file(dir);
+    let path = dir.lock();
     let Some(mut file) = util::if_exists(File::open(&path))
         .with_context(|| format!("opening {}", path.display()))?
     else {
@@ -114,7 +115,7 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 /// Boots the project's VM, creating it first if needed, and attaches the
 /// console until it stops.
 pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    let dir = VmDir::new(paths.vm_dir(project));
+    let dir = dir(paths, project);
     if !dir.path().exists() {
         create(paths, project, &dir)?;
     }
@@ -138,7 +139,7 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
-        shares: mounts::prepare(settings, &dir.path().join("run/meta"))?,
+        shares: mounts::prepare(settings, &dir.meta())?,
         seed: None,
         provision_log: None,
     };
@@ -147,7 +148,7 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
 
 /// Asks the project's running VM to shut down and waits until it has.
 pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
-    let dir = VmDir::new(paths.vm_dir(project));
+    let dir = dir(paths, project);
     let pid = match state(&dir)? {
         State::Stopped => {
             eprintln!("The VM is not running.");
@@ -180,14 +181,12 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
 /// Replaces this process with an SSH session to the project's running VM,
 /// as root if `root`, running `command` if given.
 pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> Result<()> {
-    let dir = VmDir::new(paths.vm_dir(project));
+    let dir = dir(paths, project);
     ensure!(
         state(&dir)? != State::Stopped,
         "the VM is not running; start it with `sendit run`"
     );
-    let mac = fs::read_to_string(dir.mac())
-        .with_context(|| format!("reading {}", dir.mac().display()))?;
-    let ip = net::lease_for(mac.trim())?.with_context(|| {
+    let ip = net::vm_ip(&dir)?.with_context(|| {
         format!(
             "the VM has no IP address in {} yet; it may still be booting",
             net::LEASES_FILE
@@ -197,7 +196,7 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
     let (user, key) = if root {
         ("root", paths.root_ssh_key())
     } else {
-        ("dev", paths.ssh_key())
+        (GUEST_USER, paths.ssh_key())
     };
     ensure!(
         key.exists(),
@@ -206,7 +205,7 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
     );
     // Each VM gets its own known_hosts: IP addresses are reused across VMs,
     // but a VM's host keys stay the same for its lifetime.
-    let known_hosts = dir.path().join("known_hosts");
+    let known_hosts = dir.known_hosts();
     let error = Command::new("ssh")
         .arg("-i")
         .arg(&key)
@@ -273,7 +272,7 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
         sendit_version: env!("CARGO_PKG_VERSION").into(),
         created_at_unix: util::unix_now()?,
     })?;
-    fs::write(metadata_file(&partial), metadata)?;
+    fs::write(partial.metadata(), metadata)?;
 
     fs::rename(partial.path(), dir.path())
         .with_context(|| format!("moving the new VM to {}", dir.path().display()))
@@ -296,10 +295,6 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
     image::grow_disk(&dir.disk(), settings.disk_size)
 }
 
-fn lock_file(dir: &VmDir) -> PathBuf {
-    dir.path().join("run/lock")
-}
-
 /// Makes sure only one process runs a VM at a time; two would corrupt its
 /// disk. The lock is released when the returned file is closed, even if the
 /// process dies.
@@ -314,7 +309,7 @@ fn lock(dir: &VmDir) -> Result<File> {
 
 /// Takes the VM's lock without recording a PID; `None` if the VM is running.
 fn try_lock(dir: &VmDir) -> Result<Option<File>> {
-    let run = dir.path().join("run");
+    let run = dir.run_dir();
     // Not `create_dir_all`: if the VM directory was deleted meanwhile, it
     // must not come back as an empty shell.
     match fs::create_dir(&run) {
@@ -322,7 +317,7 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e).with_context(|| format!("creating {}", run.display())),
     }
-    let path = lock_file(dir);
+    let path = dir.lock();
     let file = File::options()
         .create(true)
         .truncate(false)

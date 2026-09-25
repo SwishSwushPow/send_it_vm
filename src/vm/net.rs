@@ -6,12 +6,25 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use super::VmDir;
 use crate::util;
 
 pub const LEASES_FILE: &str = "/var/db/dhcpd_leases";
 
+/// The IP address of the VM in `dir`, if it has one yet.
+pub fn vm_ip(dir: &VmDir) -> Result<Option<Ipv4Addr>> {
+    // Written when the VM first boots.
+    let path = dir.mac();
+    let mac = util::if_exists(fs::read_to_string(&path))
+        .with_context(|| format!("reading {}", path.display()))?;
+    match mac {
+        Some(mac) => lease_for(mac.trim()),
+        None => Ok(None),
+    }
+}
+
 /// The IP address most recently leased to `mac`, if any.
-pub fn lease_for(mac: &str) -> Result<Option<Ipv4Addr>> {
+fn lease_for(mac: &str) -> Result<Option<Ipv4Addr>> {
     let path = Path::new(LEASES_FILE);
     let text = util::if_exists(fs::read_to_string(path))
         .with_context(|| format!("reading {}", path.display()))?;

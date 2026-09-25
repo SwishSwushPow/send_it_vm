@@ -86,7 +86,7 @@ fn manifest(settings: &VmSettings) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ByteSize, Mount};
+    use crate::config::{ByteSize, GUEST_USER, Mount};
 
     fn settings(expose_git: bool) -> VmSettings {
         let mount = |host: &str, guest: &str, read_only| Mount {
@@ -138,5 +138,6 @@ mod tests {
         assert!(MOUNT_SCRIPT.contains("share)"));
         assert!(MOUNT_SCRIPT.contains("hide)"));
         assert!(MOUNT_SCRIPT.contains("workdir)"));
+        assert!(MOUNT_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
     }
 }

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::{ByteSize, MountSpec, Resources, Settings};
+use crate::config::{MountSpec, Resources, Settings};
 
 /// Light and fast per-project Debian VMs on macOS.
 #[derive(Debug, Parser)]
@@ -25,7 +25,7 @@ pub enum Command {
         force: bool,
 
         #[command(flatten)]
-        resources: ResourceArgs,
+        resources: Resources,
     },
     /// Boot the project's VM and attach to its console
     Run(RunArgs),
@@ -65,31 +65,10 @@ pub enum Command {
     },
 }
 
-/// CPUs and memory, shared by `run` and `provision`.
-#[derive(Debug, Args)]
-pub struct ResourceArgs {
-    /// Number of virtual CPUs
-    #[arg(long)]
-    pub cpus: Option<u32>,
-
-    /// Memory size, e.g. 4G or 512M
-    #[arg(long)]
-    pub memory: Option<ByteSize>,
-}
-
-impl ResourceArgs {
-    pub fn resources(&self) -> Resources {
-        Resources {
-            cpus: self.cpus,
-            memory: self.memory,
-        }
-    }
-}
-
 #[derive(Debug, Args)]
 pub struct RunArgs {
     #[command(flatten)]
-    pub resources: ResourceArgs,
+    pub resources: Resources,
 
     /// Extra directory to share: HOST[:GUEST][:ro|rw] (repeatable).
     /// Without GUEST it is mounted at /mnt/<name>.
@@ -116,6 +95,7 @@ impl RunArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ByteSize;
     use clap::CommandFactory;
 
     #[test]

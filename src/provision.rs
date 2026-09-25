@@ -8,6 +8,7 @@
 //! seed ISO too and run after the built-in provisioning, e.g. to install more
 //! tools.
 
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -199,7 +200,7 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
 
     let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
     ensure!(
-        contains(&output, SUCCESS_SENTINEL.as_bytes()),
+        String::from_utf8_lossy(&output).contains(SUCCESS_SENTINEL),
         "provisioning failed; see {} for details",
         paths.display(&log)
     );
@@ -278,7 +279,7 @@ fn build_seed_iso(
     for (i, script) in scripts.iter().enumerate() {
         let file = format!("{:03}.sh", i + 1);
         fs::write(custom.join(&file), &script.content)?;
-        list.push_str(&format!("{file} {}\n", script.name));
+        writeln!(list, "{file} {}", script.name)?;
     }
     fs::write(custom.join("list"), list)?;
 
@@ -294,13 +295,11 @@ fn build_seed_iso(
     Ok(iso)
 }
 
-fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GUEST_USER;
+    use crate::util::TempDir;
 
     #[test]
     fn assets_fit_together() {
@@ -312,12 +311,14 @@ mod tests {
         assert!(!PROVISION_SCRIPT.contains(SUCCESS_SENTINEL));
         assert!(PROVISION_SCRIPT.contains("SENDIT_PROVISION_${status}"));
         assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
+        assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
+        assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
     }
 
     #[test]
     fn collects_custom_scripts_in_name_order() {
-        let home = std::env::temp_dir().join(format!("sendit-scripts-{}", std::process::id()));
-        let paths = Paths::new(home.clone());
+        let home = TempDir::new("scripts");
+        let paths = Paths::new(home.path().to_path_buf());
         assert!(custom_scripts(&paths).unwrap().is_empty());
 
         let dir = paths.provision_scripts_dir();
@@ -326,7 +327,6 @@ mod tests {
             fs::write(dir.join(name), name).unwrap();
         }
         let scripts = custom_scripts(&paths).unwrap();
-        fs::remove_dir_all(&home).unwrap();
 
         let names: Vec<_> = scripts.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["10-editors.sh", "20-node.sh"]);

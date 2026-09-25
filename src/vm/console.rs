@@ -28,7 +28,7 @@ use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachment};
 
 /// Ctrl-]
-pub const ESCAPE_KEY: u8 = 0x1d;
+const ESCAPE_KEY: u8 = 0x1d;
 
 /// When the console is closed, how long guest output may keep arriving
 /// before the rest is dropped, in milliseconds. VZ may still be passing on
@@ -57,7 +57,7 @@ impl Console {
     /// one hanging up the terminal. Nothing in the guest reads keystrokes
     /// then, so Ctrl-C keeps raising SIGINT instead of reaching the guest.
     pub fn attach(log: Option<&Path>) -> Result<Self> {
-        let log_given = log.is_some();
+        let provisioning = log.is_some();
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
@@ -73,7 +73,7 @@ impl Console {
             })
             .transpose()?;
         let (output_read, output_write) = pipe()?;
-        let (main_output, log_output) = if log_given {
+        let (main_output, log_output) = if provisioning {
             (null_output()?, file_handle(output_write))
         } else {
             (file_handle(output_write), null_output()?)
@@ -85,7 +85,7 @@ impl Console {
             terminal: terminal_port()?,
             escapes,
             output: Some(OutputCopy::start(output_read, log)?),
-            _raw_mode: RawMode::enable(log_given)?,
+            _raw_mode: RawMode::enable(provisioning)?,
         })
     }
 
@@ -166,20 +166,12 @@ impl OutputCopy {
 /// guest side closes, or `finish` closes and no more output has come for
 /// `OUTPUT_GRACE_MS`.
 fn copy_output(from_guest: OwnedFd, to: libc::c_int, mut log: Option<File>, finish: OwnedFd) {
-    let mut fds = [&from_guest, &finish].map(|fd| libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    });
+    let mut fds = [pollfd(&from_guest), pollfd(&finish)];
     let mut timeout = -1;
     let mut buf = [0u8; 4096];
     loop {
-        // SAFETY: `fds` is valid for its length.
-        match unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } {
-            0 => return,
-            ..0 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
-            ..0 => return,
-            _ => {}
+        if matches!(poll(&mut fds, timeout), Ok(0) | Err(_)) {
+            return;
         }
         // Output first: finishing waits until none is pending.
         if fds[0].revents != 0 {
@@ -244,18 +236,10 @@ fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
 /// and the size follows as a "<rows> <cols>" line; the size alone goes again
 /// whenever `winch` is signalled.
 fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
-    let mut fds = [&winch, &from_guest].map(|fd| libc::pollfd {
-        fd: fd.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    });
+    let mut fds = [pollfd(&winch), pollfd(&from_guest)];
     let mut buf = [0u8; 64];
     loop {
-        // SAFETY: `fds` is valid for its length.
-        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
+        if poll(&mut fds, -1).is_err() {
             return;
         }
         let (mut asked, mut resized) = (false, false);
@@ -360,10 +344,11 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+/// Runs a system call again while a signal interrupts it. Negative results
+/// are errors.
+fn syscall(mut call: impl FnMut() -> isize) -> io::Result<usize> {
     loop {
-        // SAFETY: `buf` is valid for writes of its length.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        let n = call();
         if n >= 0 {
             return Ok(n as usize);
         }
@@ -374,20 +359,32 @@ fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     }
 }
 
+fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: `buf` is valid for writes of its length.
+    syscall(|| unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) })
+}
+
 fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         // SAFETY: `data` is valid for reads of its length.
-        let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err);
-        }
-        data = &data[n as usize..];
+        let n = syscall(|| unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) })?;
+        data = &data[n..];
     }
     Ok(())
+}
+
+/// Waits for input on `fds`; returns how many have events, 0 on timeout.
+fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
+    // SAFETY: `fds` is valid for its length.
+    syscall(|| unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } as isize)
+}
+
+fn pollfd(fd: &OwnedFd) -> libc::pollfd {
+    libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }
 }
 
 /// Terminal modes a program in the guest may have switched on and not off
@@ -451,6 +448,7 @@ impl Drop for RawMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempDir;
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -459,7 +457,8 @@ mod tests {
         let (from_guest, guest_writes) = pipe().unwrap();
         let (shown, to) = pipe().unwrap();
         let mut shown = File::from(shown);
-        let log_path = std::env::temp_dir().join(format!("sendit-log-{}", std::process::id()));
+        let temp = TempDir::new("log");
+        let log_path = temp.path().join("console.log");
         let log = File::create(&log_path).unwrap();
         let (finish_read, finish) = pipe().unwrap();
         let to_fd = to.as_raw_fd();
@@ -485,7 +484,6 @@ mod tests {
 
         assert_eq!(reader.join().unwrap().len(), data.len(), "shown");
         let logged = std::fs::read(&log_path).unwrap();
-        std::fs::remove_file(&log_path).unwrap();
         assert_eq!(logged.len(), data.len(), "logged");
         drop(guest_writes);
     }

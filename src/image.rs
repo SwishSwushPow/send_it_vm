@@ -218,10 +218,13 @@ pub fn grow_disk(path: &Path, size: ByteSize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempDir;
+    use std::os::unix::fs::MetadataExt;
 
     #[test]
     fn punches_zero_blocks() {
-        let path = std::env::temp_dir().join(format!("sendit-sparse-{}", std::process::id()));
+        let temp = TempDir::new("sparse");
+        let path = temp.path().join("disk.raw");
         let mut data = vec![0u8; 4 << 20];
         data[100] = 1;
         data[3 << 20] = 2;
@@ -230,9 +233,7 @@ mod tests {
 
         punch_zero_blocks(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), data);
-        use std::os::unix::fs::MetadataExt;
         let allocated = fs::metadata(&path).unwrap().blocks() * 512;
-        fs::remove_file(&path).unwrap();
         assert!(allocated <= 256 << 10, "allocated {allocated} bytes");
     }
 }

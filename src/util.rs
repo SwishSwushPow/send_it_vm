@@ -54,3 +54,29 @@ pub fn run_output(cmd: &mut Command) -> Result<Vec<u8>> {
 pub fn unix_now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
+
+/// A directory for a test, deleted again when dropped.
+#[cfg(test)]
+pub struct TempDir(std::path::PathBuf);
+
+#[cfg(test)]
+impl TempDir {
+    /// Creates an empty, canonical directory unique to `name` and this process.
+    pub fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("sendit-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        Self(dir.canonicalize().unwrap())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}

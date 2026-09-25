@@ -3,6 +3,10 @@
 //! The VM lives on the main dispatch queue: `run` creates it on the main
 //! thread and then drives the main run loop until the VM has stopped. This
 //! keeps all (non-`Send`) Objective-C objects on a single thread.
+//!
+//! objc2-virtualization marks every method `unsafe`. Unless a `SAFETY`
+//! comment says otherwise, the `unsafe` blocks here only call them with
+//! valid, retained objects on the main thread.
 
 mod config;
 mod console;
@@ -11,7 +15,7 @@ pub mod net;
 use std::cell::RefCell;
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -66,8 +70,33 @@ impl VmDir {
         Self(dir)
     }
 
-    pub fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &Path {
         &self.0
+    }
+
+    /// A project VM's metadata, written when it is created.
+    pub fn metadata(&self) -> PathBuf {
+        self.0.join("project.toml")
+    }
+
+    /// The SSH host keys `sendit ssh` has seen for this VM.
+    pub fn known_hosts(&self) -> PathBuf {
+        self.0.join("known_hosts")
+    }
+
+    /// State of the current run: the lock and the meta share.
+    pub fn run_dir(&self) -> PathBuf {
+        self.0.join("run")
+    }
+
+    /// Held by the `sendit run` process of a running VM, and holds its PID.
+    pub fn lock(&self) -> PathBuf {
+        self.run_dir().join("lock")
+    }
+
+    /// The host side of the `sendit-meta` share.
+    pub fn meta(&self) -> PathBuf {
+        self.run_dir().join("meta")
     }
 
     pub fn disk(&self) -> PathBuf {
@@ -138,8 +167,7 @@ define_class!(
 
         #[unsafe(method(virtualMachine:didStopWithError:))]
         fn did_stop_with_error(&self, _vm: &VZVirtualMachine, error: &NSError) {
-            let message = error.localizedDescription().to_string();
-            self.ivars().stopped.replace(Some(Err(message)));
+            self.ivars().stopped.replace(Some(Err(ns_message(error))));
         }
     }
 );
@@ -147,6 +175,7 @@ define_class!(
 impl VmDelegate {
     fn new(state: Rc<VmState>) -> Retained<Self> {
         let this = Self::alloc().set_ivars(state);
+        // SAFETY: NSObject's `init` takes no arguments and returns the object.
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -158,6 +187,7 @@ impl VmDelegate {
 /// VM forcibly.
 pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     // The VM runs on the main dispatch queue, which only the main thread drains.
+    // SAFETY: plain libc call without arguments.
     ensure!(
         unsafe { libc::pthread_main_np() } == 1,
         "vm::run must be called on the main thread"
@@ -184,9 +214,9 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
 
     let start_state = state.clone();
     let on_start = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: VZ passes a valid NSError or null.
         if let Some(error) = unsafe { error.as_ref() } {
-            let message = error.localizedDescription().to_string();
-            start_state.start_error.replace(Some(message));
+            start_state.start_error.replace(Some(ns_message(error)));
         }
     });
     catch_objc(|| unsafe { vm.startWithCompletionHandler(&on_start) })?;
@@ -257,6 +287,10 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     result
 }
 
+fn ns_message(error: &NSError) -> String {
+    error.localizedDescription().to_string()
+}
+
 /// Runs `f`, turning an Objective-C exception (which Rust can't unwind
 /// through) into an error.
 fn catch_objc<R>(f: impl FnOnce() -> R) -> Result<R> {
@@ -290,8 +324,9 @@ fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) -> bool {
     }
     let state = state.clone();
     let on_stop = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: VZ passes a valid NSError or null.
         let result = match unsafe { error.as_ref() } {
-            Some(error) => Err(error.localizedDescription().to_string()),
+            Some(error) => Err(ns_message(error)),
             None => Ok(()),
         };
         state.stopped.replace(Some(result));

@@ -88,16 +88,20 @@ apply_size() {
     stty -F /dev/hvc0 rows "$1" cols "$2"
 }
 
+# Prints $1 if it looks like a terminal name.
+terminal_name() {
+    case $1 in
+        *[!A-Za-z0-9._+-]*) ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 # Terminal types without a terminfo entry here (such as xterm-ghostty) would
 # break programs, so they fall back to xterm-256color.
 write_env() {
-    local term=$1 colorterm=$2
-    case $term in
-        *[!A-Za-z0-9._+-]*) term= ;;
-    esac
-    case $colorterm in
-        *[!A-Za-z0-9._+-]*) colorterm= ;;
-    esac
+    local term colorterm
+    term=$(terminal_name "$1")
+    colorterm=$(terminal_name "$2")
     if [ -z "$term" ] || ! infocmp "$term" > /dev/null 2>&1; then
         term=xterm-256color
     fi
