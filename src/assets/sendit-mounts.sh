@@ -7,10 +7,12 @@
 # Manifest lines, applied in order:
 #   share <virtiofs tag> <ro|rw> <guest path>
 #   hide <guest path>     (masks a directory or file with an empty read-only one)
+#   workdir <guest path>  (where interactive login shells start)
 set -u
 
 user=dev
 status=0
+profile=/etc/profile.d/sendit-workdir.sh
 
 fail() {
     echo "sendit-mounts: $*" >&2
@@ -27,6 +29,8 @@ mkpoint() {
         "/home/$user"/*) chown "$user:" "$1" ;;
     esac
 }
+
+rm -f "$profile"
 
 while read -r kind rest; do
     case $kind in
@@ -50,6 +54,14 @@ while read -r kind rest; do
                 # A file, e.g. the .git file of a worktree.
                 mount --bind -o ro /dev/null "$path" || fail "could not hide $path"
             fi
+            ;;
+        workdir)
+            # Single-quote the path for the profile script.
+            quoted=$(printf '%s' "$rest" | sed "s/'/'\\\\''/g")
+            cat > "$profile" <<EOF || fail "could not write $profile"
+# Written by sendit-mounts on boot: start login shells in the project.
+[ "\$PWD" = "\$HOME" ] && cd '$quoted' 2>/dev/null
+EOF
             ;;
         '' | '#'*) ;;
         *) fail "unknown manifest line: $kind $rest" ;;

@@ -23,8 +23,9 @@ pub const DEFAULT_DISK_SIZE: ByteSize = ByteSize::gib(64);
 const MIN_MEMORY: ByteSize = ByteSize::mib(512);
 const MIN_DISK_SIZE: ByteSize = ByteSize::gib(8);
 
-/// Where the project directory is mounted inside the guest.
-pub const GUEST_WORKSPACE: &str = "/workspace";
+/// The guest user's home directory. The project directory is mounted below
+/// it under its own name, e.g. `~/Code/app` at `/home/dev/app`.
+pub const GUEST_HOME: &str = "/home/dev";
 
 /// A size in bytes, written with a binary unit: `512M`, `4G`, `64GiB`, `1T`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -216,7 +217,7 @@ impl Config {
         let mut expose_git = false;
         let mut mounts = vec![Mount {
             host: project.root.clone(),
-            guest: PathBuf::from(GUEST_WORKSPACE),
+            guest: project_guest_path(project),
             read_only: false,
         }];
 
@@ -241,6 +242,11 @@ impl Config {
         settings.validate()?;
         Ok(settings)
     }
+}
+
+fn project_guest_path(project: &Project) -> PathBuf {
+    let name = project.root.file_name().unwrap_or("project".as_ref());
+    Path::new(GUEST_HOME).join(name)
 }
 
 fn resolve_mount(paths: &Paths, spec: &MountSpec, base: Option<&Path>) -> Result<Mount> {
@@ -461,7 +467,7 @@ mod tests {
         assert_eq!(
             mounts,
             [
-                (fx.project.root.clone(), PathBuf::from("/workspace"), false),
+                (fx.project.root.clone(), PathBuf::from("/home/dev/proj"), false),
                 (fx.dir.join("home/extra"), PathBuf::from("/mnt/extra"), true),
                 (fx.dir.join("proj"), PathBuf::from("/data"), false),
             ]
@@ -490,7 +496,7 @@ mod tests {
         };
         assert!(resolve("", cli("proj:data")).is_err());
         assert!(resolve("", cli("proj:/")).is_err());
-        assert!(resolve("", cli("proj:/workspace")).is_err());
+        assert!(resolve("", cli("proj:/home/dev/proj")).is_err());
         assert!(resolve("", cli("missing:/data")).is_err());
     }
 }

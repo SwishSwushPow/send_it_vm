@@ -41,7 +41,7 @@ echo '127.0.1.1 sendit' >> /etc/hosts
     printf '\033[1;38;5;208m'
     cat "$seed/banner.txt"
     printf '\033[0m'
-    echo '  Light and fast VMs. Your project is in /workspace.'
+    echo '  Light and fast VMs. Your project is in your home directory.'
     echo '  Logging out of the console (exit or Ctrl-D) shuts the VM down.'
     echo
 } > /etc/motd
