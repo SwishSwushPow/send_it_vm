@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ByteSize, GUEST_USER, VmSettings};
 use crate::image;
 use crate::mounts;
-use crate::paths::{Paths, Project};
+use crate::paths::{ImageName, Paths, Project};
 use crate::provision::{self, BaseState};
 use crate::util;
 use crate::vm::{self, VmDir, VmSpec, net};
@@ -250,14 +250,15 @@ pub fn delete(dir: &VmDir) -> Result<()> {
 }
 
 fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
-    match provision::base_state(paths)? {
+    let image = ImageName::default();
+    match provision::base_state(paths, &image)? {
         BaseState::Missing => bail!("there is no base image yet; run `sendit provision` first"),
         BaseState::Outdated => {
             bail!("the base image is outdated; rebuild it with `sendit provision --force`")
         }
         BaseState::ScriptsChanged | BaseState::Current => {}
     }
-    let base = VmDir::new(paths.base_dir());
+    let base = VmDir::new(paths.image_dir(&image));
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     let _ = fs::remove_dir_all(partial.path());
     fs::create_dir_all(partial.path())

@@ -56,6 +56,6 @@ Scripts in `~/.config/sendit/provision-scripts/*.sh` run in name order at the en
 
 Nothing is written into project directories.
 
-- `~/.cache/sendit/`: Debian downloads, the base image, and SSH keys
+- `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 - `~/.config/sendit/`: configuration and custom provisioning scripts

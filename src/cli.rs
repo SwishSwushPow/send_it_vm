@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{MountSpec, Resources, Settings};
+use crate::paths::ImageName;
 
 /// Light and fast per-project Debian VMs on macOS.
 #[derive(Debug, Parser)]
@@ -18,9 +19,18 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Download Debian and build the shared base image
+    /// Download Debian and build a base image
     Provision {
-        /// Rebuild the base image even if it already exists
+        /// The image to build [default: default]
+        #[arg(value_name = "IMAGE", conflicts_with = "all")]
+        image: Option<ImageName>,
+
+        /// Build every image: `default`, those with their own directory of
+        /// provisioning scripts, and those built before
+        #[arg(long)]
+        all: bool,
+
+        /// Rebuild images even if they already exist
         #[arg(long)]
         force: bool,
 
@@ -156,11 +166,28 @@ mod tests {
     fn parses_provision_flags() {
         let cli =
             Cli::try_parse_from(["sendit", "provision", "--cpus", "6", "--memory", "12G"]).unwrap();
-        let Command::Provision { force, resources } = cli.command else {
+        let Command::Provision {
+            image,
+            all,
+            force,
+            resources,
+        } = cli.command
+        else {
             panic!("expected provision")
         };
-        assert!(!force);
+        assert_eq!(image, None);
+        assert!(!all && !force);
         assert_eq!(resources.cpus, Some(6));
         assert_eq!(resources.memory, Some(ByteSize::gib(12)));
+
+        let cli = Cli::try_parse_from(["sendit", "provision", "rust", "--force"]).unwrap();
+        let Command::Provision { image, force, .. } = cli.command else {
+            panic!("expected provision")
+        };
+        assert_eq!(image, Some("rust".parse().unwrap()));
+        assert!(force);
+
+        assert!(Cli::try_parse_from(["sendit", "provision", "rust", "--all"]).is_err());
+        assert!(Cli::try_parse_from(["sendit", "provision", "Rust"]).is_err());
     }
 }

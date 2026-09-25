@@ -1,14 +1,17 @@
 //! Where sendit keeps its state. Nothing is ever written into project folders:
 //!
-//! - `~/.cache/sendit/`: downloads, the provisioned base image, provisioning scratch
+//! - `~/.cache/sendit/`: downloads, the provisioned base images, provisioning scratch
 //! - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 //! - `~/.config/sendit/config.toml`: user configuration
-//! - `~/.config/sendit/provision-scripts/`: custom provisioning scripts for the base image
+//! - `~/.config/sendit/provision-scripts/`: custom provisioning scripts for
+//!   all base images, and in `<image>/` for one of them
 
+use std::fmt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -39,19 +42,30 @@ impl Paths {
         self.cache_dir().join("downloads")
     }
 
-    /// The provisioned base image that project VMs are cloned from.
-    pub fn base_dir(&self) -> PathBuf {
+    /// Parent of all provisioned base images.
+    pub fn images_dir(&self) -> PathBuf {
+        self.cache_dir().join("images")
+    }
+
+    /// A provisioned base image that project VMs are cloned from.
+    pub fn image_dir(&self, image: &ImageName) -> PathBuf {
+        self.images_dir().join(image.as_str())
+    }
+
+    /// Where a base image is built before it replaces `image_dir`.
+    pub fn image_partial_dir(&self, image: &ImageName) -> PathBuf {
+        self.images_dir().join(format!(".{image}.partial"))
+    }
+
+    /// The single base image of sendit versions before named images; it
+    /// becomes the `default` image.
+    pub fn legacy_base_dir(&self) -> PathBuf {
         self.cache_dir().join("base")
     }
 
-    /// Where a base image is built before it replaces `base_dir`.
-    pub fn base_partial_dir(&self) -> PathBuf {
-        self.cache_dir().join("base.partial")
-    }
-
-    /// Scratch space for provisioning runs (seed ISO, console log).
-    pub fn provision_dir(&self) -> PathBuf {
-        self.cache_dir().join("provision")
+    /// Scratch space for provisioning an image (seed ISO, console log).
+    pub fn provision_dir(&self, image: &ImageName) -> PathBuf {
+        self.cache_dir().join("provision").join(image.as_str())
     }
 
     /// The keypairs whose public keys are baked into the base image.
@@ -74,10 +88,15 @@ impl Paths {
         self.home.join(".config/sendit/config.toml")
     }
 
-    /// Custom provisioning scripts (`*.sh`), run in name order after the
-    /// built-in provisioning of the base image.
+    /// Custom provisioning scripts (`*.sh`) for all images, run in name order
+    /// after the built-in provisioning of a base image.
     pub fn provision_scripts_dir(&self) -> PathBuf {
         self.home.join(".config/sendit/provision-scripts")
+    }
+
+    /// Custom provisioning scripts for `image` only.
+    pub fn image_scripts_dir(&self, image: &ImageName) -> PathBuf {
+        self.provision_scripts_dir().join(image.as_str())
     }
 
     /// Parent of all project VM directories.
@@ -103,6 +122,49 @@ impl Paths {
             Ok(rest) => Path::new("~").join(rest).display().to_string(),
             Err(_) => path.display().to_string(),
         }
+    }
+}
+
+/// The name of a base image: lowercase letters, digits and dashes. It is
+/// part of paths, so nothing else is allowed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ImageName(String);
+
+impl ImageName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The image used when none is chosen.
+impl Default for ImageName {
+    fn default() -> Self {
+        Self("default".into())
+    }
+}
+
+impl FromStr for ImageName {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let valid = !s.is_empty()
+            && s.len() <= 64
+            && !s.starts_with('-')
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !valid {
+            bail!(
+                "invalid image name {s:?}: expected up to 64 lowercase letters, digits \
+                 and dashes, not starting with a dash"
+            );
+        }
+        Ok(Self(s.into()))
+    }
+}
+
+impl fmt::Display for ImageName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -161,9 +223,31 @@ mod tests {
     }
 
     #[test]
+    fn validates_image_names() {
+        for name in ["default", "rust", "node-22", "1"] {
+            assert_eq!(name.parse::<ImageName>().unwrap().as_str(), name);
+        }
+        for name in ["", "-x", "Rust", "a.b", "a/b", "..", "a b", &"x".repeat(65)] {
+            assert!(name.parse::<ImageName>().is_err(), "{name:?}");
+        }
+    }
+
+    #[test]
     fn layout() {
         let paths = Paths::new(PathBuf::from("/home/me"));
-        assert_eq!(paths.base_dir(), Path::new("/home/me/.cache/sendit/base"));
+        let rust: ImageName = "rust".parse().unwrap();
+        assert_eq!(
+            paths.image_dir(&rust),
+            Path::new("/home/me/.cache/sendit/images/rust")
+        );
+        assert_eq!(
+            paths.image_partial_dir(&rust),
+            Path::new("/home/me/.cache/sendit/images/.rust.partial")
+        );
+        assert_eq!(
+            paths.image_scripts_dir(&rust),
+            Path::new("/home/me/.config/sendit/provision-scripts/rust")
+        );
         assert_eq!(
             paths.config_file(),
             Path::new("/home/me/.config/sendit/config.toml")

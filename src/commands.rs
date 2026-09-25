@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 use anyhow::{Result, bail, ensure};
 
 use crate::config::{ByteSize, VmSettings};
-use crate::paths::{Paths, Project};
+use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
 use crate::vm;
@@ -175,8 +175,9 @@ fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
 }
 
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    let base_dir = paths.base_dir();
-    let base_state = match provision::base_state(paths)? {
+    let image = ImageName::default();
+    let base_dir = paths.image_dir(&image);
+    let base_state = match provision::base_state(paths, &image)? {
         BaseState::Missing => "run `sendit provision`",
         BaseState::Outdated => "outdated; `sendit provision --force` rebuilds it",
         BaseState::ScriptsChanged => {

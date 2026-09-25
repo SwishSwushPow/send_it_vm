@@ -1,13 +1,16 @@
-//! Building the shared base image that project VMs are cloned from.
+//! Building the named base images that project VMs are cloned from.
 //!
 //! The Debian cloud image boots with a cloud-init seed ISO attached, runs
-//! `assets/provision.sh` and powers itself off. The image is built in
-//! `base.partial/` and only replaces `base/` once it succeeded.
+//! `assets/provision.sh` and powers itself off. An image is built in
+//! `images/.<name>.partial/` and only replaces `images/<name>/` once it
+//! succeeded.
 //!
-//! Custom scripts from `~/.config/sendit/provision-scripts/` travel on the
-//! seed ISO too and run after the built-in provisioning, e.g. to install more
-//! tools.
+//! Custom scripts travel on the seed ISO too and run after the built-in
+//! provisioning, e.g. to install more tools: those in
+//! `~/.config/sendit/provision-scripts/` for every image, and those in its
+//! `<name>/` subdirectory for that image only.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{ByteSize, ProvisionSettings};
 use crate::image;
-use crate::paths::Paths;
+use crate::paths::{ImageName, Paths};
 use crate::util;
 use crate::vm::{self, VmDir, VmSpec};
 
@@ -63,8 +66,11 @@ struct ScriptStamp {
     sha256: String,
 }
 
-/// A custom provisioning script from `Paths::provision_scripts_dir`.
+/// A custom provisioning script from `Paths::provision_scripts_dir`, or
+/// from `Paths::image_scripts_dir` of the image being built.
 struct CustomScript {
+    /// Relative to `Paths::provision_scripts_dir`, e.g. `10-apt.sh` or
+    /// `rust/20-cargo.sh`.
     name: String,
     content: Vec<u8>,
 }
@@ -97,15 +103,15 @@ pub enum BaseState {
     Current,
 }
 
-pub fn base_state(paths: &Paths) -> Result<BaseState> {
-    let base = VmDir::new(paths.base_dir());
+pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
+    let base = VmDir::new(paths.image_dir(image));
     let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
         return Ok(BaseState::Missing);
     };
     if marker.revision < BASE_REVISION {
         return Ok(BaseState::Outdated);
     }
-    let current: Vec<_> = custom_scripts(paths)?
+    let current: Vec<_> = custom_scripts(paths, image)?
         .iter()
         .map(CustomScript::stamp)
         .collect();
@@ -116,11 +122,67 @@ pub fn base_state(paths: &Paths) -> Result<BaseState> {
     })
 }
 
-/// The `*.sh` files in the custom scripts directory, in name order.
-fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
-    let dir = paths.provision_scripts_dir();
-    let Some(entries) = util::if_exists(fs::read_dir(&dir))
-        .with_context(|| format!("reading {}", dir.display()))?
+/// All images: `default`, and every image that has custom scripts of its
+/// own or has been provisioned, in name order.
+pub fn images(paths: &Paths) -> Result<Vec<ImageName>> {
+    let mut images = BTreeSet::from([ImageName::default()]);
+    for dir in [paths.provision_scripts_dir(), paths.images_dir()] {
+        let Some(entries) = util::if_exists(fs::read_dir(&dir))
+            .with_context(|| format!("reading {}", dir.display()))?
+        else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            // Partial images start with a dot, which names can't.
+            let name = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok());
+            if let Some(name) = name
+                && entry.path().is_dir()
+            {
+                images.insert(name);
+            }
+        }
+    }
+    Ok(images.into_iter().collect())
+}
+
+/// Moves the single base image of sendit versions before named images to
+/// the `default` image.
+pub fn migrate_legacy_base(paths: &Paths) -> Result<()> {
+    let legacy = paths.legacy_base_dir();
+    let default = paths.image_dir(&ImageName::default());
+    if !legacy.exists() || default.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(paths.images_dir())?;
+    // Another sendit process may have moved it meanwhile.
+    util::if_exists(fs::rename(&legacy, &default))
+        .with_context(|| format!("moving {} to {}", legacy.display(), default.display()))?;
+    Ok(())
+}
+
+/// The custom scripts for `image`, in file name order: the shared ones and
+/// the image's own, which replace shared ones of the same file name.
+fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
+    let mut scripts = BTreeMap::new();
+    for (file, content) in script_files(&paths.provision_scripts_dir())? {
+        let name = file.clone();
+        scripts.insert(file, CustomScript { name, content });
+    }
+    for (file, content) in script_files(&paths.image_scripts_dir(image))? {
+        let name = format!("{image}/{file}");
+        scripts.insert(file, CustomScript { name, content });
+    }
+    Ok(scripts.into_values().collect())
+}
+
+/// The names and contents of the `*.sh` files in `dir`.
+fn script_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let Some(entries) =
+        util::if_exists(fs::read_dir(dir)).with_context(|| format!("reading {}", dir.display()))?
     else {
         return Ok(Vec::new());
     };
@@ -139,20 +201,22 @@ fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
             path.display()
         );
         let content = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        scripts.push(CustomScript {
-            name: name.to_string(),
-            content,
-        });
+        scripts.push((name.to_string(), content));
     }
-    scripts.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(scripts)
 }
 
-pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Result<()> {
-    if marker_file(&VmDir::new(paths.base_dir())).exists() && !force {
+pub fn provision(
+    paths: &Paths,
+    name: &ImageName,
+    settings: &ProvisionSettings,
+    force: bool,
+) -> Result<()> {
+    let base = paths.image_dir(name);
+    if marker_file(&VmDir::new(base.clone())).exists() && !force {
         eprintln!(
-            "The base image in {} is already provisioned. Use --force to rebuild it.",
-            paths.display(&paths.base_dir())
+            "The {name} image in {} is already provisioned. Use --force to rebuild it.",
+            paths.display(&base)
         );
         return Ok(());
     }
@@ -160,14 +224,14 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
     let image = image::debian_image(paths)?;
     let public_key = ssh_public_key(&paths.ssh_key())?;
     let root_public_key = ssh_public_key(&paths.root_ssh_key())?;
-    let scripts = custom_scripts(paths)?;
+    let scripts = custom_scripts(paths, name)?;
 
-    let work = paths.provision_dir();
+    let work = paths.provision_dir(name);
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
     let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts)?;
 
-    let partial = VmDir::new(paths.base_partial_dir());
+    let partial = VmDir::new(paths.image_partial_dir(name));
     let _ = fs::remove_dir_all(partial.path());
     fs::create_dir_all(partial.path())?;
     image::clone_file(&image.path, &partial.disk())?;
@@ -175,7 +239,7 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
 
     let log = work.join("console.log");
     eprintln!(
-        "Provisioning the base image ({} CPUs, {} memory). This takes a few minutes; \
+        "Provisioning the {name} image ({} CPUs, {} memory). This takes a few minutes; \
          the console is logged to {}.",
         settings.cpus,
         settings.memory,
@@ -214,12 +278,11 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
     })?;
     fs::write(marker_file(&partial), marker)?;
 
-    let base = paths.base_dir();
     if base.exists() {
         fs::remove_dir_all(&base).with_context(|| format!("removing {}", base.display()))?;
     }
     fs::rename(partial.path(), &base)?;
-    eprintln!("Base image ready in {}.", paths.display(&base));
+    eprintln!("The {name} image is ready in {}.", paths.display(&base));
     Ok(())
 }
 
@@ -315,21 +378,91 @@ mod tests {
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
     }
 
+    fn image(name: &str) -> ImageName {
+        name.parse().unwrap()
+    }
+
     #[test]
     fn collects_custom_scripts_in_name_order() {
         let home = TempDir::new("scripts");
         let paths = Paths::new(home.path().to_path_buf());
-        assert!(custom_scripts(&paths).unwrap().is_empty());
+        let rust = image("rust");
+        assert!(custom_scripts(&paths, &rust).unwrap().is_empty());
 
         let dir = paths.provision_scripts_dir();
         fs::create_dir_all(dir.join("30-dir.sh")).unwrap();
         for name in ["20-node.sh", "10-editors.sh", ".hidden.sh", "notes.txt"] {
             fs::write(dir.join(name), name).unwrap();
         }
-        let scripts = custom_scripts(&paths).unwrap();
+        let names = |image: &ImageName| -> Vec<(String, String)> {
+            custom_scripts(&paths, image)
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.name, String::from_utf8(s.content).unwrap()))
+                .collect()
+        };
+        let shared = |name: &str| (name.to_string(), name.to_string());
+        assert_eq!(
+            names(&rust),
+            [shared("10-editors.sh"), shared("20-node.sh")]
+        );
 
-        let names: Vec<_> = scripts.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["10-editors.sh", "20-node.sh"]);
-        assert_eq!(scripts[0].content, b"10-editors.sh");
+        // The image's own scripts join in name order and replace shared
+        // ones of the same name; other images don't see them.
+        let own = paths.image_scripts_dir(&rust);
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("15-cargo.sh"), "cargo").unwrap();
+        fs::write(own.join("20-node.sh"), "no node").unwrap();
+        assert_eq!(
+            names(&rust),
+            [
+                shared("10-editors.sh"),
+                ("rust/15-cargo.sh".into(), "cargo".into()),
+                ("rust/20-node.sh".into(), "no node".into()),
+            ]
+        );
+        assert_eq!(
+            names(&ImageName::default()),
+            [shared("10-editors.sh"), shared("20-node.sh")]
+        );
+    }
+
+    #[test]
+    fn lists_images() {
+        let home = TempDir::new("images");
+        let paths = Paths::new(home.path().to_path_buf());
+        assert_eq!(images(&paths).unwrap(), [ImageName::default()]);
+
+        let scripts = paths.provision_scripts_dir();
+        fs::create_dir_all(scripts.join("rust")).unwrap();
+        fs::create_dir_all(scripts.join("Not An Image")).unwrap();
+        fs::write(scripts.join("node"), "a file").unwrap();
+        fs::create_dir_all(paths.image_dir(&image("go"))).unwrap();
+        fs::create_dir_all(paths.image_partial_dir(&image("zig"))).unwrap();
+        assert_eq!(
+            images(&paths).unwrap(),
+            [image("default"), image("go"), image("rust")]
+        );
+    }
+
+    #[test]
+    fn migrates_the_legacy_base_image() {
+        let home = TempDir::new("migrate");
+        let paths = Paths::new(home.path().to_path_buf());
+        migrate_legacy_base(&paths).unwrap();
+        assert!(!paths.images_dir().exists());
+
+        let legacy = paths.legacy_base_dir();
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("provisioned.toml"), "").unwrap();
+        migrate_legacy_base(&paths).unwrap();
+        assert!(!legacy.exists());
+        let default = paths.image_dir(&ImageName::default());
+        assert!(default.join("provisioned.toml").exists());
+
+        // An existing default image is never replaced.
+        fs::create_dir_all(&legacy).unwrap();
+        migrate_legacy_base(&paths).unwrap();
+        assert!(legacy.exists());
     }
 }

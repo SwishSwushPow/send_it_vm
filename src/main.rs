@@ -19,6 +19,7 @@ use crate::paths::{Paths, Project};
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::from_env()?;
+    provision::migrate_legacy_base(&paths)?;
     let cwd = std::env::current_dir()?;
     let project = || Project::at(cli.project.as_deref().unwrap_or(&cwd));
     let resolve = |project: &Project, cli: &Settings| {
@@ -39,9 +40,22 @@ fn main() -> Result<()> {
             }
             project_vm::run(&paths, &project, &settings)
         }
-        Command::Provision { force, resources } => {
+        Command::Provision {
+            image,
+            all,
+            force,
+            resources,
+        } => {
             let settings = Config::load(&paths)?.resolve_provision(resources)?;
-            provision::provision(&paths, &settings, *force)
+            let images = if *all {
+                provision::images(&paths)?
+            } else {
+                vec![image.clone().unwrap_or_default()]
+            };
+            for image in &images {
+                provision::provision(&paths, image, &settings, *force)?;
+            }
+            Ok(())
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),
