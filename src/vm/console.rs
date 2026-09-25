@@ -2,6 +2,10 @@
 //!
 //! Stdin is read on a helper thread and forwarded to the guest through a pipe,
 //! so the escape key (Ctrl-]) can be intercepted instead of reaching the guest.
+//! Guest output also goes through a pipe and a helper thread. VZ must never
+//! get the terminal itself: it makes the descriptors it is given
+//! non-blocking, and on a terminal stdin and stdout share that flag, so
+//! reading keystrokes would fail.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -41,7 +45,11 @@ impl Console {
         std::thread::spawn(move || forward_stdin(write_end, &counter));
 
         let (main_output, log) = match log {
-            None => (NSFileHandle::fileHandleWithStandardOutput(), None),
+            None => {
+                let (read_end, write_end) = pipe()?;
+                std::thread::spawn(move || copy_output(read_end, None));
+                (file_handle(write_end), None)
+            }
             Some(path) => {
                 let log = File::options()
                     .create(true)
@@ -49,7 +57,7 @@ impl Console {
                     .open(path)
                     .with_context(|| format!("opening {}", path.display()))?;
                 let (read_end, write_end) = pipe()?;
-                std::thread::spawn(move || tee_output(read_end, log));
+                std::thread::spawn(move || copy_output(read_end, Some(log)));
                 let port = serial_port(None, &file_handle(write_end));
                 // VZ needs handles backed by real file descriptors, which
                 // `fileHandleWithNullDevice` isn't.
@@ -101,12 +109,15 @@ fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
     )
 }
 
-/// Copies guest output to stdout and `log` until the guest side closes.
-fn tee_output(from_guest: OwnedFd, mut log: File) {
+/// Copies guest output to stdout, and to `log` if given, until the guest
+/// side closes.
+fn copy_output(from_guest: OwnedFd, mut log: Option<File>) {
     let mut buf = [0u8; 4096];
     while let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) {
         let _ = write_all(libc::STDOUT_FILENO, &buf[..n]);
-        let _ = log.write_all(&buf[..n]);
+        if let Some(log) = &mut log {
+            let _ = log.write_all(&buf[..n]);
+        }
     }
 }
 
