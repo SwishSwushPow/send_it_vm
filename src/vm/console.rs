@@ -19,6 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use objc2::AllocAnyThread;
@@ -29,6 +30,11 @@ use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachm
 /// Ctrl-]
 pub const ESCAPE_KEY: u8 = 0x1d;
 
+/// When the console is closed, how long guest output may keep arriving
+/// before the rest is dropped, in milliseconds. VZ may still be passing on
+/// what the guest wrote just before it stopped.
+const OUTPUT_GRACE_MS: libc::c_int = 100;
+
 pub struct Console {
     /// The login console, /dev/hvc0 in the guest.
     main: Retained<VZFileHandleSerialPortAttachment>,
@@ -38,6 +44,8 @@ pub struct Console {
     /// Carries the terminal's type and size, /dev/hvc2 in the guest.
     terminal: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
+    /// Finished on drop, before the terminal is restored.
+    output: Option<OutputCopy>,
     _raw_mode: Option<RawMode>,
 }
 
@@ -55,22 +63,20 @@ impl Console {
         let counter = escapes.clone();
         std::thread::spawn(move || forward_stdin(write_end, &counter));
 
-        let (main_output, log_output) = match log {
-            None => {
-                let (read_end, write_end) = pipe()?;
-                std::thread::spawn(move || copy_output(read_end, None));
-                (file_handle(write_end), null_output()?)
-            }
-            Some(path) => {
-                let log = File::options()
+        let log = log
+            .map(|path| {
+                File::options()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .with_context(|| format!("opening {}", path.display()))?;
-                let (read_end, write_end) = pipe()?;
-                std::thread::spawn(move || copy_output(read_end, Some(log)));
-                (null_output()?, file_handle(write_end))
-            }
+                    .with_context(|| format!("opening {}", path.display()))
+            })
+            .transpose()?;
+        let (output_read, output_write) = pipe()?;
+        let (main_output, log_output) = if log_given {
+            (null_output()?, file_handle(output_write))
+        } else {
+            (file_handle(output_write), null_output()?)
         };
 
         Ok(Self {
@@ -78,6 +84,7 @@ impl Console {
             log: serial_port(None, &log_output),
             terminal: terminal_port()?,
             escapes,
+            output: Some(OutputCopy::start(output_read, log)?),
             _raw_mode: RawMode::enable(log_given)?,
         })
     }
@@ -90,6 +97,16 @@ impl Console {
     /// How often the escape key has been pressed so far.
     pub fn escapes(&self) -> usize {
         self.escapes.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Console {
+    /// Waits until the guest's last output has been shown and logged, so
+    /// none of it lands after the terminal is restored or the log is read.
+    fn drop(&mut self) {
+        if let Some(output) = self.output.take() {
+            output.finish();
+        }
     }
 }
 
@@ -122,14 +139,61 @@ fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
     )
 }
 
-/// Copies guest output to stdout, and to `log` if given, until the guest
-/// side closes.
-fn copy_output(from_guest: OwnedFd, mut log: Option<File>) {
+/// The thread copying guest output to stdout and the log.
+struct OutputCopy {
+    /// Closing it tells the thread to finish.
+    finish: OwnedFd,
+    thread: JoinHandle<()>,
+}
+
+impl OutputCopy {
+    fn start(from_guest: OwnedFd, log: Option<File>) -> Result<Self> {
+        let (finish_read, finish) = pipe()?;
+        let thread = std::thread::spawn(move || {
+            copy_output(from_guest, libc::STDOUT_FILENO, log, finish_read)
+        });
+        Ok(Self { finish, thread })
+    }
+
+    /// Copies what is left, then waits for the thread to end.
+    fn finish(self) {
+        drop(self.finish);
+        let _ = self.thread.join();
+    }
+}
+
+/// Copies guest output to `to` (stdout), and to `log` if given, until the
+/// guest side closes, or `finish` closes and no more output has come for
+/// `OUTPUT_GRACE_MS`.
+fn copy_output(from_guest: OwnedFd, to: libc::c_int, mut log: Option<File>, finish: OwnedFd) {
+    let mut fds = [&from_guest, &finish].map(|fd| libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    let mut timeout = -1;
     let mut buf = [0u8; 4096];
-    while let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) {
-        let _ = write_all(libc::STDOUT_FILENO, &buf[..n]);
-        if let Some(log) = &mut log {
-            let _ = log.write_all(&buf[..n]);
+    loop {
+        // SAFETY: `fds` is valid for its length.
+        match unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } {
+            0 => return,
+            ..0 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+            ..0 => return,
+            _ => {}
+        }
+        // Output first: finishing waits until none is pending.
+        if fds[0].revents != 0 {
+            let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) else {
+                return;
+            };
+            let _ = write_all(to, &buf[..n]);
+            if let Some(log) = &mut log {
+                let _ = log.write_all(&buf[..n]);
+            }
+        } else if fds[1].revents != 0 {
+            // poll() skips negative descriptors.
+            fds[1].fd = -1;
+            timeout = OUTPUT_GRACE_MS;
         }
     }
 }
@@ -381,5 +445,48 @@ impl Drop for RawMode {
             libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn finishing_copies_pending_output() {
+        let (from_guest, guest_writes) = pipe().unwrap();
+        let (shown, to) = pipe().unwrap();
+        let mut shown = File::from(shown);
+        let log_path = std::env::temp_dir().join(format!("sendit-log-{}", std::process::id()));
+        let log = File::create(&log_path).unwrap();
+        let (finish_read, finish) = pipe().unwrap();
+        let to_fd = to.as_raw_fd();
+        let thread = std::thread::spawn(move || {
+            copy_output(from_guest, to_fd, Some(log), finish_read);
+            drop(to);
+        });
+        let reader = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            shown.read_to_end(&mut out).unwrap();
+            out
+        });
+
+        // More than a pipe holds, so the copy is still busy when asked to
+        // finish.
+        let data = vec![b'x'; 200_000];
+        write_all(guest_writes.as_raw_fd(), &data).unwrap();
+        // The guest side stays open, as VZ may keep it: finishing must
+        // not wait for it to close.
+        let start = Instant::now();
+        OutputCopy { finish, thread }.finish();
+        assert!(start.elapsed() < Duration::from_secs(1));
+
+        assert_eq!(reader.join().unwrap().len(), data.len(), "shown");
+        let logged = std::fs::read(&log_path).unwrap();
+        std::fs::remove_file(&log_path).unwrap();
+        assert_eq!(logged.len(), data.len(), "logged");
+        drop(guest_writes);
     }
 }
