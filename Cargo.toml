@@ -3,6 +3,11 @@ name = "send_it_vm"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "Light and fast per-project Debian VMs on macOS, for running coding agents without giving them the rest of the machine"
+repository = "https://github.com/SwishSwushPow/send_it_vm"
+readme = "readme.md"
+keywords = ["vm", "virtualization", "macos", "sandbox", "debian"]
+categories = ["command-line-utilities", "virtualization", "development-tools"]
 
 [[bin]]
 name = "sendit"
