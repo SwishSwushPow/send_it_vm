@@ -57,6 +57,17 @@ impl Metadata {
     }
 }
 
+/// The image `project` uses: the `chosen` one, else the one its VM was
+/// created from, else `default`.
+pub fn image(paths: &Paths, project: &Project, chosen: Option<&ImageName>) -> ImageName {
+    match chosen {
+        Some(image) => image.clone(),
+        None => metadata(&dir(paths, project))
+            .map(|metadata| metadata.image)
+            .unwrap_or_default(),
+    }
+}
+
 /// The directory of the project's VM.
 pub fn dir(paths: &Paths, project: &Project) -> VmDir {
     VmDir::new(paths.vm_dir(project))
@@ -120,18 +131,19 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let dir = dir(paths, project);
     if !dir.path().exists() {
-        create(paths, project, &dir, &settings.image)?;
+        let image = settings.image.clone().unwrap_or_default();
+        create(paths, project, &dir, &image)?;
     }
     let metadata = metadata(&dir)?;
-    ensure!(
-        metadata.image == settings.image,
-        "{} was created from the {} image, not {}; `sendit reset` deletes it so \
-         the next run starts over from the {} image",
-        paths.display(dir.path()),
-        metadata.image,
-        settings.image,
-        settings.image
-    );
+    if let Some(image) = &settings.image {
+        ensure!(
+            metadata.image == *image,
+            "{} was created from the {} image, not {image}; `sendit reset` deletes \
+             it so the next run starts over from the {image} image",
+            paths.display(dir.path()),
+            metadata.image,
+        );
+    }
     ensure!(
         !metadata.outdated(),
         "{} was created from an older base image that this version of sendit \
@@ -366,6 +378,29 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_the_image_a_vm_was_made_from() {
+        let temp = crate::util::TempDir::new("vm-image");
+        let paths = Paths::new(temp.path().join("home"));
+        fs::create_dir_all(temp.path().join("proj")).unwrap();
+        let project = Project::at(&temp.path().join("proj")).unwrap();
+        let rust: ImageName = "rust".parse().unwrap();
+        let go: ImageName = "go".parse().unwrap();
+
+        assert_eq!(image(&paths, &project, None), ImageName::default());
+        assert_eq!(image(&paths, &project, Some(&go)), go);
+
+        let vm = dir(&paths, &project);
+        fs::create_dir_all(vm.path()).unwrap();
+        fs::write(
+            vm.metadata(),
+            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 7\n",
+        )
+        .unwrap();
+        assert_eq!(image(&paths, &project, None), rust);
+        assert_eq!(image(&paths, &project, Some(&go)), go);
+    }
 
     #[test]
     fn reads_metadata_from_before_named_images() {

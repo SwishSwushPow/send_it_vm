@@ -166,7 +166,8 @@ pub struct Settings {
     #[serde(default)]
     pub mounts: Vec<MountSpec>,
     pub expose_git: Option<bool>,
-    /// The base image a new VM is created from.
+    /// The base image a new VM is created from, and the one an existing VM
+    /// must have been created from.
     pub image: Option<ImageName>,
 }
 
@@ -231,7 +232,9 @@ pub struct VmSettings {
     /// characters or surrounding spaces.
     pub mounts: Vec<Mount>,
     pub expose_git: bool,
-    pub image: ImageName,
+    /// `None` unless a layer chooses one: the VM keeps its image, and a new
+    /// one is created from `default`.
+    pub image: Option<ImageName>,
 }
 
 impl Config {
@@ -280,7 +283,7 @@ impl Config {
         let mut memory = DEFAULT_MEMORY;
         let mut disk_size = DEFAULT_DISK_SIZE;
         let mut expose_git = false;
-        let mut image = ImageName::default();
+        let mut image = None;
         let mut mounts = vec![Mount {
             host: project.root.clone(),
             guest: project_guest_path(project),
@@ -293,7 +296,7 @@ impl Config {
             memory = layer.memory.unwrap_or(memory);
             disk_size = layer.disk_size.unwrap_or(disk_size);
             expose_git = layer.expose_git.unwrap_or(expose_git);
-            image = layer.image.clone().unwrap_or(image);
+            image = layer.image.clone().or(image);
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
@@ -311,15 +314,14 @@ impl Config {
         Ok(settings)
     }
 
-    /// The image `project` is configured to use, without resolving (and
-    /// validating) the other settings.
-    pub fn resolve_image(&self, paths: &Paths, project: &Project) -> Result<ImageName> {
+    /// The image the config file chooses for `project`, if any, without
+    /// resolving (and validating) the other settings.
+    pub fn resolve_image(&self, paths: &Paths, project: &Project) -> Result<Option<ImageName>> {
         let project = self.project_settings(paths, project)?;
         Ok([project, Some(&self.defaults)]
             .into_iter()
             .flatten()
-            .find_map(|layer| layer.image.clone())
-            .unwrap_or_default())
+            .find_map(|layer| layer.image.clone()))
     }
 
     /// Every image the config file names.
@@ -657,7 +659,7 @@ mod tests {
         assert_eq!(vm.memory, ByteSize::gib(1));
         assert_eq!(vm.disk_size, DEFAULT_DISK_SIZE);
         assert!(vm.expose_git);
-        assert_eq!(vm.image, ImageName::default());
+        assert_eq!(vm.image, None);
         let mounts: Vec<_> = vm
             .mounts
             .iter()
@@ -679,14 +681,14 @@ mod tests {
 
     #[test]
     fn resolves_images() {
-        let fx = Fixture::new("images");
-        let image = |name: &str| name.parse::<ImageName>().unwrap();
+        let fx = Fixture::new("chosen-images");
+        let image = |name: &str| Some(name.parse::<ImageName>().unwrap());
         let project =
             |settings: &str| format!("[projects.\"{}\"]\n{settings}\n", fx.project.root.display());
         let resolve = |config: &str, cli: Option<&str>| {
             let config = Config::parse(config).unwrap();
             let cli = Settings {
-                image: cli.map(image),
+                image: cli.and_then(image),
                 ..Settings::default()
             };
             let vm = config
@@ -701,7 +703,7 @@ mod tests {
             vm.image
         };
 
-        assert_eq!(resolve("", None), image("default"));
+        assert_eq!(resolve("", None), None);
         assert_eq!(resolve("image = \"go\"", None), image("go"));
         let both = format!("image = \"go\"\n{}", project("image = \"rust\""));
         assert_eq!(resolve(&both, None), image("rust"));

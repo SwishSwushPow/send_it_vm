@@ -33,7 +33,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--memory 8G`
 - `--mount HOST[:GUEST][:ro|rw]`: shares another directory, mounted at `/mnt/<name>` without `GUEST`. Repeatable.
 - `--expose-git`: lets the VM see `.git`.
-- `--image NAME`: the base image to create the VM from.
+- `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
 ## Configuration
 
@@ -59,11 +59,11 @@ expose-git = true
 
 ## Base images
 
-Every project uses the `default` image unless `image` or `--image` picks another. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
+A new VM is made from the `default` image unless `image` or `--image` picks another, and keeps using the image it was made from. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
 
 Scripts in `~/.config/sendit/provision-scripts/*.sh` run for every image at the end of provisioning, and scripts in `provision-scripts/NAME/*.sh` only for image `NAME`. They run together in file name order; an image's own script replaces a shared one with the same file name. They run as the VM's user, with sudo available only while they run. `sendit status` and `sendit images` tell you when they have changed since an image was built; `sendit provision NAME --force` rebuilds it.
 
-A VM stays on the image it was made from. After a project switches images, `sendit run` refuses to start its VM until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
+When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
 ## Where things live
 

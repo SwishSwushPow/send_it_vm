@@ -232,7 +232,7 @@ fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
 }
 
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    let image = &settings.image;
+    let image = &project_vm::image(paths, project, settings.image.as_ref());
     let base_dir = paths.image_dir(image);
     let base_state = match provision::base_state(paths, image)? {
         BaseState::Missing => format!("run `{}`", provision::command(image, false)),

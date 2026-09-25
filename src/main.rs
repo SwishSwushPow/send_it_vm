@@ -50,7 +50,11 @@ fn main() -> Result<()> {
             let images = match image {
                 _ if *all => provision::images(&paths, &config)?,
                 Some(image) => vec![image.clone()],
-                None => vec![config.resolve_image(&paths, &project()?)?],
+                None => {
+                    let project = project()?;
+                    let chosen = config.resolve_image(&paths, &project)?;
+                    vec![project_vm::image(&paths, &project, chosen.as_ref())]
+                }
             };
             for image in &images {
                 let settings = config.resolve_provision(image, resources)?;
