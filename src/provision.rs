@@ -3,6 +3,10 @@
 //! The Debian cloud image boots with a cloud-init seed ISO attached, runs
 //! `assets/provision.sh` and powers itself off. The image is built in
 //! `base.partial/` and only replaces `base/` once it succeeded.
+//!
+//! Custom scripts from `~/.config/sendit/provision-scripts/` travel on the
+//! seed ISO too and run after the built-in provisioning, e.g. to install more
+//! tools.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::{ByteSize, Config, DEFAULT_CPUS, DEFAULT_MEMORY};
 use crate::image;
@@ -39,6 +44,29 @@ struct Marker<'a> {
     sendit_version: &'a str,
     debian_image_sha512: &'a str,
     provisioned_at_unix: u64,
+    custom_scripts: Vec<ScriptStamp>,
+}
+
+/// A custom provisioning script the base image was built with.
+#[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
+struct ScriptStamp {
+    name: String,
+    sha256: String,
+}
+
+/// A custom provisioning script from `Paths::provision_scripts_dir`.
+struct CustomScript {
+    name: String,
+    content: Vec<u8>,
+}
+
+impl CustomScript {
+    fn stamp(&self) -> ScriptStamp {
+        ScriptStamp {
+            name: self.name.clone(),
+            sha256: hex::encode(Sha256::digest(&self.content)),
+        }
+    }
 }
 
 pub fn marker(paths: &Paths) -> PathBuf {
@@ -64,6 +92,54 @@ pub fn first_revision() -> u32 {
     1
 }
 
+/// Whether the custom provisioning scripts were added, removed or edited
+/// since the base image was provisioned.
+pub fn custom_scripts_changed(paths: &Paths) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Scripts {
+        #[serde(default)]
+        custom_scripts: Vec<ScriptStamp>,
+    }
+    let path = marker(paths);
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let marker: Scripts =
+        toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
+    let current: Vec<_> = custom_scripts(paths)?.iter().map(CustomScript::stamp).collect();
+    Ok(marker.custom_scripts != current)
+}
+
+/// The `*.sh` files in the custom scripts directory, in name order.
+fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
+    let dir = paths.provision_scripts_dir();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    let mut scripts = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with('.') || !name.ends_with(".sh") || !path.is_file() {
+            continue;
+        }
+        ensure!(
+            !name.contains(|c: char| c.is_control()),
+            "custom provisioning script {:?} has control characters in its name",
+            path.display()
+        );
+        let content = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        scripts.push(CustomScript {
+            name: name.to_string(),
+            content,
+        });
+    }
+    scripts.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(scripts)
+}
+
 pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
     if marker(paths).exists() && !force {
         eprintln!(
@@ -75,11 +151,12 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
 
     let image = image::debian_image(paths)?;
     let public_key = ssh_public_key(paths)?;
+    let scripts = custom_scripts(paths)?;
 
     let work = paths.provision_dir();
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
-    let seed = build_seed_iso(&work, &public_key)?;
+    let seed = build_seed_iso(&work, &public_key, &scripts)?;
 
     let partial = VmDir::new(paths.base_partial_dir());
     let _ = fs::remove_dir_all(partial.path());
@@ -92,6 +169,14 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
         "Provisioning the base image. This takes a few minutes; the console is logged to {}.",
         paths.display(&log)
     );
+    if !scripts.is_empty() {
+        let names: Vec<_> = scripts.iter().map(|script| script.name.as_str()).collect();
+        eprintln!(
+            "Custom scripts from {}: {}",
+            paths.display(&paths.provision_scripts_dir()),
+            names.join(", ")
+        );
+    }
     let spec = VmSpec {
         cpus: config.defaults.cpus.unwrap_or(DEFAULT_CPUS),
         memory: config.defaults.memory.unwrap_or(DEFAULT_MEMORY),
@@ -113,6 +198,7 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
         sendit_version: env!("CARGO_PKG_VERSION"),
         debian_image_sha512: &image.sha512,
         provisioned_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
     })?;
     fs::write(partial.path().join("provisioned.toml"), marker_text)?;
 
@@ -147,7 +233,7 @@ fn ssh_public_key(paths: &Paths) -> Result<String> {
 
 /// Writes the NoCloud seed files into `work/seed/` and packs them into an ISO
 /// labelled `cidata`.
-fn build_seed_iso(work: &Path, public_key: &str) -> Result<PathBuf> {
+fn build_seed_iso(work: &Path, public_key: &str, scripts: &[CustomScript]) -> Result<PathBuf> {
     ensure!(
         !public_key.contains(['\n', '"']),
         "unexpected SSH public key format"
@@ -168,6 +254,17 @@ fn build_seed_iso(work: &Path, public_key: &str) -> Result<PathBuf> {
     )?;
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
     fs::write(dir.join("banner.txt"), BANNER)?;
+    // Numbered file names survive the ISO's file name limits; `list` maps
+    // them back to the original names for the log.
+    let custom = dir.join("custom");
+    fs::create_dir_all(&custom)?;
+    let mut list = String::new();
+    for (i, script) in scripts.iter().enumerate() {
+        let file = format!("{:03}.sh", i + 1);
+        fs::write(custom.join(&file), &script.content)?;
+        list.push_str(&format!("{file} {}\n", script.name));
+    }
+    fs::write(custom.join("list"), list)?;
 
     let iso = work.join("seed.iso");
     let output = Command::new("hdiutil")
@@ -203,5 +300,25 @@ mod tests {
         // that echoes its own source would look successful.
         assert!(!PROVISION_SCRIPT.contains(SUCCESS_SENTINEL));
         assert!(PROVISION_SCRIPT.contains("SENDIT_PROVISION_${status}"));
+        assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
+    }
+
+    #[test]
+    fn collects_custom_scripts_in_name_order() {
+        let home = std::env::temp_dir().join(format!("sendit-scripts-{}", std::process::id()));
+        let paths = Paths::new(home.clone());
+        assert!(custom_scripts(&paths).unwrap().is_empty());
+
+        let dir = paths.provision_scripts_dir();
+        fs::create_dir_all(dir.join("30-dir.sh")).unwrap();
+        for name in ["20-node.sh", "10-editors.sh", ".hidden.sh", "notes.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        let scripts = custom_scripts(&paths).unwrap();
+        fs::remove_dir_all(&home).unwrap();
+
+        let names: Vec<_> = scripts.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["10-editors.sh", "20-node.sh"]);
+        assert_eq!(scripts[0].content, b"10-editors.sh");
     }
 }

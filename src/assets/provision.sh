@@ -164,6 +164,21 @@ WantedBy=multi-user.target
 EOF
 systemctl enable sendit-ssh-hostkeys.service ssh.service
 
+# --- Custom scripts ---------------------------------------------------------
+# The user's scripts from ~/.config/sendit/provision-scripts, in name order.
+# They run as the login user in a login shell from its home directory, so
+# they see the same environment as the console (e.g. cargo on the PATH), and
+# use sudo for anything that needs root. sudo keeps DEBIAN_FRONTEND meanwhile,
+# so apt-get doesn't stop at configuration prompts.
+echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
+while read -r file name; do
+    echo "sendit: running custom script $name"
+    (cd "/home/$user" && sudo -u "$user" -H bash -l "$seed/custom/$file") < /dev/null ||
+        { echo "sendit: custom script $name failed"; exit 1; }
+done < "$seed/custom/list"
+rm /etc/sudoers.d/sendit-provision
+apt-get clean
+
 # cloud-init has done its job; later boots of copies must not re-run it.
 touch /etc/cloud/cloud-init.disabled
 

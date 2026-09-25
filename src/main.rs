@@ -164,10 +164,12 @@ fn approx_size(bytes: u64) -> String {
 
 fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let base_dir = paths.base_dir();
-    let base_state = if provision::marker(paths).exists() {
-        "provisioned"
-    } else {
+    let base_state = if !provision::marker(paths).exists() {
         "run `sendit provision`"
+    } else if provision::custom_scripts_changed(paths)? {
+        "custom scripts changed; `sendit provision --force` rebuilds it"
+    } else {
+        "provisioned"
     };
     let vm_dir = VmDir::new(paths.vm_dir(project));
     let state = if !vm_dir.path().exists() {

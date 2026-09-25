@@ -3,6 +3,7 @@
 //! - `~/.cache/sendit/`: downloads, the provisioned base image, provisioning scratch
 //! - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 //! - `~/.config/sendit/config.toml`: user configuration
+//! - `~/.config/sendit/provision-scripts/`: custom provisioning scripts for the base image
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -56,6 +57,12 @@ impl Paths {
 
     pub fn config_file(&self) -> PathBuf {
         self.home.join(".config/sendit/config.toml")
+    }
+
+    /// Custom provisioning scripts (`*.sh`), run in name order after the
+    /// built-in provisioning of the base image.
+    pub fn provision_scripts_dir(&self) -> PathBuf {
+        self.home.join(".config/sendit/provision-scripts")
     }
 
     /// Parent of all project VM directories.
