@@ -6,6 +6,7 @@ mod mounts;
 mod paths;
 mod project_vm;
 mod provision;
+mod sign;
 mod util;
 mod vm;
 
@@ -18,6 +19,7 @@ use crate::paths::{Paths, Project};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
     provision::migrate_legacy_base(&paths)?;
     let cwd = std::env::current_dir()?;

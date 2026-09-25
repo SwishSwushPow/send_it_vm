@@ -6,7 +6,9 @@ A Debian base image is provisioned once, or several with different tools install
 
 ## Building
 
-Requires macOS 27 on Apple silicon. `cargo build` and `cargo install --path .` link through `scripts/link-and-sign.sh`, which signs the binary with the virtualization entitlement.
+Requires macOS 27 on Apple silicon. Install with `cargo install send_it_vm`, or `cargo install --path .` from a clone.
+
+Virtualization.framework only works for binaries signed with the virtualization entitlement. `cargo build` and `cargo install --path .` link through `scripts/link-and-sign.sh`, which signs the binary. A binary installed from crates.io is built without it, so on its first run `sendit` signs itself (ad hoc) and starts again.
 
 ## Usage
 
