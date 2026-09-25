@@ -42,15 +42,28 @@ echo '127.0.1.1 sendit' >> /etc/hosts
     cat "$seed/banner.txt"
     printf '\033[0m'
     echo '  Light and fast VMs. Your project is in /workspace.'
+    echo '  Logging out of the console (exit or Ctrl-D) shuts the VM down.'
     echo
 } > /etc/motd
 
 # --- Console autologin ------------------------------------------------------
+# Logging out of the console shuts the VM down, so `exit` ends `sendit run`
+# instead of logging in again: the getty isn't restarted, and once it has
+# ended, the VM powers off unless it is already shutting down or rebooting.
+cat > /usr/local/sbin/sendit-console-logout <<'EOF'
+#!/bin/sh
+[ "$(systemctl is-system-running)" = stopping ] && exit 0
+echo 'Logged out; shutting down the VM.' > /dev/hvc0 || true
+exec systemctl --no-block poweroff
+EOF
+chmod 755 /usr/local/sbin/sendit-console-logout
 mkdir -p /etc/systemd/system/serial-getty@hvc0.service.d
 cat > /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf <<EOF
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin $user --noclear --keep-baud 115200,57600,38400,9600 - \$TERM
+Restart=no
+ExecStopPost=/usr/local/sbin/sendit-console-logout
 EOF
 
 # --- Networking -------------------------------------------------------------
