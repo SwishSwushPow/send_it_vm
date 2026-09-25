@@ -8,6 +8,7 @@ mod config;
 mod console;
 
 use std::cell::RefCell;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -56,10 +57,15 @@ impl VmDir {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VmSpec {
     pub cpus: u32,
     pub memory: ByteSize,
+    /// Extra read-only disk, e.g. a cloud-init seed ISO.
+    pub seed: Option<PathBuf>,
+    /// Provisioning mode: show and log the guest's /dev/hvc1 to this file
+    /// instead of showing the login console.
+    pub provision_log: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,8 +132,8 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         dir.disk().display()
     );
 
-    let console = Console::attach()?;
-    let configuration = config::build(dir, spec, console.attachment())?;
+    let console = Console::attach(spec.provision_log.as_deref())?;
+    let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
     let state = Rc::new(VmState::default());
     let delegate = VmDelegate::new(state.clone());
     let vm = unsafe {
@@ -142,7 +148,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
             start_state.start_error.replace(Some(message));
         }
     });
-    unsafe { vm.startWithCompletionHandler(&on_start) };
+    catch_objc(|| unsafe { vm.startWithCompletionHandler(&on_start) })?;
 
     eprint!("\r\n[send_it] VM starting. Press Ctrl-] to shut it down.\r\n");
 
@@ -186,6 +192,15 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     drop(console);
     eprintln!();
     result
+}
+
+/// Runs `f`, turning an Objective-C exception (which Rust can't unwind
+/// through) into an error.
+fn catch_objc<R>(f: impl FnOnce() -> R) -> Result<R> {
+    objc2::exception::catch(AssertUnwindSafe(f)).map_err(|exception| match exception {
+        Some(exception) => anyhow::anyhow!("Objective-C exception: {exception}"),
+        None => anyhow::anyhow!("unknown Objective-C exception"),
+    })
 }
 
 fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) {

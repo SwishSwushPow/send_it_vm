@@ -3,12 +3,14 @@
 //! Stdin is read on a helper thread and forwarded to the guest through a pipe,
 //! so the escape key (Ctrl-]) can be intercepted instead of reaching the guest.
 
-use std::io;
+use std::fs::File;
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2_foundation::NSFileHandle;
@@ -18,45 +20,93 @@ use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachm
 pub const ESCAPE_KEY: u8 = 0x1d;
 
 pub struct Console {
-    attachment: Retained<VZFileHandleSerialPortAttachment>,
+    /// The login console, /dev/hvc0 in the guest.
+    main: Retained<VZFileHandleSerialPortAttachment>,
+    /// Output-only port for provisioning, /dev/hvc1 in the guest.
+    log: Option<Retained<VZFileHandleSerialPortAttachment>>,
     escapes: Arc<AtomicUsize>,
     _raw_mode: Option<RawMode>,
 }
 
 impl Console {
-    /// Attaches the guest console to this process' stdin and stdout.
-    pub fn attach() -> Result<Self> {
+    /// Connects stdin to the guest's login console. Without `log`, the login
+    /// console's output goes to stdout. With `log`, it is discarded instead,
+    /// and a second port's output is shown and appended to `log`: nothing
+    /// runs a getty on that port, so provisioning output can't be cut off by
+    /// one hanging up the terminal.
+    pub fn attach(log: Option<&Path>) -> Result<Self> {
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
         std::thread::spawn(move || forward_stdin(write_end, &counter));
 
-        let attachment = unsafe {
-            let to_guest = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
-                NSFileHandle::alloc(),
-                read_end.into_raw_fd(),
-                true,
-            );
-            VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
-                VZFileHandleSerialPortAttachment::alloc(),
-                Some(&to_guest),
-                Some(&NSFileHandle::fileHandleWithStandardOutput()),
-            )
+        let (main_output, log) = match log {
+            None => (NSFileHandle::fileHandleWithStandardOutput(), None),
+            Some(path) => {
+                let log = File::options()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                let (read_end, write_end) = pipe()?;
+                std::thread::spawn(move || tee_output(read_end, log));
+                let port = serial_port(None, &file_handle(write_end));
+                // VZ needs handles backed by real file descriptors, which
+                // `fileHandleWithNullDevice` isn't.
+                let null = File::options().write(true).open("/dev/null")?;
+                (file_handle(null.into()), Some(port))
+            }
         };
+
         Ok(Self {
-            attachment,
+            main: serial_port(Some(&file_handle(read_end)), &main_output),
+            log,
             escapes,
             _raw_mode: RawMode::enable()?,
         })
     }
 
-    pub fn attachment(&self) -> &VZSerialPortAttachment {
-        &self.attachment
+    /// The attachments for the guest's serial ports, in order.
+    pub fn ports(&self) -> Vec<&VZSerialPortAttachment> {
+        let mut ports: Vec<&VZSerialPortAttachment> = vec![&self.main];
+        ports.extend(self.log.as_deref().map(|port| &**port));
+        ports
     }
 
     /// How often the escape key has been pressed so far.
     pub fn escapes(&self) -> usize {
         self.escapes.load(Ordering::Relaxed)
+    }
+}
+
+fn serial_port(
+    input: Option<&NSFileHandle>,
+    output: &NSFileHandle,
+) -> Retained<VZFileHandleSerialPortAttachment> {
+    unsafe {
+        VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+            VZFileHandleSerialPortAttachment::alloc(),
+            input,
+            Some(output),
+        )
+    }
+}
+
+/// Wraps `fd` in an `NSFileHandle` that closes it when released.
+fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
+    NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+        NSFileHandle::alloc(),
+        fd.into_raw_fd(),
+        true,
+    )
+}
+
+/// Copies guest output to stdout and `log` until the guest side closes.
+fn tee_output(from_guest: OwnedFd, mut log: File) {
+    let mut buf = [0u8; 4096];
+    while let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) {
+        let _ = write_all(libc::STDOUT_FILENO, &buf[..n]);
+        let _ = log.write_all(&buf[..n]);
     }
 }
 

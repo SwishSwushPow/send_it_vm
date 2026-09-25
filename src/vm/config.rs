@@ -14,7 +14,7 @@ use super::{VmDir, VmSpec};
 pub fn build(
     dir: &VmDir,
     spec: &VmSpec,
-    console: &VZSerialPortAttachment,
+    serial_ports: &[&VZSerialPortAttachment],
 ) -> Result<Retained<VZVirtualMachineConfiguration>> {
     unsafe {
         let min_cpus = VZVirtualMachineConfiguration::minimumAllowedCPUCount();
@@ -48,22 +48,12 @@ pub fn build(
         boot_loader.setVariableStore(Some(&variable_store));
         config.setBootLoader(Some(&boot_loader));
 
-        let disk = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
-            VZDiskImageStorageDeviceAttachment::alloc(),
-            &file_url(&dir.disk()),
-            false,
-            VZDiskImageCachingMode::Automatic,
-            VZDiskImageSynchronizationMode::Full,
-        )
-        .map_err(ns_error)
-        .with_context(|| format!("attaching disk {}", dir.disk().display()))?;
-        let block = VZVirtioBlockDeviceConfiguration::initWithAttachment(
-            VZVirtioBlockDeviceConfiguration::alloc(),
-            &disk,
-        );
-        config.setStorageDevices(&NSArray::from_retained_slice(&[Retained::into_super(
-            block,
-        )]));
+        // The root disk is /dev/vda; a seed disk, if any, is /dev/vdb.
+        let mut disks = vec![block_device(&dir.disk(), false)?];
+        if let Some(seed) = &spec.seed {
+            disks.push(block_device(seed, true)?);
+        }
+        config.setStorageDevices(&NSArray::from_retained_slice(&disks));
 
         let network = VZVirtioNetworkDeviceConfiguration::new();
         network.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
@@ -73,11 +63,16 @@ pub fn build(
             network,
         )]));
 
-        let serial = VZVirtioConsoleDeviceSerialPortConfiguration::new();
-        serial.setAttachment(Some(console));
-        config.setSerialPorts(&NSArray::from_retained_slice(&[Retained::into_super(
-            serial,
-        )]));
+        // Each port becomes its own virtio console: /dev/hvc0, /dev/hvc1, ...
+        let serial_ports: Vec<Retained<VZSerialPortConfiguration>> = serial_ports
+            .iter()
+            .map(|attachment| {
+                let port = VZVirtioConsoleDeviceSerialPortConfiguration::new();
+                port.setAttachment(Some(attachment));
+                Retained::into_super(port)
+            })
+            .collect();
+        config.setSerialPorts(&NSArray::from_retained_slice(&serial_ports));
 
         config.setEntropyDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioEntropyDeviceConfiguration::new(),
@@ -91,6 +86,26 @@ pub fn build(
             .map_err(ns_error)
             .context("invalid VM configuration")?;
         Ok(config)
+    }
+}
+
+fn block_device(path: &Path, read_only: bool) -> Result<Retained<VZStorageDeviceConfiguration>> {
+    unsafe {
+        let attachment =
+            VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+                VZDiskImageStorageDeviceAttachment::alloc(),
+                &file_url(path),
+                read_only,
+                VZDiskImageCachingMode::Automatic,
+                VZDiskImageSynchronizationMode::Full,
+            )
+            .map_err(ns_error)
+            .with_context(|| format!("attaching disk {}", path.display()))?;
+        let device = VZVirtioBlockDeviceConfiguration::initWithAttachment(
+            VZVirtioBlockDeviceConfiguration::alloc(),
+            &attachment,
+        );
+        Ok(Retained::into_super(device))
     }
 }
 

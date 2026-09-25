@@ -1,0 +1,27 @@
+#cloud-config
+# Seed for provisioning the send_it base image. @SSH_PUBLIC_KEY@ is filled in by send_it.
+hostname: sendit
+users:
+  - name: dev
+    gecos: send_it developer
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - @SSH_PUBLIC_KEY@
+ssh_pwauth: false
+# Mirror everything cloud-init runs to /dev/hvc1, which send_it shows and logs.
+# (Not hvc0: the getty there hangs up the tty when it starts, which would
+# kill anything writing to it.)
+output:
+  all: "| tee -a /var/log/cloud-init-output.log /dev/hvc1"
+runcmd:
+  # The seed ISO is the second virtio disk; it also carries provision.sh.
+  - [mkdir, -p, /run/sendit-seed]
+  - [mount, -o, ro, /dev/vdb, /run/sendit-seed]
+  - [bash, /run/sendit-seed/provision.sh, /run/sendit-seed]
+power_state:
+  mode: poweroff
+  message: send_it provisioning finished
+  timeout: 30

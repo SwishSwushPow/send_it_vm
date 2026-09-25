@@ -39,6 +39,11 @@ impl Paths {
         self.cache_dir().join("base")
     }
 
+    /// Where a base image is built before it replaces `base_dir`.
+    pub fn base_partial_dir(&self) -> PathBuf {
+        self.cache_dir().join("base.partial")
+    }
+
     /// Scratch space for provisioning runs (seed ISO, console log).
     pub fn provision_dir(&self) -> PathBuf {
         self.cache_dir().join("provision")
