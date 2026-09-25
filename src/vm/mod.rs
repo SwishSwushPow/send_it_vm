@@ -141,9 +141,10 @@ impl VmDelegate {
 }
 
 /// Boots the VM with the console attached to this terminal and blocks until
-/// it has stopped. Pressing Ctrl-] (or sending SIGTERM, SIGHUP or SIGINT)
-/// asks the guest to shut down; doing it again, or the guest not reacting in
-/// time, stops the VM forcibly.
+/// it has stopped. The guest powers off when its console user logs out.
+/// Pressing Ctrl-] (or sending SIGTERM, SIGHUP or SIGINT) asks the guest to
+/// shut down; doing it again, or the guest not reacting in time, stops the
+/// VM forcibly.
 pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     // The VM runs on the main dispatch queue, which only the main thread drains.
     ensure!(
@@ -179,7 +180,17 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     });
     catch_objc(|| unsafe { vm.startWithCompletionHandler(&on_start) })?;
 
-    notice("VM starting. Press Ctrl-] to shut it down.");
+    // While provisioning, nobody is logged in on the console to log out,
+    // and Ctrl-C isn't forwarded to the guest.
+    let (started, stopping_notice) = if spec.provision_log.is_some() {
+        (
+            "VM starting. Press Ctrl-C to abort.",
+            "Shutting down. Press Ctrl-C again to force.",
+        )
+    } else {
+        ("VM starting. Type exit to shut it down.", "Shutting down.")
+    };
+    notice(started);
 
     let run_loop = NSRunLoop::currentRunLoop();
     let mut seen_escapes = 0;
@@ -203,7 +214,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         stopping = match stopping {
             Stopping::No if escaped => {
                 if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
-                    notice("Shutting down. Press Ctrl-] again to force.");
+                    notice(stopping_notice);
                     Stopping::Requested(Instant::now())
                 } else {
                     force_stop(&vm, &state);

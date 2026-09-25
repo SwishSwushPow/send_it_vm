@@ -37,8 +37,10 @@ impl Console {
     /// console's output goes to stdout. With `log`, it is discarded instead,
     /// and a second port's output is shown and appended to `log`: nothing
     /// runs a getty on that port, so provisioning output can't be cut off by
-    /// one hanging up the terminal.
+    /// one hanging up the terminal. Nothing in the guest reads keystrokes
+    /// then, so Ctrl-C keeps raising SIGINT instead of reaching the guest.
     pub fn attach(log: Option<&Path>) -> Result<Self> {
+        let log_given = log.is_some();
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
@@ -70,7 +72,7 @@ impl Console {
             main: serial_port(Some(&file_handle(read_end)), &main_output),
             log,
             escapes,
-            _raw_mode: RawMode::enable()?,
+            _raw_mode: RawMode::enable(log_given)?,
         })
     }
 
@@ -190,14 +192,15 @@ const TERMINAL_RESET: &[u8] =
     b"\x1b[0m\x1b[?1049l\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
 
 /// Puts the terminal into raw mode, so keystrokes (including Ctrl-C) go to
-/// the guest unmodified. On drop, resets what the guest may have changed and
-/// restores the previous mode.
+/// the guest unmodified, unless `keep_signals` leaves Ctrl-C raising SIGINT.
+/// On drop, resets what the guest may have changed and restores the previous
+/// mode.
 struct RawMode {
     original: libc::termios,
 }
 
 impl RawMode {
-    fn enable() -> Result<Option<Self>> {
+    fn enable(keep_signals: bool) -> Result<Option<Self>> {
         let fd = libc::STDIN_FILENO;
         // SAFETY: plain libc calls on a valid descriptor with owned out-params.
         unsafe {
@@ -210,6 +213,13 @@ impl RawMode {
             }
             let mut raw = original;
             libc::cfmakeraw(&mut raw);
+            if keep_signals {
+                // Only Ctrl-C: suspending or quitting would skip the cleanup.
+                raw.c_lflag |= libc::ISIG;
+                raw.c_cc[libc::VQUIT] = libc::_POSIX_VDISABLE;
+                raw.c_cc[libc::VSUSP] = libc::_POSIX_VDISABLE;
+                raw.c_cc[libc::VDSUSP] = libc::_POSIX_VDISABLE;
+            }
             if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
                 return Err(io::Error::last_os_error().into());
             }
