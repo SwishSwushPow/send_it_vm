@@ -1,0 +1,3 @@
+# Signs binaries with the virtualization entitlement before `cargo run`/`cargo test`.
+[target.aarch64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
