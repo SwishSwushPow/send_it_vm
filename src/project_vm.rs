@@ -38,6 +38,9 @@ const LOCK_RETRIES: u32 = 5;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub project_path: PathBuf,
+    /// VMs from before named images were made from the `default` image.
+    #[serde(default)]
+    pub image: ImageName,
     #[serde(default = "provision::first_revision")]
     pub base_revision: u32,
     #[serde(default)]
@@ -117,10 +120,20 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let dir = dir(paths, project);
     if !dir.path().exists() {
-        create(paths, project, &dir)?;
+        create(paths, project, &dir, &settings.image)?;
     }
+    let metadata = metadata(&dir)?;
     ensure!(
-        !metadata(&dir)?.outdated(),
+        metadata.image == settings.image,
+        "{} was created from the {} image, not {}; `sendit reset` deletes it so \
+         the next run starts over from the {} image",
+        paths.display(dir.path()),
+        metadata.image,
+        settings.image,
+        settings.image
+    );
+    ensure!(
+        !metadata.outdated(),
         "{} was created from an older base image that this version of sendit \
          can't run; `sendit reset` deletes it so the next run starts over from \
          the current base image",
@@ -249,26 +262,33 @@ pub fn delete(dir: &VmDir) -> Result<()> {
     fs::remove_dir_all(dir.path()).with_context(|| format!("deleting {}", dir.path().display()))
 }
 
-fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
-    let image = ImageName::default();
-    match provision::base_state(paths, &image)? {
-        BaseState::Missing => bail!("there is no base image yet; run `sendit provision` first"),
-        BaseState::Outdated => {
-            bail!("the base image is outdated; rebuild it with `sendit provision --force`")
-        }
+fn create(paths: &Paths, project: &Project, dir: &VmDir, image: &ImageName) -> Result<()> {
+    match provision::base_state(paths, image)? {
+        BaseState::Missing => bail!(
+            "the {image} image isn't provisioned yet; run `{}` first",
+            provision::command(image, false)
+        ),
+        BaseState::Outdated => bail!(
+            "the {image} image is outdated; rebuild it with `{}`",
+            provision::command(image, true)
+        ),
         BaseState::ScriptsChanged | BaseState::Current => {}
     }
-    let base = VmDir::new(paths.image_dir(&image));
+    let base = VmDir::new(paths.image_dir(image));
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     let _ = fs::remove_dir_all(partial.path());
     fs::create_dir_all(partial.path())
         .with_context(|| format!("creating {}", partial.path().display()))?;
 
-    eprintln!("Creating {} from the base image", paths.display(dir.path()));
+    eprintln!(
+        "Creating {} from the {image} image",
+        paths.display(dir.path())
+    );
     image::clone_file(&base.disk(), &partial.disk())?;
     image::clone_file(&base.efi_vars(), &partial.efi_vars())?;
     let metadata = toml::to_string(&Metadata {
         project_path: project.root.clone(),
+        image: image.clone(),
         base_revision: provision::BASE_REVISION,
         sendit_version: env!("CARGO_PKG_VERSION").into(),
         created_at_unix: util::unix_now()?,
@@ -346,6 +366,16 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_metadata_from_before_named_images() {
+        let metadata: Metadata = toml::from_str(
+            "project_path = \"/p\"\nbase_revision = 7\nsendit_version = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(metadata.image, ImageName::default());
+        assert!(!metadata.outdated());
+    }
 
     #[test]
     fn quotes_ssh_commands() {

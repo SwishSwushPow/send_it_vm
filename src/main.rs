@@ -46,13 +46,14 @@ fn main() -> Result<()> {
             force,
             resources,
         } => {
-            let settings = Config::load(&paths)?.resolve_provision(resources)?;
-            let images = if *all {
-                provision::images(&paths)?
-            } else {
-                vec![image.clone().unwrap_or_default()]
+            let config = Config::load(&paths)?;
+            let images = match image {
+                _ if *all => provision::images(&paths, &config)?,
+                Some(image) => vec![image.clone()],
+                None => vec![config.resolve_image(&paths, &project()?)?],
             };
             for image in &images {
+                let settings = config.resolve_provision(image, resources)?;
                 provision::provision(&paths, image, &settings, *force)?;
             }
             Ok(())

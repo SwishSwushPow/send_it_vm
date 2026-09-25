@@ -104,6 +104,7 @@ mod tests {
                 mount("/cache", "/home/dev/.cache", false),
             ],
             expose_git,
+            image: Default::default(),
         }
     }
 

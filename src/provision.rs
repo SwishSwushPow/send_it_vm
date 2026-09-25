@@ -20,7 +20,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{ByteSize, ProvisionSettings};
+use crate::config::{ByteSize, Config, ProvisionSettings};
 use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::util;
@@ -122,10 +122,11 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
     })
 }
 
-/// All images: `default`, and every image that has custom scripts of its
-/// own or has been provisioned, in name order.
-pub fn images(paths: &Paths) -> Result<Vec<ImageName>> {
+/// All images: `default`, and every image that the config file names, has
+/// custom scripts of its own or has been provisioned, in name order.
+pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
     let mut images = BTreeSet::from([ImageName::default()]);
+    images.extend(config.images().cloned());
     for dir in [paths.provision_scripts_dir(), paths.images_dir()] {
         let Some(entries) = util::if_exists(fs::read_dir(&dir))
             .with_context(|| format!("reading {}", dir.display()))?
@@ -204,6 +205,18 @@ fn script_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         scripts.push((name.to_string(), content));
     }
     Ok(scripts)
+}
+
+/// The command that builds `image`, e.g. `sendit provision rust --force`.
+pub fn command(image: &ImageName, force: bool) -> String {
+    let mut command = "sendit provision".to_string();
+    if *image != ImageName::default() {
+        write!(command, " {image}").unwrap();
+    }
+    if force {
+        command.push_str(" --force");
+    }
+    command
 }
 
 pub fn provision(
@@ -431,7 +444,8 @@ mod tests {
     fn lists_images() {
         let home = TempDir::new("images");
         let paths = Paths::new(home.path().to_path_buf());
-        assert_eq!(images(&paths).unwrap(), [ImageName::default()]);
+        let config = Config::default();
+        assert_eq!(images(&paths, &config).unwrap(), [ImageName::default()]);
 
         let scripts = paths.provision_scripts_dir();
         fs::create_dir_all(scripts.join("rust")).unwrap();
@@ -439,9 +453,10 @@ mod tests {
         fs::write(scripts.join("node"), "a file").unwrap();
         fs::create_dir_all(paths.image_dir(&image("go"))).unwrap();
         fs::create_dir_all(paths.image_partial_dir(&image("zig"))).unwrap();
+        let config: Config = toml::from_str("image = \"node\"").unwrap();
         assert_eq!(
-            images(&paths).unwrap(),
-            [image("default"), image("go"), image("rust")]
+            images(&paths, &config).unwrap(),
+            [image("default"), image("go"), image("node"), image("rust")]
         );
     }
 

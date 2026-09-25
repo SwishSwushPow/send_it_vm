@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 use anyhow::{Result, bail, ensure};
 
 use crate::config::{ByteSize, VmSettings};
-use crate::paths::{ImageName, Paths, Project};
+use crate::paths::{Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
 use crate::vm;
@@ -175,22 +175,33 @@ fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
 }
 
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    let image = ImageName::default();
-    let base_dir = paths.image_dir(&image);
-    let base_state = match provision::base_state(paths, &image)? {
-        BaseState::Missing => "run `sendit provision`",
-        BaseState::Outdated => "outdated; `sendit provision --force` rebuilds it",
-        BaseState::ScriptsChanged => {
-            "custom scripts changed; `sendit provision --force` rebuilds it"
+    let image = &settings.image;
+    let base_dir = paths.image_dir(image);
+    let base_state = match provision::base_state(paths, image)? {
+        BaseState::Missing => format!("run `{}`", provision::command(image, false)),
+        BaseState::Outdated => {
+            format!(
+                "outdated; `{}` rebuilds it",
+                provision::command(image, true)
+            )
         }
-        BaseState::Current => "provisioned",
+        BaseState::ScriptsChanged => format!(
+            "custom scripts changed; `{}` rebuilds it",
+            provision::command(image, true)
+        ),
+        BaseState::Current => "provisioned".to_string(),
     };
     let vm_dir = project_vm::dir(paths, project);
     let state = if !vm_dir.path().exists() {
         "not created".to_string()
     } else {
+        let metadata = project_vm::metadata(&vm_dir).ok();
         match project_vm::state(&vm_dir)? {
-            State::Stopped if project_vm::metadata(&vm_dir).is_ok_and(|m| m.outdated()) => {
+            State::Stopped if metadata.as_ref().is_some_and(|m| m.image != *image) => format!(
+                "stopped; made from the {} image, `sendit reset` recreates it from {image}",
+                metadata.map(|m| m.image).unwrap_or_default()
+            ),
+            State::Stopped if metadata.is_some_and(|m| m.outdated()) => {
                 "stopped; made from an outdated base image, `sendit reset` recreates it".to_string()
             }
             State::Stopped => "stopped".to_string(),

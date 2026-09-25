@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -127,7 +128,8 @@ impl Paths {
 
 /// The name of a base image: lowercase letters, digits and dashes. It is
 /// part of paths, so nothing else is allowed.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct ImageName(String);
 
 impl ImageName {
@@ -159,6 +161,20 @@ impl FromStr for ImageName {
             );
         }
         Ok(Self(s.into()))
+    }
+}
+
+impl TryFrom<String> for ImageName {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> Result<Self> {
+        s.parse()
+    }
+}
+
+impl From<ImageName> for String {
+    fn from(image: ImageName) -> Self {
+        image.0
     }
 }
 

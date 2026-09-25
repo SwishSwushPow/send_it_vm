@@ -21,7 +21,7 @@ pub struct Cli {
 pub enum Command {
     /// Download Debian and build a base image
     Provision {
-        /// The image to build [default: default]
+        /// The image to build [default: the project's image]
         #[arg(value_name = "IMAGE", conflicts_with = "all")]
         image: Option<ImageName>,
 
@@ -88,6 +88,10 @@ pub struct RunArgs {
     /// Let the VM see the project's .git directory (hidden by default)
     #[arg(long)]
     pub expose_git: bool,
+
+    /// Base image to create the VM from [default: default]
+    #[arg(long, value_name = "IMAGE")]
+    pub image: Option<ImageName>,
 }
 
 impl RunArgs {
@@ -98,6 +102,7 @@ impl RunArgs {
             disk_size: None,
             mounts: self.mounts.clone(),
             expose_git: self.expose_git.then_some(true),
+            image: self.image.clone(),
         }
     }
 }
@@ -127,6 +132,8 @@ mod tests {
             "--mount",
             "/c",
             "--expose-git",
+            "--image",
+            "rust",
         ])
         .unwrap();
         let Command::Run(args) = cli.command else {
@@ -137,6 +144,7 @@ mod tests {
         assert_eq!(settings.memory, Some(ByteSize::gib(8)));
         assert_eq!(settings.mounts.len(), 2);
         assert_eq!(settings.expose_git, Some(true));
+        assert_eq!(settings.image, Some("rust".parse().unwrap()));
     }
 
     #[test]

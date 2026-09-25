@@ -4,8 +4,9 @@
 //! Layers, lowest to highest precedence: built-in defaults, top-level keys of
 //! the config file, the matching `[projects."<path>"]` table, CLI flags.
 //! Scalars are overridden by higher layers; mounts accumulate across layers.
-//! Provisioning the base image takes its CPUs and memory from the top-level
-//! keys, then the `[provision]` table, then the flags of `sendit provision`.
+//! Provisioning a base image takes its CPUs and memory from the top-level
+//! keys, then the `[provision]` table, then the image's `[images.<name>]`
+//! table, then the flags of `sendit provision`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -16,7 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use serde::Deserialize;
 
-use crate::paths::{Paths, Project};
+use crate::paths::{ImageName, Paths, Project};
 use crate::util;
 
 const DEFAULT_CPUS: u32 = 2;
@@ -165,9 +166,11 @@ pub struct Settings {
     #[serde(default)]
     pub mounts: Vec<MountSpec>,
     pub expose_git: Option<bool>,
+    /// The base image a new VM is created from.
+    pub image: Option<ImageName>,
 }
 
-/// Optional CPUs and memory: the `[provision]` table, or the flags that
+/// Optional CPUs and memory: the `[provision]` and `[images.<name>]` tables, or the flags that
 /// `run` and `provision` share.
 #[derive(Args, Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,6 +191,9 @@ pub struct Config {
     pub defaults: Settings,
     #[serde(default)]
     pub provision: Resources,
+    /// Provisioning resources for single images.
+    #[serde(default)]
+    pub images: BTreeMap<ImageName, Resources>,
     #[serde(default)]
     pub projects: BTreeMap<PathBuf, Settings>,
 }
@@ -225,6 +231,7 @@ pub struct VmSettings {
     /// characters or surrounding spaces.
     pub mounts: Vec<Mount>,
     pub expose_git: bool,
+    pub image: ImageName,
 }
 
 impl Config {
@@ -273,6 +280,7 @@ impl Config {
         let mut memory = DEFAULT_MEMORY;
         let mut disk_size = DEFAULT_DISK_SIZE;
         let mut expose_git = false;
+        let mut image = ImageName::default();
         let mut mounts = vec![Mount {
             host: project.root.clone(),
             guest: project_guest_path(project),
@@ -285,6 +293,7 @@ impl Config {
             memory = layer.memory.unwrap_or(memory);
             disk_size = layer.disk_size.unwrap_or(disk_size);
             expose_git = layer.expose_git.unwrap_or(expose_git);
+            image = layer.image.clone().unwrap_or(image);
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
@@ -296,16 +305,45 @@ impl Config {
             disk_size,
             mounts,
             expose_git,
+            image,
         };
         settings.validate()?;
         Ok(settings)
     }
 
-    /// Merges the layers that apply to provisioning with the CLI flags.
-    pub fn resolve_provision(&self, cli: &Resources) -> Result<ProvisionSettings> {
+    /// The image `project` is configured to use, without resolving (and
+    /// validating) the other settings.
+    pub fn resolve_image(&self, paths: &Paths, project: &Project) -> Result<ImageName> {
+        let project = self.project_settings(paths, project)?;
+        Ok([project, Some(&self.defaults)]
+            .into_iter()
+            .flatten()
+            .find_map(|layer| layer.image.clone())
+            .unwrap_or_default())
+    }
+
+    /// Every image the config file names.
+    pub fn images(&self) -> impl Iterator<Item = &ImageName> {
+        let chosen = [&self.defaults]
+            .into_iter()
+            .chain(self.projects.values())
+            .filter_map(|settings| settings.image.as_ref());
+        self.images.keys().chain(chosen)
+    }
+
+    /// Merges the layers that apply to provisioning `image` with the CLI flags.
+    pub fn resolve_provision(
+        &self,
+        image: &ImageName,
+        cli: &Resources,
+    ) -> Result<ProvisionSettings> {
         let mut cpus = self.defaults.cpus.unwrap_or(DEFAULT_CPUS);
         let mut memory = self.defaults.memory.unwrap_or(DEFAULT_MEMORY);
-        for layer in [&self.provision, cli] {
+        for layer in [&self.provision]
+            .into_iter()
+            .chain(self.images.get(image))
+            .chain([cli])
+        {
             cpus = layer.cpus.unwrap_or(cpus);
             memory = layer.memory.unwrap_or(memory);
         }
@@ -492,9 +530,13 @@ mod tests {
             memory = "8G"
             mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
 
+            [images.rust]
+            memory = "12G"
+
             [projects."/tmp/foo"]
             cpus = 8
             expose-git = true
+            image = "rust"
             "#,
         )
         .unwrap();
@@ -504,12 +546,22 @@ mod tests {
         let project = &config.projects[Path::new("/tmp/foo")];
         assert_eq!(project.cpus, Some(8));
         assert_eq!(project.expose_git, Some(true));
+        assert_eq!(project.image, Some("rust".parse().unwrap()));
+        let rust = &config.images[&"rust".parse().unwrap()];
+        assert_eq!(rust.memory, Some(ByteSize::gib(12)));
+
+        assert!(Config::parse("image = \"Rust\"").is_err());
+        assert!(Config::parse("[images.\"../x\"]\ncpus = 1").is_err());
     }
 
     #[test]
     fn resolves_provision_resources() {
-        let resolve =
-            |config: &str, cli: Resources| Config::parse(config).unwrap().resolve_provision(&cli);
+        let rust: ImageName = "rust".parse().unwrap();
+        let resolve = |config: &str, cli: Resources| {
+            Config::parse(config)
+                .unwrap()
+                .resolve_provision(&rust, &cli)
+        };
         let none = Resources::default;
         let defaults = ProvisionSettings {
             cpus: DEFAULT_CPUS,
@@ -529,7 +581,16 @@ mod tests {
             cpus: None,
             memory: Some(ByteSize::gib(1)),
         };
-        assert_eq!(resolve(&table, cli).unwrap().memory, ByteSize::gib(1));
+        assert_eq!(
+            resolve(&table, cli.clone()).unwrap().memory,
+            ByteSize::gib(1)
+        );
+
+        // Only the image's own table applies, above [provision].
+        let images = format!("{table}[images.rust]\ncpus = 5\n[images.go]\ncpus = 6\n");
+        let settings = resolve(&images, none()).unwrap();
+        assert_eq!((settings.cpus, settings.memory), (5, ByteSize::gib(3)));
+        assert_eq!(resolve(&images, cli).unwrap().memory, ByteSize::gib(1));
 
         assert!(resolve("[provision]\ncpus = 0", none()).is_err());
         assert!(resolve("[provision]\nmemory = \"256M\"", none()).is_err());
@@ -540,6 +601,7 @@ mod tests {
         assert!(Config::parse("cpu = 4").is_err());
         assert!(Config::parse("[projects.\"/x\"]\nram = \"4G\"").is_err());
         assert!(Config::parse("[provision]\nmounts = []").is_err());
+        assert!(Config::parse("[images.rust]\nimage = \"go\"").is_err());
     }
 
     struct Fixture {
@@ -595,6 +657,7 @@ mod tests {
         assert_eq!(vm.memory, ByteSize::gib(1));
         assert_eq!(vm.disk_size, DEFAULT_DISK_SIZE);
         assert!(vm.expose_git);
+        assert_eq!(vm.image, ImageName::default());
         let mounts: Vec<_> = vm
             .mounts
             .iter()
@@ -612,6 +675,44 @@ mod tests {
                 (fx.dir.join("proj"), PathBuf::from("/data"), false),
             ]
         );
+    }
+
+    #[test]
+    fn resolves_images() {
+        let fx = Fixture::new("images");
+        let image = |name: &str| name.parse::<ImageName>().unwrap();
+        let project =
+            |settings: &str| format!("[projects.\"{}\"]\n{settings}\n", fx.project.root.display());
+        let resolve = |config: &str, cli: Option<&str>| {
+            let config = Config::parse(config).unwrap();
+            let cli = Settings {
+                image: cli.map(image),
+                ..Settings::default()
+            };
+            let vm = config
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .unwrap();
+            if cli.image.is_none() {
+                assert_eq!(
+                    config.resolve_image(&fx.paths, &fx.project).unwrap(),
+                    vm.image
+                );
+            }
+            vm.image
+        };
+
+        assert_eq!(resolve("", None), image("default"));
+        assert_eq!(resolve("image = \"go\"", None), image("go"));
+        let both = format!("image = \"go\"\n{}", project("image = \"rust\""));
+        assert_eq!(resolve(&both, None), image("rust"));
+        assert_eq!(resolve(&both, Some("zig")), image("zig"));
+        // A project table without an image keeps the top-level one.
+        let other = format!("image = \"go\"\n{}", project("cpus = 3"));
+        assert_eq!(resolve(&other, None), image("go"));
+
+        let config = Config::parse(&format!("[images.a]\n{}", project("image = \"b\""))).unwrap();
+        let named: Vec<_> = config.images().map(ImageName::as_str).collect();
+        assert_eq!(named, ["a", "b"]);
     }
 
     #[test]
