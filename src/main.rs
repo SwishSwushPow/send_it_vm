@@ -1,3 +1,6 @@
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+compile_error!("sendit requires macOS on Apple silicon");
+
 mod cli;
 mod commands;
 mod config;
