@@ -1,7 +1,11 @@
 //! Building the `VZVirtualMachineConfiguration` for a VM directory.
 
+use std::ffi::CString;
 use std::fs;
+use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::ptr::NonNull;
 
 use anyhow::{Context, Result, ensure};
 use objc2::AllocAnyThread;
@@ -56,8 +60,11 @@ pub fn build(
         }
         config.setStorageDevices(&NSArray::from_retained_slice(&disks));
 
-        let shares: Vec<Retained<VZDirectorySharingDeviceConfiguration>> =
-            spec.shares.iter().map(directory_share).collect();
+        let shares = spec
+            .shares
+            .iter()
+            .map(directory_share)
+            .collect::<Result<Vec<_>>>()?;
         config.setDirectorySharingDevices(&NSArray::from_retained_slice(&shares));
 
         let network = VZVirtioNetworkDeviceConfiguration::new();
@@ -99,7 +106,7 @@ fn block_device(path: &Path, read_only: bool) -> Result<Retained<VZStorageDevice
         let attachment =
             VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
                 VZDiskImageStorageDeviceAttachment::alloc(),
-                &file_url(path),
+                &*file_url(path)?,
                 read_only,
                 VZDiskImageCachingMode::Automatic,
                 VZDiskImageSynchronizationMode::Full,
@@ -114,11 +121,11 @@ fn block_device(path: &Path, read_only: bool) -> Result<Retained<VZStorageDevice
     }
 }
 
-fn directory_share(share: &Share) -> Retained<VZDirectorySharingDeviceConfiguration> {
+fn directory_share(share: &Share) -> Result<Retained<VZDirectorySharingDeviceConfiguration>> {
     unsafe {
         let directory = VZSharedDirectory::initWithURL_readOnly(
             VZSharedDirectory::alloc(),
-            &file_url(&share.host),
+            &*file_url(&share.host)?,
             share.read_only,
         );
         let single =
@@ -128,19 +135,23 @@ fn directory_share(share: &Share) -> Retained<VZDirectorySharingDeviceConfigurat
             &NSString::from_str(&share.tag),
         );
         device.setShare(Some(&single));
-        Retained::into_super(device)
+        Ok(Retained::into_super(device))
     }
 }
 
 /// Loads the VM's persistent machine identifier, creating it on first use.
 fn machine_identifier(path: &Path) -> Result<Retained<VZGenericMachineIdentifier>> {
     unsafe {
-        if let Ok(bytes) = fs::read(path) {
-            return VZGenericMachineIdentifier::initWithDataRepresentation(
-                VZGenericMachineIdentifier::alloc(),
-                &NSData::with_bytes(&bytes),
-            )
-            .with_context(|| format!("invalid machine identifier in {}", path.display()));
+        match fs::read(path) {
+            Ok(bytes) => {
+                return VZGenericMachineIdentifier::initWithDataRepresentation(
+                    VZGenericMachineIdentifier::alloc(),
+                    &NSData::with_bytes(&bytes),
+                )
+                .with_context(|| format!("invalid machine identifier in {}", path.display()));
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         }
         let id = VZGenericMachineIdentifier::new();
         fs::write(path, id.dataRepresentation().to_vec())
@@ -154,12 +165,12 @@ fn efi_variable_store(path: &Path) -> Result<Retained<VZEFIVariableStore>> {
         if path.exists() {
             return Ok(VZEFIVariableStore::initWithURL(
                 VZEFIVariableStore::alloc(),
-                &file_url(path),
+                &*file_url(path)?,
             ));
         }
         VZEFIVariableStore::initCreatingVariableStoreAtURL_options_error(
             VZEFIVariableStore::alloc(),
-            &file_url(path),
+            &*file_url(path)?,
             VZEFIVariableStoreInitializationOptions::empty(),
         )
         .map_err(ns_error)
@@ -170,12 +181,16 @@ fn efi_variable_store(path: &Path) -> Result<Retained<VZEFIVariableStore>> {
 /// Loads the VM's persistent MAC address, creating a random one on first use.
 fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
     unsafe {
-        if let Ok(text) = fs::read_to_string(path) {
-            return VZMACAddress::initWithString(
-                VZMACAddress::alloc(),
-                &NSString::from_str(text.trim()),
-            )
-            .with_context(|| format!("invalid MAC address in {}", path.display()));
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                return VZMACAddress::initWithString(
+                    VZMACAddress::alloc(),
+                    &NSString::from_str(text.trim()),
+                )
+                .with_context(|| format!("invalid MAC address in {}", path.display()));
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         }
         let mac = VZMACAddress::randomLocallyAdministeredAddress();
         fs::write(path, mac.string().to_string())
@@ -184,8 +199,19 @@ fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
     }
 }
 
-fn file_url(path: &Path) -> Retained<NSURL> {
-    NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
+/// A file URL for `path`, built from its bytes so that paths which aren't
+/// valid UTF-8 still point at the right file.
+fn file_url(path: &Path) -> Result<Retained<NSURL>> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+    Ok(unsafe {
+        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+            NonNull::new_unchecked(c_path.as_ptr().cast_mut()),
+            path.is_dir(),
+            None,
+        )
+    })
 }
 
 pub fn ns_error(error: Retained<NSError>) -> anyhow::Error {

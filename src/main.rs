@@ -9,6 +9,7 @@ mod vm;
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
+use std::path::{Component, Path};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -36,6 +37,9 @@ fn main() -> Result<()> {
             let project = project()?;
             let settings =
                 Config::load(&paths)?.resolve(&paths, &project, &args.settings(), &cwd)?;
+            if !confirm_home_share(&paths, &project)? {
+                return Ok(());
+            }
             project_vm::run(&paths, &project, &settings)
         }
         Command::Provision { force, resources } => {
@@ -48,6 +52,27 @@ fn main() -> Result<()> {
         Command::List => list(&paths),
         Command::Prune { yes } => prune(&paths, *yes),
     }
+}
+
+/// Asks before sharing a project directory that contains the home directory:
+/// the VM could then read and change everything there, including sendit's
+/// SSH key and the disks of other VMs.
+fn confirm_home_share(paths: &Paths, project: &Project) -> Result<bool> {
+    let home = paths.home();
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    if !home.starts_with(&project.root) {
+        return Ok(true);
+    }
+    let root = project.root.display();
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "{root} contains your home directory; not sharing all of it with the VM \
+             without a terminal to confirm it"
+        );
+    }
+    confirm(&format!(
+        "{root} contains your home directory. Share all of it with the VM, read-write?"
+    ))
 }
 
 fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
@@ -78,17 +103,24 @@ fn list(paths: &Paths) -> Result<()> {
     }
     println!("{:<8} {:>9}  PROJECT", "STATE", "DISK");
     for dir in dirs {
+        let metadata = project_vm::metadata(&dir);
         let state = match project_vm::state(&dir)? {
             State::Running(_) => "running",
+            State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
             State::Stopped => "stopped",
         };
         // Blocks shared with the base image (as APFS clones) count too.
         let disk = std::fs::metadata(dir.disk()).map_or(0, |m| m.blocks() * 512);
-        let project = match project_vm::metadata(&dir) {
-            Ok(metadata) if metadata.project_path.exists() => {
-                metadata.project_path.display().to_string()
+        let project = match metadata {
+            Ok(metadata) => {
+                let path = metadata.project_path.display();
+                match project_dir(&metadata.project_path) {
+                    ProjectDir::Present => path.to_string(),
+                    ProjectDir::Missing => format!("{path} (missing)"),
+                    ProjectDir::Unmounted => format!("{path} (volume not mounted)"),
+                    ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
+                }
             }
-            Ok(metadata) => format!("{} (missing)", metadata.project_path.display()),
             Err(_) => format!("? ({})", paths.display(dir.path())),
         };
         println!("{state:<8} {:>9}  {project}", approx_size(disk));
@@ -102,8 +134,18 @@ fn prune(paths: &Paths, yes: bool) -> Result<()> {
         let Ok(metadata) = project_vm::metadata(&dir) else {
             continue;
         };
-        if metadata.project_path.exists() {
-            continue;
+        let path = &metadata.project_path;
+        match project_dir(path) {
+            ProjectDir::Missing => {}
+            ProjectDir::Present => continue,
+            ProjectDir::Unmounted => {
+                eprintln!("Skipping {}: its volume is not mounted.", path.display());
+                continue;
+            }
+            ProjectDir::Inaccessible(e) => {
+                eprintln!("Skipping {}: {e}", path.display());
+                continue;
+            }
         }
         if project_vm::state(&dir)? != State::Stopped {
             eprintln!(
@@ -133,6 +175,35 @@ fn prune(paths: &Paths, yes: bool) -> Result<()> {
         eprintln!("Deleted {count}.");
     }
     Ok(())
+}
+
+/// Whether a VM's project directory is still there.
+enum ProjectDir {
+    Present,
+    Missing,
+    /// Below `/Volumes/<name>`, and that volume isn't mounted: the project
+    /// may well come back.
+    Unmounted,
+    /// Can't tell, e.g. for lack of permissions.
+    Inaccessible(std::io::Error),
+}
+
+fn project_dir(path: &Path) -> ProjectDir {
+    match path.try_exists() {
+        Ok(true) => ProjectDir::Present,
+        Ok(false) => {
+            let mut components = path.components().skip(1);
+            match (components.next(), components.next()) {
+                (Some(Component::Normal(volumes)), Some(Component::Normal(name)))
+                    if volumes == "Volumes" && !Path::new("/Volumes").join(name).exists() =>
+                {
+                    ProjectDir::Unmounted
+                }
+                _ => ProjectDir::Missing,
+            }
+        }
+        Err(e) => ProjectDir::Inaccessible(e),
+    }
 }
 
 /// Asks a yes/no question on the terminal; "no" unless the answer is yes.
@@ -167,6 +238,8 @@ fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Resu
     let base_dir = paths.base_dir();
     let base_state = if !provision::marker(paths).exists() {
         "run `sendit provision`"
+    } else if provision::base_revision(paths)? < provision::BASE_REVISION {
+        "outdated; `sendit provision --force` rebuilds it"
     } else if provision::custom_scripts_changed(paths)? {
         "custom scripts changed; `sendit provision --force` rebuilds it"
     } else {
@@ -177,6 +250,9 @@ fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Resu
         "not created".to_string()
     } else {
         match project_vm::state(&vm_dir)? {
+            State::Stopped if project_vm::metadata(&vm_dir).is_ok_and(|m| m.outdated()) => {
+                "stopped; made from an outdated base image, `sendit reset` recreates it".to_string()
+            }
             State::Stopped => "stopped".to_string(),
             State::Running(_) => {
                 let mac = std::fs::read_to_string(vm_dir.mac()).unwrap_or_default();

@@ -30,6 +30,9 @@ use crate::vm::{self, VmDir, VmSpec, net};
 /// the guest hasn't shut down after `vm::STOP_TIMEOUT`.
 const STOP_WAIT: Duration = Duration::from_secs(45);
 
+/// How often taking a VM's lock is retried, 20 ms apart.
+const LOCK_RETRIES: u32 = 5;
+
 /// Written into a project VM's directory when it is created.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
@@ -40,6 +43,14 @@ pub struct Metadata {
     pub sendit_version: String,
     #[serde(default)]
     pub created_at_unix: u64,
+}
+
+impl Metadata {
+    /// Whether the VM was created from a base image older than this version
+    /// of sendit can run.
+    pub fn outdated(&self) -> bool {
+        self.base_revision < provision::BASE_REVISION
+    }
 }
 
 fn metadata_file(dir: &VmDir) -> PathBuf {
@@ -108,7 +119,7 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
         create(paths, project, &dir)?;
     }
     ensure!(
-        metadata(&dir)?.base_revision >= provision::BASE_REVISION,
+        !metadata(&dir)?.outdated(),
         "{} was created from an older base image that this version of sendit \
          can't run; `sendit reset` deletes it so the next run starts over from \
          the current base image",
@@ -198,18 +209,35 @@ pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
         // The guest's sshd accepts it; ssh doesn't send it by default.
         .args(["-o", "SendEnv=COLORTERM"])
         .arg(format!("dev@{ip}"))
-        .args(command)
+        // ssh joins the command's arguments with spaces for the remote shell;
+        // quote them so they arrive as they were given.
+        .args((!command.is_empty()).then(|| shell_command(command)))
         .exec();
     Err(error).context("running ssh")
 }
 
-/// Deletes a stopped VM.
+/// Joins `args` into a command line for a POSIX shell that runs them as given.
+fn shell_command(args: &[String]) -> String {
+    let quote = |arg: &String| {
+        let safe = !arg.is_empty()
+            && arg
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
+        if safe {
+            arg.clone()
+        } else {
+            format!("'{}'", arg.replace('\'', r"'\''"))
+        }
+    };
+    args.iter().map(quote).collect::<Vec<_>>().join(" ")
+}
+
+/// Deletes a stopped VM. It holds the VM's lock meanwhile, so the VM can't
+/// be started while it is being deleted.
 pub fn delete(dir: &VmDir) -> Result<()> {
-    ensure!(
-        state(dir)? == State::Stopped,
-        "{} is running; stop it first",
-        dir.path().display()
-    );
+    let Some(_lock) = try_lock(dir)? else {
+        bail!("{} is running; stop it first", dir.path().display());
+    };
     fs::remove_dir_all(dir.path()).with_context(|| format!("deleting {}", dir.path().display()))
 }
 
@@ -268,22 +296,60 @@ fn lock_file(dir: &VmDir) -> PathBuf {
 /// disk. The lock is released when the returned file is closed, even if the
 /// process dies.
 fn lock(dir: &VmDir) -> Result<File> {
+    let Some(mut file) = try_lock(dir)? else {
+        bail!("this project's VM is already running");
+    };
+    file.set_len(0)?;
+    write!(file, "{}", std::process::id())?;
+    Ok(file)
+}
+
+/// Takes the VM's lock without recording a PID; `None` if the VM is running.
+fn try_lock(dir: &VmDir) -> Result<Option<File>> {
+    let run = dir.path().join("run");
+    // Not `create_dir_all`: if the VM directory was deleted meanwhile, it
+    // must not come back as an empty shell.
+    match fs::create_dir(&run) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("creating {}", run.display())),
+    }
     let path = lock_file(dir);
-    fs::create_dir_all(dir.path().join("run"))?;
-    let mut file = File::options()
+    let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
         .open(&path)
         .with_context(|| format!("opening {}", path.display()))?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => bail!("this project's VM is already running"),
-        Err(fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("locking {}", path.display()));
+    // `state` takes the lock for a moment to check it; don't mistake that
+    // for a running VM.
+    let mut retries = 0;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) if retries < LOCK_RETRIES => {
+                retries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", path.display()));
+            }
         }
     }
-    file.set_len(0)?;
-    write!(file, "{}", std::process::id())?;
-    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_ssh_commands() {
+        let command =
+            |args: &[&str]| shell_command(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        assert_eq!(command(&["ls", "-la", "/tmp"]), "ls -la /tmp");
+        assert_eq!(command(&["ls", "my file"]), "ls 'my file'");
+        assert_eq!(command(&["echo", "it's", ""]), r"echo 'it'\''s' ''");
+        assert_eq!(command(&["echo", "$HOME;", "*"]), "echo '$HOME;' '*'");
+    }
 }

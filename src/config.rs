@@ -205,13 +205,24 @@ impl Config {
         Ok(toml::from_str(text)?)
     }
 
-    /// The `[projects."<path>"]` table matching `project`, if any.
-    fn project_settings(&self, paths: &Paths, project: &Project) -> Option<&Settings> {
-        self.projects.iter().find_map(|(key, settings)| {
+    /// The `[projects."<path>"]` table matching `project`, if any. It is an
+    /// error for several tables to match, e.g. `~/app` and `/Users/me/app`.
+    fn project_settings(&self, paths: &Paths, project: &Project) -> Result<Option<&Settings>> {
+        let mut matches = self.projects.iter().filter(|(key, _)| {
             let key = paths.expand_tilde(key);
             let key = key.canonicalize().unwrap_or(key);
-            (key == project.root).then_some(settings)
-        })
+            key == project.root
+        });
+        let first = matches.next();
+        if let (Some((a, _)), Some((b, _))) = (first, matches.next()) {
+            bail!(
+                "[projects.\"{}\"] and [projects.\"{}\"] both configure {}",
+                a.display(),
+                b.display(),
+                project.root.display()
+            );
+        }
+        Ok(first.map(|(_, settings)| settings))
     }
 
     /// Merges all layers for `project`. Relative mount paths given on the
@@ -226,7 +237,7 @@ impl Config {
     ) -> Result<VmSettings> {
         let layers = [
             (Some(&self.defaults), None),
-            (self.project_settings(paths, project), None),
+            (self.project_settings(paths, project)?, None),
             (Some(cli), Some(cwd)),
         ];
 
@@ -567,5 +578,20 @@ mod tests {
         assert!(resolve("", cli("proj:/")).is_err());
         assert!(resolve("", cli("proj:/home/dev/proj")).is_err());
         assert!(resolve("", cli("missing:/data")).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_project_tables() {
+        let fx = Fixture::new("duplicate");
+        let config = Config::parse(&format!(
+            "[projects.\"{}\"]\ncpus = 1\n[projects.\"{}/../proj\"]\ncpus = 2\n",
+            fx.project.root.display(),
+            fx.project.root.display()
+        ))
+        .unwrap();
+        let error = config
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
+            .unwrap_err();
+        assert!(error.to_string().contains("both configure"), "{error}");
     }
 }

@@ -98,6 +98,9 @@ pub struct VmSpec {
 #[derive(Clone, Copy)]
 enum Stopping {
     No,
+    /// A stop was asked for, but the VM can't be stopped yet (e.g. while it
+    /// is starting); retried until it can.
+    Pending,
     /// The guest was asked to shut down at this time.
     Requested(Instant),
     Forced,
@@ -213,18 +216,20 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         seen_escapes = escapes;
         stopping = match stopping {
             Stopping::No if escaped => {
-                if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
-                    notice(stopping_notice);
-                    Stopping::Requested(Instant::now())
-                } else {
-                    force_stop(&vm, &state);
-                    Stopping::Forced
+                let next = stop(&vm, &state, stopping_notice);
+                if matches!(next, Stopping::Pending) {
+                    notice("The VM is still starting; it shuts down once it can.");
                 }
+                next
             }
+            Stopping::Pending => stop(&vm, &state, stopping_notice),
             Stopping::Requested(at) if escaped || at.elapsed() > STOP_TIMEOUT => {
-                notice("Forcing the VM off.");
-                force_stop(&vm, &state);
-                Stopping::Forced
+                if force_stop(&vm, &state) {
+                    notice("Forcing the VM off.");
+                    Stopping::Forced
+                } else {
+                    Stopping::Requested(at)
+                }
             }
             other => other,
         };
@@ -243,9 +248,23 @@ fn catch_objc<R>(f: impl FnOnce() -> R) -> Result<R> {
     })
 }
 
-fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) {
+/// Asks the guest to shut down, or stops the VM forcibly if the guest can't
+/// be asked. `Pending` if neither is possible yet.
+fn stop(vm: &VZVirtualMachine, state: &Rc<VmState>, stopping_notice: &str) -> Stopping {
+    if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
+        notice(stopping_notice);
+        Stopping::Requested(Instant::now())
+    } else if force_stop(vm, state) {
+        Stopping::Forced
+    } else {
+        Stopping::Pending
+    }
+}
+
+/// Stops the VM without asking the guest; false if it can't be stopped now.
+fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) -> bool {
     if !unsafe { vm.canStop() } {
-        return;
+        return false;
     }
     let state = state.clone();
     let on_stop = RcBlock::new(move |error: *mut NSError| {
@@ -256,4 +275,5 @@ fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) {
         state.stopped.replace(Some(result));
     });
     unsafe { vm.stopWithCompletionHandler(&on_stop) };
+    true
 }

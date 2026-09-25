@@ -26,6 +26,10 @@ impl Paths {
         Ok(Self::new(home))
     }
 
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn cache_dir(&self) -> PathBuf {
         self.home.join(".cache/sendit")
     }

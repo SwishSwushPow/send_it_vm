@@ -31,7 +31,8 @@ pub enum Command {
     Run(RunArgs),
     /// Open an SSH session to the project's running VM
     Ssh {
-        /// Command to run instead of a login shell
+        /// Command to run instead of a login shell. Its arguments arrive
+        /// unchanged; for pipes and the like, run `sh -c '...'`
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
