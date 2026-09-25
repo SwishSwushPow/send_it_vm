@@ -16,3 +16,8 @@ serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.0"
 toml = "1.1.6"
 uuid = { version = "1.26.1", features = ["v5"] }
+
+[profile.release]
+# rustc's strip step runs after the linker and would replace the signature
+# (with the virtualization entitlement) that scripts/link-and-sign.sh adds.
+strip = false

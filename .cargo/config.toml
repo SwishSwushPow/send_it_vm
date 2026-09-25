@@ -1,3 +1,4 @@
-# Signs binaries with the virtualization entitlement before `cargo run`/`cargo test`.
+# Links through a wrapper that signs executables with the virtualization
+# entitlement, so `cargo build/run/test/install --path .` produce working binaries.
 [target.aarch64-apple-darwin]
-runner = "scripts/sign-and-run.sh"
+linker = "scripts/link-and-sign.sh"
