@@ -31,8 +31,9 @@ const BANNER: &str = include_str!("assets/banner.txt");
 
 /// Bumped whenever the base image changes in a way the host code relies on.
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
-/// identifiable by MAC address, 4 shuts the VM down on console logout.
-pub const BASE_REVISION: u32 = 4;
+/// identifiable by MAC address, 4 shuts the VM down on console logout, 5
+/// applies the host terminal's size to the console.
+pub const BASE_REVISION: u32 = 5;
 
 /// Printed by provision.sh as its last line when it succeeded.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";

@@ -61,6 +61,48 @@ Restart=no
 ExecStopPost=/usr/local/sbin/sendit-console-logout
 EOF
 
+# --- Console size -----------------------------------------------------------
+# The console can't tell how large the host's terminal is. sendit sends the
+# size over /dev/hvc2 as "<rows> <cols>" lines, when the terminal is resized
+# and when asked with a "?"; apply it to the console, which then tells the
+# programs running there (SIGWINCH).
+cat > /usr/local/sbin/sendit-console-size <<'EOF'
+#!/bin/sh
+# stdin and stdout are /dev/hvc2.
+set -u
+# The kernel forgets the size whenever nothing has the console open, e.g.
+# before the getty has started. Hold it open from a child: this script leads
+# its session, so opening the console would make it its controlling terminal,
+# and the getty couldn't have it anymore.
+sleep infinity < /dev/hvc0 &
+stty -echo
+echo '?'
+while read -r rows cols; do
+    case $rows$cols in
+        '' | *[!0-9]*) continue ;;
+    esac
+    stty -F /dev/hvc0 rows "$rows" cols "$cols"
+done
+EOF
+chmod 755 /usr/local/sbin/sendit-console-size
+cat > /etc/systemd/system/sendit-console-size.service <<'EOF'
+[Unit]
+Description=Apply the host terminal's size to the console
+BindsTo=dev-hvc2.device
+After=dev-hvc2.device
+
+[Service]
+ExecStart=/usr/local/sbin/sendit-console-size
+# systemd opens these without making /dev/hvc2 the controlling terminal.
+StandardInput=file:/dev/hvc2
+StandardOutput=file:/dev/hvc2
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable sendit-console-size.service
+
 # --- Networking -------------------------------------------------------------
 # cloud-init's generated config matches this VM's MAC address, but every
 # project VM gets its own MAC. Replace it with a config that matches by name.

@@ -6,13 +6,18 @@
 //! get the terminal itself: it makes the descriptors it is given
 //! non-blocking, and on a terminal stdin and stdout share that flag, so
 //! reading keystrokes would fail.
+//!
+//! The guest's console can't tell how large the terminal is, so a third port
+//! carries the size: sendit sends it whenever the terminal is resized
+//! (SIGWINCH) and whenever the guest asks for it, and a service in the guest
+//! applies it to the console.
 
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use objc2::AllocAnyThread;
@@ -26,8 +31,11 @@ pub const ESCAPE_KEY: u8 = 0x1d;
 pub struct Console {
     /// The login console, /dev/hvc0 in the guest.
     main: Retained<VZFileHandleSerialPortAttachment>,
-    /// Output-only port for provisioning, /dev/hvc1 in the guest.
-    log: Option<Retained<VZFileHandleSerialPortAttachment>>,
+    /// Output-only port for provisioning, /dev/hvc1 in the guest. Its
+    /// output is discarded outside of provisioning.
+    log: Retained<VZFileHandleSerialPortAttachment>,
+    /// Carries the terminal size, /dev/hvc2 in the guest.
+    size: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
     _raw_mode: Option<RawMode>,
 }
@@ -46,11 +54,11 @@ impl Console {
         let counter = escapes.clone();
         std::thread::spawn(move || forward_stdin(write_end, &counter));
 
-        let (main_output, log) = match log {
+        let (main_output, log_output) = match log {
             None => {
                 let (read_end, write_end) = pipe()?;
                 std::thread::spawn(move || copy_output(read_end, None));
-                (file_handle(write_end), None)
+                (file_handle(write_end), null_output()?)
             }
             Some(path) => {
                 let log = File::options()
@@ -60,17 +68,14 @@ impl Console {
                     .with_context(|| format!("opening {}", path.display()))?;
                 let (read_end, write_end) = pipe()?;
                 std::thread::spawn(move || copy_output(read_end, Some(log)));
-                let port = serial_port(None, &file_handle(write_end));
-                // VZ needs handles backed by real file descriptors, which
-                // `fileHandleWithNullDevice` isn't.
-                let null = File::options().write(true).open("/dev/null")?;
-                (file_handle(null.into()), Some(port))
+                (null_output()?, file_handle(write_end))
             }
         };
 
         Ok(Self {
             main: serial_port(Some(&file_handle(read_end)), &main_output),
-            log,
+            log: serial_port(None, &log_output),
+            size: size_port()?,
             escapes,
             _raw_mode: RawMode::enable(log_given)?,
         })
@@ -78,9 +83,7 @@ impl Console {
 
     /// The attachments for the guest's serial ports, in order.
     pub fn ports(&self) -> Vec<&VZSerialPortAttachment> {
-        let mut ports: Vec<&VZSerialPortAttachment> = vec![&self.main];
-        ports.extend(self.log.as_deref().map(|port| &**port));
-        ports
+        vec![&self.main, &self.log, &self.size]
     }
 
     /// How often the escape key has been pressed so far.
@@ -102,6 +105,13 @@ fn serial_port(
     }
 }
 
+/// A handle that discards what is written to it. VZ needs handles backed by
+/// real file descriptors, which `fileHandleWithNullDevice` isn't.
+fn null_output() -> Result<Retained<NSFileHandle>> {
+    let null = File::options().write(true).open("/dev/null")?;
+    Ok(file_handle(null.into()))
+}
+
 /// Wraps `fd` in an `NSFileHandle` that closes it when released.
 fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
     NSFileHandle::initWithFileDescriptor_closeOnDealloc(
@@ -121,6 +131,103 @@ fn copy_output(from_guest: OwnedFd, mut log: Option<File>) {
             let _ = log.write_all(&buf[..n]);
         }
     }
+}
+
+/// Write end of the pipe that wakes up `send_sizes` on SIGWINCH, or -1.
+static WINCH_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn on_winch(_: libc::c_int) {
+    // SAFETY: write() is async-signal-safe, and errno is restored for the
+    // code the signal interrupted.
+    unsafe {
+        let errno = *libc::__error();
+        libc::write(WINCH_PIPE.load(Ordering::Relaxed), [0u8].as_ptr().cast(), 1);
+        *libc::__error() = errno;
+    }
+}
+
+/// Creates the port that carries the terminal size to the guest, and starts
+/// sending it there.
+fn size_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
+    let (winch, winch_write) = pipe()?;
+    // Never block the signal handler: one pending wakeup is as good as many.
+    // SAFETY: plain fcntl calls on a descriptor we own.
+    unsafe {
+        let flags = libc::fcntl(winch_write.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(
+            winch_write.as_raw_fd(),
+            libc::F_SETFL,
+            flags | libc::O_NONBLOCK,
+        );
+    }
+    // Left open for good: the signal handler may use it at any time.
+    WINCH_PIPE.store(winch_write.into_raw_fd(), Ordering::Relaxed);
+    // SAFETY: the handler only makes async-signal-safe calls.
+    unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t) };
+
+    let (guest_reads, to_guest) = pipe()?;
+    let (from_guest, guest_writes) = pipe()?;
+    std::thread::spawn(move || send_sizes(to_guest, from_guest, winch));
+    Ok(serial_port(
+        Some(&file_handle(guest_reads)),
+        &file_handle(guest_writes),
+    ))
+}
+
+/// Sends the terminal size to the guest as "<rows> <cols>" lines: when
+/// `winch` is signalled, and when the guest writes a "?" (which it does once
+/// it is ready to apply the size).
+fn send_sizes(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
+    let mut fds = [&winch, &from_guest].map(|fd| libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    let mut buf = [0u8; 64];
+    loop {
+        // SAFETY: `fds` is valid for its length.
+        if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        let mut send = false;
+        for pollfd in &mut fds {
+            if pollfd.revents == 0 {
+                continue;
+            }
+            match read(pollfd.fd, &mut buf) {
+                // poll() skips negative descriptors.
+                Ok(0) | Err(_) => pollfd.fd = -1,
+                Ok(n) => send |= pollfd.fd == winch.as_raw_fd() || buf[..n].contains(&b'?'),
+            }
+        }
+        if send
+            && let Some(size) = terminal_size()
+            && write_all(to_guest.as_raw_fd(), size.as_bytes()).is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// The terminal's size as a "<rows> <cols>" line, if stdout is a terminal.
+fn terminal_size() -> Option<String> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ fills in the winsize it is given.
+    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } != 0
+        || size.ws_row == 0
+        || size.ws_col == 0
+    {
+        return None;
+    }
+    Some(format!("{} {}\n", size.ws_row, size.ws_col))
 }
 
 fn forward_stdin(to_guest: OwnedFd, escapes: &AtomicUsize) {
