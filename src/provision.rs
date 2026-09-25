@@ -25,8 +25,9 @@ const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
 const BANNER: &str = include_str!("assets/banner.txt");
 
 /// Bumped whenever the base image changes in a way the host code relies on.
-/// Revision 2 added the sendit-mounts service.
-pub const BASE_REVISION: u32 = 2;
+/// Revision 2 added the sendit-mounts service, 3 made DHCP leases
+/// identifiable by MAC address.
+pub const BASE_REVISION: u32 = 3;
 
 /// Printed by provision.sh as its last line when it succeeded.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";

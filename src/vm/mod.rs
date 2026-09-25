@@ -6,11 +6,14 @@
 
 mod config;
 mod console;
+pub mod net;
 
 use std::cell::RefCell;
+use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -27,6 +30,27 @@ use console::Console;
 
 /// How long to wait for the guest to shut down after asking it to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// SIGTERM (e.g. from `send_it stop`), SIGHUP (the terminal went away) and
+/// SIGINT received so far. Each one counts like a press of the escape key.
+static SIGNALS: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    SIGNALS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn handle_signals() {
+    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+        // SAFETY: the handler only touches an atomic, which is signal-safe.
+        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
+    }
+}
+
+/// Prints a status line between guest output. Errors are ignored: after a
+/// SIGHUP the terminal is gone, and the VM must still be shut down cleanly.
+fn notice(message: &str) {
+    let _ = write!(std::io::stderr(), "\r\n[send_it] {message}\r\n");
+}
 
 /// The files making up one VM (the base image or a project VM).
 #[derive(Clone, Debug)]
@@ -117,8 +141,9 @@ impl VmDelegate {
 }
 
 /// Boots the VM with the console attached to this terminal and blocks until
-/// it has stopped. Pressing Ctrl-] asks the guest to shut down; pressing it
-/// again (or the guest not reacting in time) stops the VM forcibly.
+/// it has stopped. Pressing Ctrl-] (or sending SIGTERM, SIGHUP or SIGINT)
+/// asks the guest to shut down; doing it again, or the guest not reacting in
+/// time, stops the VM forcibly.
 pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     // The VM runs on the main dispatch queue, which only the main thread drains.
     ensure!(
@@ -135,6 +160,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         dir.disk().display()
     );
 
+    handle_signals();
     let console = Console::attach(spec.provision_log.as_deref())?;
     let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
     let state = Rc::new(VmState::default());
@@ -153,7 +179,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     });
     catch_objc(|| unsafe { vm.startWithCompletionHandler(&on_start) })?;
 
-    eprint!("\r\n[send_it] VM starting. Press Ctrl-] to shut it down.\r\n");
+    notice("VM starting. Press Ctrl-] to shut it down.");
 
     let run_loop = NSRunLoop::currentRunLoop();
     let mut seen_escapes = 0;
@@ -171,13 +197,13 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
                 .context("the VM stopped with an error");
         }
 
-        let escapes = console.escapes();
+        let escapes = console.escapes() + SIGNALS.load(Ordering::Relaxed);
         let escaped = escapes > seen_escapes;
         seen_escapes = escapes;
         stopping = match stopping {
             Stopping::No if escaped => {
                 if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
-                    eprint!("\r\n[send_it] Shutting down. Press Ctrl-] again to force.\r\n");
+                    notice("Shutting down. Press Ctrl-] again to force.");
                     Stopping::Requested(Instant::now())
                 } else {
                     force_stop(&vm, &state);
@@ -185,7 +211,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
                 }
             }
             Stopping::Requested(at) if escaped || at.elapsed() > STOP_TIMEOUT => {
-                eprint!("\r\n[send_it] Forcing the VM off.\r\n");
+                notice("Forcing the VM off.");
                 force_stop(&vm, &state);
                 Stopping::Forced
             }
@@ -193,7 +219,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         };
     };
     drop(console);
-    eprintln!();
+    let _ = writeln!(std::io::stderr());
     result
 }
 

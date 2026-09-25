@@ -93,7 +93,9 @@ pub fn debian_image(paths: &Paths) -> Result<DebianImage> {
 fn fetch_checksum() -> Result<String> {
     let url = format!("{IMAGE_BASE_URL}/SHA512SUMS");
     let output = Command::new("curl")
-        .args(["-fsSL", &url])
+        // Without a timeout, a stalled connection would hang here instead of
+        // falling back to the cached image.
+        .args(["-fsSL", "--connect-timeout", "10", "--max-time", "30", &url])
         .output()
         .context("running curl")?;
     ensure!(

@@ -172,8 +172,15 @@ fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Terminal modes a program in the guest may have switched on and not off
+/// when the VM went away: attributes, alternate screen, hidden cursor,
+/// application cursor keys and keypad, mouse reporting, bracketed paste.
+const TERMINAL_RESET: &[u8] =
+    b"\x1b[0m\x1b[?1049l\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
+
 /// Puts the terminal into raw mode, so keystrokes (including Ctrl-C) go to
-/// the guest unmodified. Restores the previous mode on drop.
+/// the guest unmodified. On drop, resets what the guest may have changed and
+/// restores the previous mode.
 struct RawMode {
     original: libc::termios,
 }
@@ -202,7 +209,15 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // SAFETY: restores the attributes read in `enable`.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original) };
+        // SAFETY: plain libc calls; restores the attributes read in `enable`.
+        unsafe {
+            if libc::isatty(libc::STDOUT_FILENO) == 1 {
+                let _ = write_all(libc::STDOUT_FILENO, TERMINAL_RESET);
+            }
+            // Drop input nobody will read now, such as the terminal's replies
+            // to queries the guest sent, so it doesn't end up in the shell.
+            libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+        }
     }
 }

@@ -27,7 +27,11 @@ pub enum Command {
     /// Boot the project's VM and attach to its console
     Run(RunArgs),
     /// Open an SSH session to the project's running VM
-    Ssh,
+    Ssh {
+        /// Command to run instead of a login shell
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND")]
+        command: Vec<String>,
+    },
     /// Show the project's VM and its effective settings
     Status,
     /// Shut down the project's running VM
@@ -114,6 +118,15 @@ mod tests {
         assert_eq!(settings.memory, Some(ByteSize::gib(8)));
         assert_eq!(settings.mounts.len(), 2);
         assert_eq!(settings.expose_git, Some(true));
+    }
+
+    #[test]
+    fn passes_ssh_commands_through() {
+        let cli = Cli::try_parse_from(["send_it", "ssh", "ls", "-la", "/workspace"]).unwrap();
+        let Command::Ssh { command } = cli.command else {
+            panic!("expected ssh")
+        };
+        assert_eq!(command, ["ls", "-la", "/workspace"]);
     }
 
     #[test]

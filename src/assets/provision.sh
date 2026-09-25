@@ -56,6 +56,8 @@ EOF
 # --- Networking -------------------------------------------------------------
 # cloud-init's generated config matches this VM's MAC address, but every
 # project VM gets its own MAC. Replace it with a config that matches by name.
+# Identifying by MAC (instead of a DUID) lets `send_it ssh` find the VM's
+# lease in the host's /var/db/dhcpd_leases.
 rm -f /etc/netplan/50-cloud-init.yaml \
     /etc/network/interfaces.d/50-cloud-init \
     /etc/systemd/network/10-cloud-init-*.network
@@ -65,6 +67,9 @@ Name=en*
 
 [Network]
 DHCP=yes
+
+[DHCPv4]
+ClientIdentifier=mac
 EOF
 systemctl enable systemd-networkd.service
 
