@@ -1,6 +1,9 @@
 mod cli;
 mod config;
+mod image;
 mod paths;
+mod provision;
+mod vm;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -30,8 +33,10 @@ fn main() -> Result<()> {
             print_status(&paths, &project, &settings);
             bail!("booting VMs is not implemented yet")
         }
-        Command::Provision { .. }
-        | Command::Ssh
+        Command::Provision { force } => {
+            provision::provision(&paths, &Config::load(&paths)?, *force)
+        }
+        Command::Ssh
         | Command::Stop
         | Command::Reset { .. }
         | Command::List
@@ -41,7 +46,7 @@ fn main() -> Result<()> {
 
 fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) {
     let base_dir = paths.base_dir();
-    let base_state = if base_dir.exists() {
+    let base_state = if provision::marker(paths).exists() {
         "provisioned"
     } else {
         "run `send_it provision`"
