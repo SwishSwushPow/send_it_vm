@@ -46,7 +46,7 @@ fn main() -> Result<()> {
             let settings = Config::load(&paths)?.resolve_provision(&resources.resources())?;
             provision::provision(&paths, &settings, *force)
         }
-        Command::Ssh { command } => project_vm::ssh(&paths, &project()?, command),
+        Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),
         Command::Reset { yes } => reset(&paths, &project()?, *yes),
         Command::List => list(&paths),

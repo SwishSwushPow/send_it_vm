@@ -38,6 +38,7 @@ echo '127.0.1.1 sendit' >> /etc/hosts
     printf '\033[0m'
     echo '  Light and fast VMs. Your project is in your home directory.'
     echo '  Logging out of the console (exit or Ctrl-D) shuts the VM down.'
+    echo '  There is no sudo here; for root, run `sendit ssh --root` on the host.'
     echo
 } > /etc/motd
 
@@ -262,6 +263,15 @@ WantedBy=multi-user.target
 EOF
 systemctl enable sendit-ssh-hostkeys.service ssh.service
 
+# --- Root access ------------------------------------------------------------
+# Only the host becomes root, over SSH with a key of its own (`sendit ssh
+# --root`). The login user loses its sudo rights at the end of
+# provisioning, so nothing running in the VM can become root, e.g. to
+# unmount the mask over the project's .git.
+install -d -m 700 /root/.ssh
+install -m 600 "$seed/root.pub" /root/.ssh/authorized_keys
+echo 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/sendit.conf
+
 # --- Custom scripts ---------------------------------------------------------
 # The user's scripts from ~/.config/sendit/provision-scripts, in name order.
 # They run as the login user in a login shell from its home directory, so
@@ -277,6 +287,15 @@ while read -r file name; do
 done < "$seed/custom/list"
 rm /etc/sudoers.d/sendit-provision
 apt-get clean
+
+# --- No more sudo -----------------------------------------------------------
+# The custom scripts were the last to need it (see Root access above).
+rm -f /etc/sudoers.d/90-cloud-init-users
+gpasswd -d "$user" sudo
+if sudo -l -U "$user" true > /dev/null 2>&1; then
+    echo "sendit: $user can still use sudo"
+    exit 1
+fi
 
 # cloud-init has done its job; later boots of copies must not re-run it.
 touch /etc/cloud/cloud-init.disabled

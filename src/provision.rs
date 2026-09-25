@@ -32,8 +32,9 @@ const BANNER: &str = include_str!("assets/banner.txt");
 /// Bumped whenever the base image changes in a way the host code relies on.
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
 /// identifiable by MAC address, 4 shuts the VM down on console logout, 5
-/// applies the host terminal's size to the console, 6 its type.
-pub const BASE_REVISION: u32 = 6;
+/// applies the host terminal's size to the console, 6 its type, 7 takes
+/// the guest user's sudo rights and lets the host log in as root.
+pub const BASE_REVISION: u32 = 7;
 
 /// Printed by provision.sh as its last line when it succeeded.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
@@ -154,13 +155,14 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
     }
 
     let image = image::debian_image(paths)?;
-    let public_key = ssh_public_key(paths)?;
+    let public_key = ssh_public_key(&paths.ssh_key())?;
+    let root_public_key = ssh_public_key(&paths.root_ssh_key())?;
     let scripts = custom_scripts(paths)?;
 
     let work = paths.provision_dir();
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
-    let seed = build_seed_iso(&work, &public_key, &scripts)?;
+    let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts)?;
 
     let partial = VmDir::new(paths.base_partial_dir());
     let _ = fs::remove_dir_all(partial.path());
@@ -218,15 +220,16 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
     Ok(())
 }
 
-/// Returns the public key of sendit's SSH keypair, generating it first if needed.
-fn ssh_public_key(paths: &Paths) -> Result<String> {
-    let dir = paths.ssh_dir();
-    let key = dir.join("id_ed25519");
+/// Returns the public key of the SSH keypair `key`, generating it first if
+/// needed.
+fn ssh_public_key(key: &Path) -> Result<String> {
     if !key.exists() {
-        fs::create_dir_all(&dir)?;
+        if let Some(dir) = key.parent() {
+            fs::create_dir_all(dir)?;
+        }
         let status = Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-C", "sendit", "-f"])
-            .arg(&key)
+            .arg(key)
             .status()
             .context("running ssh-keygen")?;
         ensure!(status.success(), "ssh-keygen failed with {status}");
@@ -240,9 +243,16 @@ fn ssh_public_key(paths: &Paths) -> Result<String> {
 
 /// Writes the NoCloud seed files into `work/seed/` and packs them into an ISO
 /// labelled `cidata`.
-fn build_seed_iso(work: &Path, public_key: &str, scripts: &[CustomScript]) -> Result<PathBuf> {
+fn build_seed_iso(
+    work: &Path,
+    public_key: &str,
+    root_public_key: &str,
+    scripts: &[CustomScript],
+) -> Result<PathBuf> {
     ensure!(
-        !public_key.contains(['\n', '"']),
+        ![public_key, root_public_key]
+            .iter()
+            .any(|key| key.contains(['\n', '"'])),
         "unexpected SSH public key format"
     );
     let dir = work.join("seed");
@@ -259,6 +269,7 @@ fn build_seed_iso(work: &Path, public_key: &str, scripts: &[CustomScript]) -> Re
         dir.join("user-data"),
         USER_DATA.replace("@SSH_PUBLIC_KEY@", public_key),
     )?;
+    fs::write(dir.join("root.pub"), format!("{root_public_key}\n"))?;
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
     fs::write(dir.join("banner.txt"), BANNER)?;
     // Numbered file names survive the ISO's file name limits; `list` maps

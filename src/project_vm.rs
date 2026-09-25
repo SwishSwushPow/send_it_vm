@@ -178,8 +178,8 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
 }
 
 /// Replaces this process with an SSH session to the project's running VM,
-/// running `command` if given.
-pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
+/// as root if `root`, running `command` if given.
+pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> Result<()> {
     let dir = VmDir::new(paths.vm_dir(project));
     ensure!(
         state(&dir)? != State::Stopped,
@@ -194,7 +194,16 @@ pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
         )
     })?;
 
-    let key = paths.ssh_dir().join("id_ed25519");
+    let (user, key) = if root {
+        ("root", paths.root_ssh_key())
+    } else {
+        ("dev", paths.ssh_key())
+    };
+    ensure!(
+        key.exists(),
+        "{} is missing; `sendit provision --force` creates it",
+        paths.display(&key)
+    );
     // Each VM gets its own known_hosts: IP addresses are reused across VMs,
     // but a VM's host keys stay the same for its lifetime.
     let known_hosts = dir.path().join("known_hosts");
@@ -208,7 +217,7 @@ pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
         .args(["-o", "LogLevel=ERROR"])
         // The guest's sshd accepts it; ssh doesn't send it by default.
         .args(["-o", "SendEnv=COLORTERM"])
-        .arg(format!("dev@{ip}"))
+        .arg(format!("{user}@{ip}"))
         // ssh joins the command's arguments with spaces for the remote shell;
         // quote them so they arrive as they were given.
         .args((!command.is_empty()).then(|| shell_command(command)))

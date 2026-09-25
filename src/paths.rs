@@ -54,9 +54,20 @@ impl Paths {
         self.cache_dir().join("provision")
     }
 
-    /// The keypair whose public key is baked into the base image.
+    /// The keypairs whose public keys are baked into the base image.
     pub fn ssh_dir(&self) -> PathBuf {
         self.cache_dir().join("ssh")
+    }
+
+    /// The private key for logging in as the guest user.
+    pub fn ssh_key(&self) -> PathBuf {
+        self.ssh_dir().join("id_ed25519")
+    }
+
+    /// The private key for logging in as root: only the host can become
+    /// root in a VM.
+    pub fn root_ssh_key(&self) -> PathBuf {
+        self.ssh_dir().join("id_ed25519_root")
     }
 
     pub fn config_file(&self) -> PathBuf {

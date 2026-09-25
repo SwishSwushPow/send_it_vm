@@ -19,6 +19,18 @@ fail() {
     status=1
 }
 
+# Whether $1 or one of its parents is a symlink. The user may have planted
+# one below its home to make this script, which runs as root, mount or
+# chown something elsewhere. Expects a normalized absolute path.
+has_symlink() {
+    p=$1
+    while [ "$p" != / ]; do
+        [ -L "$p" ] && return 0
+        p=$(dirname "$p")
+    done
+    return 1
+}
+
 # Creates a mount point and any missing parents. Directories created inside
 # the user's home belong to the user, so e.g. ~/.cache stays writable.
 mkpoint() {
@@ -39,7 +51,9 @@ while read -r kind rest; do
             rest=${rest#* }
             mode=${rest%% *}
             path=${rest#* }
-            if mkpoint "$path" && mount -t virtiofs -o "$mode" "$tag" "$path"; then
+            if has_symlink "$path"; then
+                fail "not mounting $tag at $path: it leads through a symlink"
+            elif mkpoint "$path" && mount -t virtiofs -o "$mode" "$tag" "$path"; then
                 echo "sendit-mounts: $path ($mode)"
             else
                 fail "could not mount $tag at $path"
@@ -47,7 +61,9 @@ while read -r kind rest; do
             ;;
         hide)
             path=$rest
-            if [ -d "$path" ]; then
+            if has_symlink "$path"; then
+                fail "not hiding $path: it leads through a symlink"
+            elif [ -d "$path" ]; then
                 mount -t tmpfs -o ro,mode=0555,size=4k sendit-hidden "$path" ||
                     fail "could not hide $path"
             elif [ -e "$path" ]; then

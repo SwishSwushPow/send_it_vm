@@ -309,7 +309,9 @@ fn resolve_mount(paths: &Paths, spec: &MountSpec, base: Option<&Path>) -> Result
     ensure!(host.is_dir(), "mount {}: not a directory", host.display());
 
     let guest = match &spec.guest {
-        Some(guest) => guest.clone(),
+        // Normalized, e.g. without a trailing slash, which would hide a
+        // symlink from the guest's check for them (`[ -L dir/ ]`).
+        Some(guest) => guest.components().collect(),
         None => {
             let name = host.file_name().with_context(|| {
                 format!("mount {}: give a guest path explicitly", host.display())

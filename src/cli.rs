@@ -31,6 +31,11 @@ pub enum Command {
     Run(RunArgs),
     /// Open an SSH session to the project's running VM
     Ssh {
+        /// Log in as root, e.g. to install packages; the VM's user has no
+        /// sudo rights
+        #[arg(long)]
+        root: bool,
+
         /// Command to run instead of a login shell. Its arguments arrive
         /// unchanged; for pipes and the like, run `sh -c '...'`
         #[arg(
@@ -147,10 +152,18 @@ mod tests {
     #[test]
     fn passes_ssh_commands_through() {
         let cli = Cli::try_parse_from(["sendit", "ssh", "ls", "-la", "/workspace"]).unwrap();
-        let Command::Ssh { command } = cli.command else {
+        let Command::Ssh { root, command } = cli.command else {
             panic!("expected ssh")
         };
+        assert!(!root);
         assert_eq!(command, ["ls", "-la", "/workspace"]);
+
+        let cli = Cli::try_parse_from(["sendit", "ssh", "--root", "apt", "--help"]).unwrap();
+        let Command::Ssh { root, command } = cli.command else {
+            panic!("expected ssh")
+        };
+        assert!(root);
+        assert_eq!(command, ["apt", "--help"]);
     }
 
     #[test]

@@ -6,8 +6,9 @@
 //! knows to mount that share and run the script, so the mount logic can
 //! change without re-provisioning.
 //!
-//! Hiding `.git` keeps it out of sight of the guest user, but it is not a
-//! security boundary: root in the guest can unmount the mask.
+//! Hiding `.git` keeps it out of reach of the guest user, which has no root
+//! rights to unmount the mask. Only the host can become root in the guest
+//! (`sendit ssh --root`).
 
 use std::fmt::Write;
 use std::fs;
