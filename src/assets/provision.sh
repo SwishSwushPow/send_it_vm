@@ -53,23 +53,60 @@ exec systemctl --no-block poweroff
 EOF
 chmod 755 /usr/local/sbin/sendit-console-logout
 mkdir -p /etc/systemd/system/serial-getty@hvc0.service.d
+# The getty waits for the host's terminal type (see Console terminal below).
 cat > /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf <<EOF
+[Unit]
+Wants=sendit-console-terminal.service
+After=sendit-console-terminal.service
+
 [Service]
+EnvironmentFile=-/run/sendit-console.env
 ExecStart=
 ExecStart=-/sbin/agetty --autologin $user --noclear --keep-baud 115200,57600,38400,9600 - \$TERM
 Restart=no
 ExecStopPost=/usr/local/sbin/sendit-console-logout
 EOF
 
-# --- Console size -----------------------------------------------------------
-# The console can't tell how large the host's terminal is. sendit sends the
-# size over /dev/hvc2 as "<rows> <cols>" lines, when the terminal is resized
-# and when asked with a "?"; apply it to the console, which then tells the
-# programs running there (SIGWINCH).
-cat > /usr/local/sbin/sendit-console-size <<'EOF'
-#!/bin/sh
+# --- Console terminal -------------------------------------------------------
+# The console can't tell what the host's terminal is. Asked with a "?" over
+# /dev/hvc2, sendit answers with a "term <TERM> [<COLORTERM>]" line and the
+# size as a "<rows> <cols>" line, and it sends the size again whenever the
+# terminal is resized. The type goes to /run/sendit-console.env for the
+# getty, which waits until it is there; the size is applied to the console,
+# which then tells the programs running there (SIGWINCH).
+cat > /usr/local/sbin/sendit-console-terminal <<'EOF'
+#!/bin/bash
 # stdin and stdout are /dev/hvc2.
 set -u
+env=/run/sendit-console.env
+
+apply_size() {
+    case $1$2 in
+        '' | *[!0-9]*) return ;;
+    esac
+    stty -F /dev/hvc0 rows "$1" cols "$2"
+}
+
+# Terminal types without a terminfo entry here (such as xterm-ghostty) would
+# break programs, so they fall back to xterm-256color.
+write_env() {
+    local term=$1 colorterm=$2
+    case $term in
+        *[!A-Za-z0-9._+-]*) term= ;;
+    esac
+    case $colorterm in
+        *[!A-Za-z0-9._+-]*) colorterm= ;;
+    esac
+    if [ -z "$term" ] || ! infocmp "$term" > /dev/null 2>&1; then
+        term=xterm-256color
+    fi
+    {
+        echo "TERM=$term"
+        [ -z "$colorterm" ] || echo "COLORTERM=$colorterm"
+    } > "$env.tmp"
+    mv "$env.tmp" "$env"
+}
+
 # The kernel forgets the size whenever nothing has the console open, e.g.
 # before the getty has started. Hold it open from a child: this script leads
 # its session, so opening the console would make it its controlling terminal,
@@ -77,22 +114,33 @@ set -u
 sleep infinity < /dev/hvc0 &
 stty -echo
 echo '?'
-while read -r rows cols; do
-    case $rows$cols in
-        '' | *[!0-9]*) continue ;;
-    esac
-    stty -F /dev/hvc0 rows "$rows" cols "$cols"
+# The getty waits for the type, so don't wait long for it.
+term= colorterm=
+while read -r -t 5 first second third; do
+    if [ "$first" = term ]; then
+        term=$second colorterm=$third
+        break
+    fi
+    apply_size "$first" "$second"
+done
+write_env "$term" "$colorterm"
+systemd-notify --ready
+while read -r first second third; do
+    [ "$first" = term ] || apply_size "$first" "$second"
 done
 EOF
-chmod 755 /usr/local/sbin/sendit-console-size
-cat > /etc/systemd/system/sendit-console-size.service <<'EOF'
+chmod 755 /usr/local/sbin/sendit-console-terminal
+cat > /etc/systemd/system/sendit-console-terminal.service <<'EOF'
 [Unit]
-Description=Apply the host terminal's size to the console
+Description=Apply the host terminal's type and size to the console
 BindsTo=dev-hvc2.device
 After=dev-hvc2.device
 
 [Service]
-ExecStart=/usr/local/sbin/sendit-console-size
+Type=notify
+# systemd-notify runs as a child of the script.
+NotifyAccess=all
+ExecStart=/usr/local/sbin/sendit-console-terminal
 # systemd opens these without making /dev/hvc2 the controlling terminal.
 StandardInput=file:/dev/hvc2
 StandardOutput=file:/dev/hvc2
@@ -101,7 +149,15 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable sendit-console-size.service
+systemctl enable sendit-console-terminal.service
+# login keeps only TERM from the getty's environment; bring back COLORTERM.
+cat > /etc/profile.d/sendit-console.sh <<'EOF'
+if [ "$(tty)" = /dev/hvc0 ] && [ -r /run/sendit-console.env ]; then
+    set -a
+    . /run/sendit-console.env
+    set +a
+fi
+EOF
 
 # --- Networking -------------------------------------------------------------
 # cloud-init's generated config matches this VM's MAC address, but every

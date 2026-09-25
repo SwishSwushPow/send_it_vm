@@ -7,10 +7,11 @@
 //! non-blocking, and on a terminal stdin and stdout share that flag, so
 //! reading keystrokes would fail.
 //!
-//! The guest's console can't tell how large the terminal is, so a third port
-//! carries the size: sendit sends it whenever the terminal is resized
-//! (SIGWINCH) and whenever the guest asks for it, and a service in the guest
-//! applies it to the console.
+//! The guest's console can't tell what kind of terminal it is connected to
+//! or how large it is, so a third port carries both: when the guest asks,
+//! sendit sends the terminal's type ($TERM and $COLORTERM) and size, and it
+//! sends the size again whenever the terminal is resized (SIGWINCH). A
+//! service in the guest applies them to the console.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -34,8 +35,8 @@ pub struct Console {
     /// Output-only port for provisioning, /dev/hvc1 in the guest. Its
     /// output is discarded outside of provisioning.
     log: Retained<VZFileHandleSerialPortAttachment>,
-    /// Carries the terminal size, /dev/hvc2 in the guest.
-    size: Retained<VZFileHandleSerialPortAttachment>,
+    /// Carries the terminal's type and size, /dev/hvc2 in the guest.
+    terminal: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
     _raw_mode: Option<RawMode>,
 }
@@ -75,7 +76,7 @@ impl Console {
         Ok(Self {
             main: serial_port(Some(&file_handle(read_end)), &main_output),
             log: serial_port(None, &log_output),
-            size: size_port()?,
+            terminal: terminal_port()?,
             escapes,
             _raw_mode: RawMode::enable(log_given)?,
         })
@@ -83,7 +84,7 @@ impl Console {
 
     /// The attachments for the guest's serial ports, in order.
     pub fn ports(&self) -> Vec<&VZSerialPortAttachment> {
-        vec![&self.main, &self.log, &self.size]
+        vec![&self.main, &self.log, &self.terminal]
     }
 
     /// How often the escape key has been pressed so far.
@@ -133,7 +134,7 @@ fn copy_output(from_guest: OwnedFd, mut log: Option<File>) {
     }
 }
 
-/// Write end of the pipe that wakes up `send_sizes` on SIGWINCH, or -1.
+/// Write end of the pipe that wakes up `send_terminal` on SIGWINCH, or -1.
 static WINCH_PIPE: AtomicI32 = AtomicI32::new(-1);
 
 extern "C" fn on_winch(_: libc::c_int) {
@@ -146,9 +147,9 @@ extern "C" fn on_winch(_: libc::c_int) {
     }
 }
 
-/// Creates the port that carries the terminal size to the guest, and starts
-/// sending it there.
-fn size_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
+/// Creates the port that carries the terminal's type and size to the guest,
+/// and starts sending them there.
+fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
     let (winch, winch_write) = pipe()?;
     // Never block the signal handler: one pending wakeup is as good as many.
     // SAFETY: plain fcntl calls on a descriptor we own.
@@ -167,17 +168,18 @@ fn size_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
 
     let (guest_reads, to_guest) = pipe()?;
     let (from_guest, guest_writes) = pipe()?;
-    std::thread::spawn(move || send_sizes(to_guest, from_guest, winch));
+    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch));
     Ok(serial_port(
         Some(&file_handle(guest_reads)),
         &file_handle(guest_writes),
     ))
 }
 
-/// Sends the terminal size to the guest as "<rows> <cols>" lines: when
-/// `winch` is signalled, and when the guest writes a "?" (which it does once
-/// it is ready to apply the size).
-fn send_sizes(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
+/// Sends the terminal to the guest. When the guest writes a "?" (which it
+/// does once it is ready), a "term <TERM> [<COLORTERM>]" line goes first,
+/// and the size follows as a "<rows> <cols>" line; the size alone goes again
+/// whenever `winch` is signalled.
+fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
     let mut fds = [&winch, &from_guest].map(|fd| libc::pollfd {
         fd: fd.as_raw_fd(),
         events: libc::POLLIN,
@@ -192,7 +194,7 @@ fn send_sizes(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
             }
             return;
         }
-        let mut send = false;
+        let (mut asked, mut resized) = (false, false);
         for pollfd in &mut fds {
             if pollfd.revents == 0 {
                 continue;
@@ -200,16 +202,48 @@ fn send_sizes(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
             match read(pollfd.fd, &mut buf) {
                 // poll() skips negative descriptors.
                 Ok(0) | Err(_) => pollfd.fd = -1,
-                Ok(n) => send |= pollfd.fd == winch.as_raw_fd() || buf[..n].contains(&b'?'),
+                Ok(_) if pollfd.fd == winch.as_raw_fd() => resized = true,
+                Ok(n) => asked |= buf[..n].contains(&b'?'),
             }
         }
-        if send
+        let mut message = String::new();
+        if asked {
+            message.push_str(&terminal_type());
+        }
+        if (asked || resized)
             && let Some(size) = terminal_size()
-            && write_all(to_guest.as_raw_fd(), size.as_bytes()).is_err()
         {
+            message.push_str(&size);
+        }
+        if write_all(to_guest.as_raw_fd(), message.as_bytes()).is_err() {
             return;
         }
     }
+}
+
+/// The terminal's type as a "term <TERM> [<COLORTERM>]" line. Values that
+/// are unset or don't look like a terminal name are left out, and the guest
+/// falls back to a default.
+fn terminal_type() -> String {
+    let mut line = String::from("term");
+    for name in ["TERM", "COLORTERM"] {
+        match std::env::var(name) {
+            Ok(value) if is_terminal_name(&value) => {
+                line.push(' ');
+                line.push_str(&value);
+            }
+            _ => break,
+        }
+    }
+    line.push('\n');
+    line
+}
+
+fn is_terminal_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
 }
 
 /// The terminal's size as a "<rows> <cols>" line, if stdout is a terminal.
