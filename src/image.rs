@@ -13,6 +13,7 @@ use sha2::{Digest, Sha512};
 
 use crate::config::ByteSize;
 use crate::paths::Paths;
+use crate::util::{run, run_output};
 
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
 const IMAGE_NAME: &str = "debian-13-genericcloud-arm64";
@@ -92,19 +93,15 @@ pub fn debian_image(paths: &Paths) -> Result<DebianImage> {
 
 fn fetch_checksum() -> Result<String> {
     let url = format!("{IMAGE_BASE_URL}/SHA512SUMS");
-    let output = Command::new("curl")
-        // Without a timeout, a stalled connection would hang here instead of
-        // falling back to the cached image.
-        .args(["-fsSL", "--connect-timeout", "10", "--max-time", "30", &url])
-        .output()
-        .context("running curl")?;
-    ensure!(
-        output.status.success(),
-        "fetching {url} failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+    let sums = run_output(
+        Command::new("curl")
+            // Without a timeout, a stalled connection would hang here instead
+            // of falling back to the cached image.
+            .args(["-fsSL", "--connect-timeout", "10", "--max-time", "30", &url]),
+    )
+    .with_context(|| format!("fetching {url}"))?;
     let wanted = format!("{IMAGE_NAME}.tar.xz");
-    String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&sums)
         .lines()
         .find_map(|line| {
             let (sum, name) = line.split_once(char::is_whitespace)?;
@@ -136,18 +133,6 @@ fn sha512_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-fn run(cmd: &mut Command) -> Result<()> {
-    let status = cmd
-        .status()
-        .with_context(|| format!("running {:?}", cmd.get_program()))?;
-    ensure!(
-        status.success(),
-        "{:?} failed with {status}",
-        cmd.get_program()
-    );
-    Ok(())
 }
 
 /// Deallocates all 64 KiB blocks of `path` that contain only zeros.

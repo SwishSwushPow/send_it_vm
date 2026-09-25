@@ -5,6 +5,7 @@ mod mounts;
 mod paths;
 mod project_vm;
 mod provision;
+mod util;
 mod vm;
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -18,6 +19,7 @@ use crate::cli::{Cli, Command};
 use crate::config::{Config, Settings, VmSettings};
 use crate::paths::{Paths, Project};
 use crate::project_vm::State;
+use crate::provision::BaseState;
 use crate::vm::VmDir;
 
 fn main() -> Result<()> {
@@ -236,14 +238,13 @@ fn approx_size(bytes: u64) -> String {
 
 fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let base_dir = paths.base_dir();
-    let base_state = if !provision::marker(paths).exists() {
-        "run `sendit provision`"
-    } else if provision::base_revision(paths)? < provision::BASE_REVISION {
-        "outdated; `sendit provision --force` rebuilds it"
-    } else if provision::custom_scripts_changed(paths)? {
-        "custom scripts changed; `sendit provision --force` rebuilds it"
-    } else {
-        "provisioned"
+    let base_state = match provision::base_state(paths)? {
+        BaseState::Missing => "run `sendit provision`",
+        BaseState::Outdated => "outdated; `sendit provision --force` rebuilds it",
+        BaseState::ScriptsChanged => {
+            "custom scripts changed; `sendit provision --force` rebuilds it"
+        }
+        BaseState::Current => "provisioned",
     };
     let vm_dir = VmDir::new(paths.vm_dir(project));
     let state = if !vm_dir.path().exists() {
@@ -283,7 +284,7 @@ fn print_status(paths: &Paths, project: &Project, settings: &VmSettings) -> Resu
             if i == 0 { "mounts" } else { "" },
             paths.display(&mount.host),
             mount.guest.display(),
-            if mount.read_only { "ro" } else { "rw" },
+            mount.mode(),
         );
     }
     Ok(())

@@ -6,16 +6,16 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::util;
+
 pub const LEASES_FILE: &str = "/var/db/dhcpd_leases";
 
 /// The IP address most recently leased to `mac`, if any.
 pub fn lease_for(mac: &str) -> Result<Option<Ipv4Addr>> {
     let path = Path::new(LEASES_FILE);
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(find_lease(&text, mac)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
-    }
+    let text = util::if_exists(fs::read_to_string(path))
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(text.and_then(|text| find_lease(&text, mac)))
 }
 
 /// Entries look like this, with leading zeros dropped from the MAC's octets:

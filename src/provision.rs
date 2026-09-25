@@ -11,15 +11,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{ByteSize, ProvisionSettings};
 use crate::image;
 use crate::paths::Paths;
+use crate::util;
 use crate::vm::{self, VmDir, VmSpec};
 
 /// Logical size of the base disk. Project VMs grow their clone further.
@@ -40,12 +40,18 @@ pub const BASE_REVISION: u32 = 7;
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 
 /// Written into the base directory once provisioning has succeeded.
-#[derive(Serialize)]
-struct Marker<'a> {
+#[derive(Deserialize, Serialize)]
+struct Marker {
+    /// Bases from before revisions were recorded are revision 1.
+    #[serde(default = "first_revision")]
     revision: u32,
-    sendit_version: &'a str,
-    debian_image_sha512: &'a str,
+    #[serde(default)]
+    sendit_version: String,
+    #[serde(default)]
+    debian_image_sha512: String,
+    #[serde(default)]
     provisioned_at_unix: u64,
+    #[serde(default)]
     custom_scripts: Vec<ScriptStamp>,
 }
 
@@ -71,55 +77,51 @@ impl CustomScript {
     }
 }
 
-pub fn marker(paths: &Paths) -> PathBuf {
-    paths.base_dir().join("provisioned.toml")
-}
-
-/// The revision of the provisioned base image; bases from before revisions
-/// were recorded are revision 1.
-pub fn base_revision(paths: &Paths) -> Result<u32> {
-    #[derive(Deserialize)]
-    struct Revision {
-        #[serde(default = "first_revision")]
-        revision: u32,
-    }
-    let path = marker(paths);
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let marker: Revision =
-        toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
-    Ok(marker.revision)
+fn marker_file(dir: &VmDir) -> PathBuf {
+    dir.path().join("provisioned.toml")
 }
 
 pub fn first_revision() -> u32 {
     1
 }
 
-/// Whether the custom provisioning scripts were added, removed or edited
-/// since the base image was provisioned.
-pub fn custom_scripts_changed(paths: &Paths) -> Result<bool> {
-    #[derive(Deserialize)]
-    struct Scripts {
-        #[serde(default)]
-        custom_scripts: Vec<ScriptStamp>,
+pub enum BaseState {
+    /// Not provisioned yet.
+    Missing,
+    /// Older than `BASE_REVISION`; project VMs can't be created from it.
+    Outdated,
+    /// Usable, but the custom provisioning scripts were added, removed or
+    /// edited since it was provisioned.
+    ScriptsChanged,
+    Current,
+}
+
+pub fn base_state(paths: &Paths) -> Result<BaseState> {
+    let base = VmDir::new(paths.base_dir());
+    let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
+        return Ok(BaseState::Missing);
+    };
+    if marker.revision < BASE_REVISION {
+        return Ok(BaseState::Outdated);
     }
-    let path = marker(paths);
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let marker: Scripts =
-        toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
     let current: Vec<_> = custom_scripts(paths)?
         .iter()
         .map(CustomScript::stamp)
         .collect();
-    Ok(marker.custom_scripts != current)
+    Ok(if marker.custom_scripts != current {
+        BaseState::ScriptsChanged
+    } else {
+        BaseState::Current
+    })
 }
 
 /// The `*.sh` files in the custom scripts directory, in name order.
 fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
     let dir = paths.provision_scripts_dir();
-    let entries = match fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    let Some(entries) = util::if_exists(fs::read_dir(&dir))
+        .with_context(|| format!("reading {}", dir.display()))?
+    else {
+        return Ok(Vec::new());
     };
     let mut scripts = Vec::new();
     for entry in entries {
@@ -146,7 +148,7 @@ fn custom_scripts(paths: &Paths) -> Result<Vec<CustomScript>> {
 }
 
 pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Result<()> {
-    if marker(paths).exists() && !force {
+    if marker_file(&VmDir::new(paths.base_dir())).exists() && !force {
         eprintln!(
             "The base image in {} is already provisioned. Use --force to rebuild it.",
             paths.display(&paths.base_dir())
@@ -202,14 +204,14 @@ pub fn provision(paths: &Paths, settings: &ProvisionSettings, force: bool) -> Re
         paths.display(&log)
     );
 
-    let marker_text = toml::to_string(&Marker {
+    let marker = toml::to_string(&Marker {
         revision: BASE_REVISION,
-        sendit_version: env!("CARGO_PKG_VERSION"),
-        debian_image_sha512: &image.sha512,
-        provisioned_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        sendit_version: env!("CARGO_PKG_VERSION").into(),
+        debian_image_sha512: image.sha512,
+        provisioned_at_unix: util::unix_now()?,
         custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
     })?;
-    fs::write(partial.path().join("provisioned.toml"), marker_text)?;
+    fs::write(marker_file(&partial), marker)?;
 
     let base = paths.base_dir();
     if base.exists() {
@@ -227,12 +229,11 @@ fn ssh_public_key(key: &Path) -> Result<String> {
         if let Some(dir) = key.parent() {
             fs::create_dir_all(dir)?;
         }
-        let status = Command::new("ssh-keygen")
-            .args(["-q", "-t", "ed25519", "-N", "", "-C", "sendit", "-f"])
-            .arg(key)
-            .status()
-            .context("running ssh-keygen")?;
-        ensure!(status.success(), "ssh-keygen failed with {status}");
+        util::run(
+            Command::new("ssh-keygen")
+                .args(["-q", "-t", "ed25519", "-N", "", "-C", "sendit", "-f"])
+                .arg(key),
+        )?;
     }
     let public = key.with_extension("pub");
     Ok(fs::read_to_string(&public)
@@ -257,10 +258,7 @@ fn build_seed_iso(
     );
     let dir = work.join("seed");
     fs::create_dir_all(&dir)?;
-    let instance_id = format!(
-        "sendit-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-    );
+    let instance_id = format!("sendit-{}", util::unix_now()?);
     fs::write(
         dir.join("meta-data"),
         format!("instance-id: {instance_id}\nlocal-hostname: sendit\n"),
@@ -285,19 +283,14 @@ fn build_seed_iso(
     fs::write(custom.join("list"), list)?;
 
     let iso = work.join("seed.iso");
-    let output = Command::new("hdiutil")
-        .args(["makehybrid", "-quiet", "-iso", "-joliet"])
-        .args(["-default-volume-name", "cidata", "-o"])
-        .arg(&iso)
-        .arg(&dir)
-        .output()
-        .context("running hdiutil")?;
-    if !output.status.success() {
-        bail!(
-            "creating the seed ISO failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    util::run_output(
+        Command::new("hdiutil")
+            .args(["makehybrid", "-quiet", "-iso", "-joliet"])
+            .args(["-default-volume-name", "cidata", "-o"])
+            .arg(&iso)
+            .arg(&dir),
+    )
+    .context("creating the seed ISO")?;
     Ok(iso)
 }
 

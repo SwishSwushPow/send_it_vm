@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
@@ -17,6 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
 use crate::paths::{Paths, Project};
+use crate::util;
 
 pub const DEFAULT_CPUS: u32 = 2;
 pub const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
@@ -179,6 +179,13 @@ pub struct Mount {
     pub read_only: bool,
 }
 
+impl Mount {
+    /// `ro` or `rw`, as in mount options.
+    pub fn mode(&self) -> &'static str {
+        if self.read_only { "ro" } else { "rw" }
+    }
+}
+
 /// Fully resolved settings for one VM run.
 #[derive(Clone, Debug)]
 pub struct VmSettings {
@@ -186,6 +193,8 @@ pub struct VmSettings {
     pub memory: ByteSize,
     pub disk_size: ByteSize,
     /// The project mount first, then extra mounts in precedence order.
+    /// Guest paths are normalized absolute UTF-8 paths without control
+    /// characters or surrounding spaces.
     pub mounts: Vec<Mount>,
     pub expose_git: bool,
 }
@@ -193,16 +202,7 @@ pub struct VmSettings {
 impl Config {
     /// Loads the config file, or the empty config if it doesn't exist.
     pub fn load(paths: &Paths) -> Result<Self> {
-        let file = paths.config_file();
-        match fs::read_to_string(&file) {
-            Ok(text) => Self::parse(&text).with_context(|| format!("in {}", file.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e).with_context(|| format!("reading {}", file.display())),
-        }
-    }
-
-    pub fn parse(text: &str) -> Result<Self> {
-        Ok(toml::from_str(text)?)
+        Ok(util::read_toml(&paths.config_file())?.unwrap_or_default())
     }
 
     /// The `[projects."<path>"]` table matching `project`, if any. It is an
@@ -344,6 +344,11 @@ fn validate_resources(cpus: u32, memory: ByteSize) -> Result<()> {
 }
 
 impl VmSettings {
+    /// The project directory's mount.
+    pub fn project(&self) -> &Mount {
+        &self.mounts[0]
+    }
+
     fn validate(&self) -> Result<()> {
         validate_resources(self.cpus, self.memory)?;
         ensure!(
@@ -364,6 +369,19 @@ impl VmSettings {
                 mount.host.display(),
                 guest.display()
             );
+            // The guest reads guest paths from a line-based manifest.
+            let text = guest.to_str().with_context(|| {
+                format!(
+                    "mount {}: guest path {} is not valid UTF-8",
+                    mount.host.display(),
+                    guest.display()
+                )
+            })?;
+            ensure!(
+                !text.contains(char::is_control) && text.trim() == text,
+                "mount {}: guest path {text:?} may not contain control characters or surrounding spaces",
+                mount.host.display()
+            );
             if let Some(dup) = self.mounts[..i].iter().find(|m| m.guest == *guest) {
                 bail!(
                     "mounts {} and {} both use guest path {}",
@@ -380,6 +398,13 @@ impl VmSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    impl Config {
+        fn parse(text: &str) -> Result<Self> {
+            Ok(toml::from_str(text)?)
+        }
+    }
 
     #[test]
     fn parses_sizes() {
@@ -580,6 +605,8 @@ mod tests {
         assert!(resolve("", cli("proj:/")).is_err());
         assert!(resolve("", cli("proj:/home/dev/proj")).is_err());
         assert!(resolve("", cli("missing:/data")).is_err());
+        assert!(resolve("", cli("proj:/mnt/a\nhide /")).is_err());
+        assert!(resolve("", cli("proj:/mnt/a ")).is_err());
     }
 
     #[test]

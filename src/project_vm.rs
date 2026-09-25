@@ -14,7 +14,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,8 @@ use crate::config::{ByteSize, VmSettings};
 use crate::image;
 use crate::mounts;
 use crate::paths::{Paths, Project};
-use crate::provision;
+use crate::provision::{self, BaseState};
+use crate::util;
 use crate::vm::{self, VmDir, VmSpec, net};
 
 /// How long `stop` waits for the VM to go away. `run` forces the VM off if
@@ -59,8 +60,7 @@ fn metadata_file(dir: &VmDir) -> PathBuf {
 
 pub fn metadata(dir: &VmDir) -> Result<Metadata> {
     let path = metadata_file(dir);
-    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("in {}", path.display()))
+    util::read_toml(&path)?.with_context(|| format!("{} is missing", path.display()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,10 +73,10 @@ pub enum State {
 
 pub fn state(dir: &VmDir) -> Result<State> {
     let path = lock_file(dir);
-    let mut file = match File::open(&path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(State::Stopped),
-        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+    let Some(mut file) = util::if_exists(File::open(&path))
+        .with_context(|| format!("opening {}", path.display()))?
+    else {
+        return Ok(State::Stopped);
     };
     match file.try_lock() {
         Ok(()) => Ok(State::Stopped),
@@ -95,10 +95,10 @@ pub fn state(dir: &VmDir) -> Result<State> {
 /// directories are skipped.
 pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
     let root = paths.vms_dir();
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", root.display())),
+    let Some(entries) = util::if_exists(fs::read_dir(&root))
+        .with_context(|| format!("reading {}", root.display()))?
+    else {
+        return Ok(Vec::new());
     };
     let mut dirs = Vec::new();
     for entry in entries {
@@ -251,14 +251,13 @@ pub fn delete(dir: &VmDir) -> Result<()> {
 }
 
 fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
-    ensure!(
-        provision::marker(paths).exists(),
-        "there is no base image yet; run `sendit provision` first"
-    );
-    ensure!(
-        provision::base_revision(paths)? >= provision::BASE_REVISION,
-        "the base image is outdated; rebuild it with `sendit provision --force`"
-    );
+    match provision::base_state(paths)? {
+        BaseState::Missing => bail!("there is no base image yet; run `sendit provision` first"),
+        BaseState::Outdated => {
+            bail!("the base image is outdated; rebuild it with `sendit provision --force`")
+        }
+        BaseState::ScriptsChanged | BaseState::Current => {}
+    }
     let base = VmDir::new(paths.base_dir());
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     let _ = fs::remove_dir_all(partial.path());
@@ -272,7 +271,7 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
         project_path: project.root.clone(),
         base_revision: provision::BASE_REVISION,
         sendit_version: env!("CARGO_PKG_VERSION").into(),
-        created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+        created_at_unix: util::unix_now()?,
     })?;
     fs::write(metadata_file(&partial), metadata)?;
 

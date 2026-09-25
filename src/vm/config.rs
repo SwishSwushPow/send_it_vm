@@ -2,7 +2,6 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
@@ -15,6 +14,7 @@ use objc2_virtualization::*;
 
 use super::{VmDir, VmSpec};
 use crate::mounts::Share;
+use crate::util::if_exists;
 
 pub fn build(
     dir: &VmDir,
@@ -142,16 +142,14 @@ fn directory_share(share: &Share) -> Result<Retained<VZDirectorySharingDeviceCon
 /// Loads the VM's persistent machine identifier, creating it on first use.
 fn machine_identifier(path: &Path) -> Result<Retained<VZGenericMachineIdentifier>> {
     unsafe {
-        match fs::read(path) {
-            Ok(bytes) => {
-                return VZGenericMachineIdentifier::initWithDataRepresentation(
-                    VZGenericMachineIdentifier::alloc(),
-                    &NSData::with_bytes(&bytes),
-                )
-                .with_context(|| format!("invalid machine identifier in {}", path.display()));
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        let bytes =
+            if_exists(fs::read(path)).with_context(|| format!("reading {}", path.display()))?;
+        if let Some(bytes) = bytes {
+            return VZGenericMachineIdentifier::initWithDataRepresentation(
+                VZGenericMachineIdentifier::alloc(),
+                &NSData::with_bytes(&bytes),
+            )
+            .with_context(|| format!("invalid machine identifier in {}", path.display()));
         }
         let id = VZGenericMachineIdentifier::new();
         fs::write(path, id.dataRepresentation().to_vec())
@@ -181,16 +179,14 @@ fn efi_variable_store(path: &Path) -> Result<Retained<VZEFIVariableStore>> {
 /// Loads the VM's persistent MAC address, creating a random one on first use.
 fn mac_address(path: &Path) -> Result<Retained<VZMACAddress>> {
     unsafe {
-        match fs::read_to_string(path) {
-            Ok(text) => {
-                return VZMACAddress::initWithString(
-                    VZMACAddress::alloc(),
-                    &NSString::from_str(text.trim()),
-                )
-                .with_context(|| format!("invalid MAC address in {}", path.display()));
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        let text = if_exists(fs::read_to_string(path))
+            .with_context(|| format!("reading {}", path.display()))?;
+        if let Some(text) = text {
+            return VZMACAddress::initWithString(
+                VZMACAddress::alloc(),
+                &NSString::from_str(text.trim()),
+            )
+            .with_context(|| format!("invalid MAC address in {}", path.display()));
         }
         let mac = VZMACAddress::randomLocallyAdministeredAddress();
         fs::write(path, mac.string().to_string())
