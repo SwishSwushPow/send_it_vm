@@ -150,12 +150,17 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 systemctl enable sendit-console-terminal.service
+cat > /etc/profile.d/sendit-terminal.sh <<'EOF'
 # login keeps only TERM from the getty's environment; bring back COLORTERM.
-cat > /etc/profile.d/sendit-console.sh <<'EOF'
 if [ "$(tty)" = /dev/hvc0 ] && [ -r /run/sendit-console.env ]; then
     set -a
     . /run/sendit-console.env
     set +a
+fi
+# ssh passes the host's TERM through, which may have no terminfo entry here
+# (such as xterm-ghostty); fall back like the console does.
+if [ -n "${TERM:-}" ] && ! infocmp "$TERM" > /dev/null 2>&1; then
+    export TERM=xterm-256color
 fi
 EOF
 

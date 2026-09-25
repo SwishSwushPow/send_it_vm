@@ -195,6 +195,8 @@ pub fn ssh(paths: &Paths, project: &Project, command: &[String]) -> Result<()> {
         .arg("-o")
         .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
         .args(["-o", "LogLevel=ERROR"])
+        // The guest's sshd accepts it; ssh doesn't send it by default.
+        .args(["-o", "SendEnv=COLORTERM"])
         .arg(format!("dev@{ip}"))
         .args(command)
         .exec();
