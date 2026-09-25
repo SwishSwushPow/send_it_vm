@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod image;
 mod paths;
+mod project_vm;
 mod provision;
 mod vm;
 
@@ -30,8 +31,7 @@ fn main() -> Result<()> {
             let project = project()?;
             let settings =
                 Config::load(&paths)?.resolve(&paths, &project, &args.settings(), &cwd)?;
-            print_status(&paths, &project, &settings);
-            bail!("booting VMs is not implemented yet")
+            project_vm::run(&paths, &project, &settings)
         }
         Command::Provision { force } => {
             provision::provision(&paths, &Config::load(&paths)?, *force)
