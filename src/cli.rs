@@ -67,6 +67,8 @@ pub enum Command {
     },
     /// List all project VMs
     List,
+    /// List the base images and how many VMs were made from each
+    Images,
     /// Delete VMs whose project directory no longer exists
     Prune {
         /// Don't ask for confirmation

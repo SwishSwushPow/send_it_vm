@@ -2,7 +2,7 @@
 
 Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework. It's meant for running things like coding agents against a project without giving them the rest of the machine.
 
-A Debian base image is provisioned once. Each project's VM starts as an APFS clone of it, so creating one is instant and takes no space until the guest writes. The project directory is shared into the VM read-write, and its `.git` is hidden behind an empty read-only mount, so the VM can't see or change the history. The VM's user has no sudo rights; only the host can become root.
+A Debian base image is provisioned once, or several with different tools installed. Each project's VM starts as an APFS clone of one, so creating one is instant and takes no space until the guest writes. The project directory is shared into the VM read-write, and its `.git` is hidden behind an empty read-only mount, so the VM can't see or change the history. The VM's user has no sudo rights; only the host can become root.
 
 ## Building
 
@@ -11,7 +11,7 @@ Requires macOS 27 on Apple silicon. `cargo build` and `cargo install --path .` l
 ## Usage
 
 ```sh
-sendit provision          # download Debian and build the base image (once)
+sendit provision          # download Debian and build this project's base image (once)
 sendit run                # boot this project's VM and attach to its console
 sendit ssh                # open another shell in the running VM
 sendit ssh --root         # ... as root, e.g. to install packages
@@ -19,6 +19,7 @@ sendit stop               # shut the running VM down
 sendit status             # show the VM and its effective settings
 sendit reset              # delete the VM; the next run starts from a fresh copy
 sendit list               # list all project VMs
+sendit images             # list the base images and how many VMs use each
 sendit prune              # delete VMs whose project directory is gone
 ```
 
@@ -32,6 +33,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--memory 8G`
 - `--mount HOST[:GUEST][:ro|rw]`: shares another directory, mounted at `/mnt/<name>` without `GUEST`. Repeatable.
 - `--expose-git`: lets the VM see `.git`.
+- `--image NAME`: the base image to create the VM from.
 
 ## Configuration
 
@@ -43,14 +45,25 @@ memory = "8G"             # default 4G
 disk-size = "128G"        # default 64G; the disk file is sparse and only grows
 mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
 
-[provision]               # CPUs and memory for building the base image
+image = "rust"            # the base image new VMs are made from; default "default"
+
+[provision]               # CPUs and memory for building base images
 memory = "8G"
+
+[images.rust]             # ... and for building one of them
+memory = "12G"
 
 [projects."~/Code/app"]
 expose-git = true
 ```
 
-Scripts in `~/.config/sendit/provision-scripts/*.sh` run in name order at the end of provisioning. They run as the VM's user, with sudo available only while they run. `sendit status` tells you when they have changed since the base image was built; `sendit provision --force` rebuilds it.
+## Base images
+
+Every project uses the `default` image unless `image` or `--image` picks another. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
+
+Scripts in `~/.config/sendit/provision-scripts/*.sh` run for every image at the end of provisioning, and scripts in `provision-scripts/NAME/*.sh` only for image `NAME`. They run together in file name order; an image's own script replaces a shared one with the same file name. They run as the VM's user, with sudo available only while they run. `sendit status` and `sendit images` tell you when they have changed since an image was built; `sendit provision NAME --force` rebuilds it.
+
+A VM stays on the image it was made from. After a project switches images, `sendit run` refuses to start its VM until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
 ## Where things live
 

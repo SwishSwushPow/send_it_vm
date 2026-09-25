@@ -1,6 +1,7 @@
-//! The commands that inspect and clean up VMs: `status`, `reset`, `list`
-//! and `prune`, plus the confirmation prompts they share with `run`.
+//! The commands that inspect and clean up VMs: `status`, `reset`, `list`,
+//! `images` and `prune`, plus the confirmation prompts they share with `run`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
@@ -8,11 +9,11 @@ use std::path::{Component, Path};
 
 use anyhow::{Result, bail, ensure};
 
-use crate::config::{ByteSize, VmSettings};
-use crate::paths::{Paths, Project};
+use crate::config::{ByteSize, Config, VmSettings};
+use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
-use crate::vm;
+use crate::vm::{self, VmDir};
 
 /// Asks before sharing a project directory that contains the home directory:
 /// the VM could then read and change everything there, including sendit's
@@ -59,7 +60,7 @@ pub fn list(paths: &Paths) -> Result<()> {
         eprintln!("No VMs in {}.", paths.display(&paths.vms_dir()));
         return Ok(());
     }
-    println!("{:<8} {:>9}  PROJECT", "STATE", "DISK");
+    let mut rows = Vec::new();
     for dir in dirs {
         let metadata = project_vm::metadata(&dir);
         let state = match project_vm::state(&dir)? {
@@ -67,8 +68,10 @@ pub fn list(paths: &Paths) -> Result<()> {
             State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
             State::Stopped => "stopped",
         };
-        // Blocks shared with the base image (as APFS clones) count too.
-        let disk = ByteSize(fs::metadata(dir.disk()).map_or(0, |m| m.blocks() * 512));
+        let image = match &metadata {
+            Ok(metadata) => metadata.image.to_string(),
+            Err(_) => "?".to_string(),
+        };
         let project = match metadata {
             Ok(metadata) => {
                 let path = metadata.project_path.display();
@@ -81,9 +84,63 @@ pub fn list(paths: &Paths) -> Result<()> {
             }
             Err(_) => format!("? ({})", paths.display(dir.path())),
         };
-        println!("{state:<8} {:>9}  {project}", disk.approx());
+        rows.push((state, allocated(&dir.disk()), image, project));
+    }
+    let width = column_width("IMAGE", rows.iter().map(|row| &row.2));
+    println!("{:<8} {:>9}  {:<width$}  PROJECT", "STATE", "DISK", "IMAGE");
+    for (state, disk, image, project) in rows {
+        println!(
+            "{state:<8} {:>9}  {image:<width$}  {project}",
+            disk.approx()
+        );
     }
     Ok(())
+}
+
+pub fn images(paths: &Paths, config: &Config) -> Result<()> {
+    let mut vms = BTreeMap::<ImageName, usize>::new();
+    for dir in project_vm::all(paths)? {
+        if let Ok(metadata) = project_vm::metadata(&dir) {
+            *vms.entry(metadata.image).or_default() += 1;
+        }
+    }
+    // Images that VMs were made from stay listed after they were deleted.
+    let images: BTreeSet<_> = provision::images(paths, config)?
+        .into_iter()
+        .chain(vms.keys().cloned())
+        .collect();
+
+    let width = column_width("IMAGE", images.iter().map(ImageName::as_str));
+    println!("{:<width$}  {:<15} {:>9}  VMS", "IMAGE", "STATE", "DISK");
+    for image in &images {
+        let (state, provisioned) = match provision::base_state(paths, image)? {
+            BaseState::Missing => ("missing", false),
+            BaseState::Outdated => ("outdated", true),
+            BaseState::ScriptsChanged => ("scripts changed", true),
+            BaseState::Current => ("provisioned", true),
+        };
+        let disk = if provisioned {
+            allocated(&VmDir::new(paths.image_dir(image)).disk()).approx()
+        } else {
+            "-".to_string()
+        };
+        let count = vms.get(image).copied().unwrap_or(0);
+        println!("{:<width$}  {state:<15} {disk:>9}  {count}", image.as_str());
+    }
+    Ok(())
+}
+
+/// The space a disk file takes up. Blocks shared with other files (as
+/// APFS clones) count too.
+fn allocated(disk: &Path) -> ByteSize {
+    ByteSize(fs::metadata(disk).map_or(0, |m| m.blocks() * 512))
+}
+
+/// The width of a column with `header` and `values`.
+fn column_width<S: AsRef<str>>(header: &str, values: impl Iterator<Item = S>) -> usize {
+    values
+        .map(|value| value.as_ref().len())
+        .fold(header.len(), usize::max)
 }
 
 pub fn prune(paths: &Paths, yes: bool) -> Result<()> {
@@ -211,7 +268,10 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             },
         }
     };
-    println!("base     {} ({base_state})", paths.display(&base_dir));
+    println!(
+        "image    {image} in {} ({base_state})",
+        paths.display(&base_dir)
+    );
     println!("project  {}", project.root.display());
     println!("vm       {} ({state})", paths.display(vm_dir.path()));
     println!("cpus     {}", settings.cpus);

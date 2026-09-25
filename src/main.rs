@@ -62,6 +62,7 @@ fn main() -> Result<()> {
         Command::Stop => project_vm::stop(&paths, &project()?),
         Command::Reset { yes } => commands::reset(&paths, &project()?, *yes),
         Command::List => commands::list(&paths),
+        Command::Images => commands::images(&paths, &Config::load(&paths)?),
         Command::Prune { yes } => commands::prune(&paths, *yes),
     }
 }
