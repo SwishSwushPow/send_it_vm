@@ -31,6 +31,11 @@ use console::Console;
 /// How long to wait for the guest to shut down after asking it to.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often the guest is asked again while it hasn't reacted. Early in
+/// boot, nothing in the guest handles the request yet (systemd-logind
+/// hasn't started), and the request is lost.
+const STOP_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+
 /// SIGTERM (e.g. from `sendit stop`), SIGHUP (the terminal went away) and
 /// SIGINT received so far. Each one counts like a press of the escape key.
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
@@ -101,8 +106,11 @@ enum Stopping {
     /// A stop was asked for, but the VM can't be stopped yet (e.g. while it
     /// is starting); retried until it can.
     Pending,
-    /// The guest was asked to shut down at this time.
-    Requested(Instant),
+    /// The guest was first asked to shut down at `since`, and last at `last`.
+    Requested {
+        since: Instant,
+        last: Instant,
+    },
     Forced,
 }
 
@@ -223,12 +231,22 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
                 next
             }
             Stopping::Pending => stop(&vm, &state, stopping_notice),
-            Stopping::Requested(at) if escaped || at.elapsed() > STOP_TIMEOUT => {
+            Stopping::Requested { since, last } if escaped || since.elapsed() > STOP_TIMEOUT => {
                 if force_stop(&vm, &state) {
                     notice("Forcing the VM off.");
                     Stopping::Forced
                 } else {
-                    Stopping::Requested(at)
+                    Stopping::Requested { since, last }
+                }
+            }
+            Stopping::Requested { since, last } if last.elapsed() >= STOP_REQUEST_INTERVAL => {
+                // Once the guest shuts down, it ignores further requests.
+                if unsafe { vm.canRequestStop() } {
+                    let _ = unsafe { vm.requestStopWithError() };
+                }
+                Stopping::Requested {
+                    since,
+                    last: Instant::now(),
                 }
             }
             other => other,
@@ -253,7 +271,11 @@ fn catch_objc<R>(f: impl FnOnce() -> R) -> Result<R> {
 fn stop(vm: &VZVirtualMachine, state: &Rc<VmState>, stopping_notice: &str) -> Stopping {
     if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
         notice(stopping_notice);
-        Stopping::Requested(Instant::now())
+        let now = Instant::now();
+        Stopping::Requested {
+            since: now,
+            last: now,
+        }
     } else if force_stop(vm, state) {
         Stopping::Forced
     } else {
