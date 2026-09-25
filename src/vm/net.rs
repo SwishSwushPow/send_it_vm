@@ -119,7 +119,10 @@ mod tests {
 
     #[test]
     fn parses_macs() {
-        assert_eq!(parse_mac("a2:9d:8:3e:f4:ec"), Some([0xa2, 0x9d, 8, 0x3e, 0xf4, 0xec]));
+        assert_eq!(
+            parse_mac("a2:9d:8:3e:f4:ec"),
+            Some([0xa2, 0x9d, 8, 0x3e, 0xf4, 0xec])
+        );
         assert_eq!(parse_mac("a2:9d:8:3e:f4"), None);
         assert_eq!(parse_mac("a2:9d:8:3e:f4:ec:00"), None);
         assert_eq!(parse_mac("zz:9d:8:3e:f4:ec"), None);

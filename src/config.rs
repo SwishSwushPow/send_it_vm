@@ -532,7 +532,11 @@ mod tests {
         assert_eq!(
             mounts,
             [
-                (fx.project.root.clone(), PathBuf::from("/home/dev/proj"), false),
+                (
+                    fx.project.root.clone(),
+                    PathBuf::from("/home/dev/proj"),
+                    false
+                ),
                 (fx.dir.join("home/extra"), PathBuf::from("/mnt/extra"), true),
                 (fx.dir.join("proj"), PathBuf::from("/data"), false),
             ]

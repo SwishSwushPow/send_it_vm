@@ -32,7 +32,11 @@ pub enum Command {
     /// Open an SSH session to the project's running VM
     Ssh {
         /// Command to run instead of a login shell
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND")]
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "COMMAND"
+        )]
         command: Vec<String>,
     },
     /// Show the project's VM and its effective settings

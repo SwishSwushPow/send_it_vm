@@ -121,10 +121,8 @@ fn directory_share(share: &Share) -> Retained<VZDirectorySharingDeviceConfigurat
             &file_url(&share.host),
             share.read_only,
         );
-        let single = VZSingleDirectoryShare::initWithDirectory(
-            VZSingleDirectoryShare::alloc(),
-            &directory,
-        );
+        let single =
+            VZSingleDirectoryShare::initWithDirectory(VZSingleDirectoryShare::alloc(), &directory);
         let device = VZVirtioFileSystemDeviceConfiguration::initWithTag(
             VZVirtioFileSystemDeviceConfiguration::alloc(),
             &NSString::from_str(&share.tag),

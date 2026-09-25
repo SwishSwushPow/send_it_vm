@@ -46,7 +46,11 @@ fn shares(settings: &VmSettings, meta_dir: &Path) -> Vec<Share> {
     };
     // The project is always the first mount (see `Config::resolve`).
     let mounts = settings.mounts.iter().enumerate().map(|(i, mount)| Share {
-        tag: if i == 0 { "project".into() } else { format!("m{}", i - 1) },
+        tag: if i == 0 {
+            "project".into()
+        } else {
+            format!("m{}", i - 1)
+        },
         host: mount.host.clone(),
         read_only: mount.read_only,
     });
