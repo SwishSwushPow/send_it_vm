@@ -22,6 +22,7 @@ use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSError, NSRunLoop};
 use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineDelegate};
 
 use crate::config::ByteSize;
+use crate::mounts::Share;
 use console::Console;
 
 /// How long to wait for the guest to shut down after asking it to.
@@ -61,6 +62,8 @@ impl VmDir {
 pub struct VmSpec {
     pub cpus: u32,
     pub memory: ByteSize,
+    /// Host directories shared with the guest over virtiofs.
+    pub shares: Vec<Share>,
     /// Extra read-only disk, e.g. a cloud-init seed ISO.
     pub seed: Option<PathBuf>,
     /// Provisioning mode: show and log the guest's /dev/hvc1 to this file

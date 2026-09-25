@@ -98,6 +98,36 @@ WantedBy=sysinit.target
 EOF
 systemctl enable sendit-growfs.service fstrim.timer
 
+# --- Mounts -----------------------------------------------------------------
+# send_it shares a manifest and the script that applies it (mount.sh) on the
+# read-only sendit-meta virtiofs share. Run it before anyone can log in.
+cat > /usr/local/sbin/sendit-mounts <<'EOF'
+#!/bin/sh
+set -eu
+meta=/run/sendit/meta
+mkdir -p "$meta"
+mountpoint -q "$meta" || mount -t virtiofs -o ro sendit-meta "$meta"
+exec sh "$meta/mount.sh" "$meta/mounts"
+EOF
+chmod 755 /usr/local/sbin/sendit-mounts
+cat > /etc/systemd/system/sendit-mounts.service <<'EOF'
+[Unit]
+Description=Mount the directories shared by send_it
+After=local-fs.target
+Before=serial-getty@hvc0.service ssh.service systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sendit-mounts
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable sendit-mounts.service
+
 # --- Per-VM identity --------------------------------------------------------
 # Every project VM is a copy of this image, so regenerate SSH host keys and
 # the machine ID on first boot instead of sharing them.

@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{ByteSize, Config, DEFAULT_CPUS, DEFAULT_MEMORY};
 use crate::image;
@@ -24,12 +24,17 @@ const USER_DATA: &str = include_str!("assets/user-data.yaml");
 const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
 const BANNER: &str = include_str!("assets/banner.txt");
 
+/// Bumped whenever the base image changes in a way the host code relies on.
+/// Revision 2 added the sendit-mounts service.
+pub const BASE_REVISION: u32 = 2;
+
 /// Printed by provision.sh as its last line when it succeeded.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 
 /// Written into the base directory once provisioning has succeeded.
 #[derive(Serialize)]
 struct Marker<'a> {
+    revision: u32,
     send_it_version: &'a str,
     debian_image_sha512: &'a str,
     provisioned_at_unix: u64,
@@ -37,6 +42,25 @@ struct Marker<'a> {
 
 pub fn marker(paths: &Paths) -> PathBuf {
     paths.base_dir().join("provisioned.toml")
+}
+
+/// The revision of the provisioned base image; bases from before revisions
+/// were recorded are revision 1.
+pub fn base_revision(paths: &Paths) -> Result<u32> {
+    #[derive(Deserialize)]
+    struct Revision {
+        #[serde(default = "first_revision")]
+        revision: u32,
+    }
+    let path = marker(paths);
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let marker: Revision =
+        toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
+    Ok(marker.revision)
+}
+
+pub fn first_revision() -> u32 {
+    1
 }
 
 pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
@@ -70,6 +94,7 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
     let spec = VmSpec {
         cpus: config.defaults.cpus.unwrap_or(DEFAULT_CPUS),
         memory: config.defaults.memory.unwrap_or(DEFAULT_MEMORY),
+        shares: Vec::new(),
         seed: Some(seed),
         provision_log: Some(log.clone()),
     };
@@ -83,6 +108,7 @@ pub fn provision(paths: &Paths, config: &Config, force: bool) -> Result<()> {
     );
 
     let marker_text = toml::to_string(&Marker {
+        revision: BASE_REVISION,
         send_it_version: env!("CARGO_PKG_VERSION"),
         debian_image_sha512: &image.sha512,
         provisioned_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),

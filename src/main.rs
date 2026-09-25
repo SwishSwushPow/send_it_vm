@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod image;
+mod mounts;
 mod paths;
 mod project_vm;
 mod provision;

@@ -10,6 +10,7 @@ use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
 use objc2_virtualization::*;
 
 use super::{VmDir, VmSpec};
+use crate::mounts::Share;
 
 pub fn build(
     dir: &VmDir,
@@ -54,6 +55,10 @@ pub fn build(
             disks.push(block_device(seed, true)?);
         }
         config.setStorageDevices(&NSArray::from_retained_slice(&disks));
+
+        let shares: Vec<Retained<VZDirectorySharingDeviceConfiguration>> =
+            spec.shares.iter().map(directory_share).collect();
+        config.setDirectorySharingDevices(&NSArray::from_retained_slice(&shares));
 
         let network = VZVirtioNetworkDeviceConfiguration::new();
         network.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
@@ -106,6 +111,26 @@ fn block_device(path: &Path, read_only: bool) -> Result<Retained<VZStorageDevice
             &attachment,
         );
         Ok(Retained::into_super(device))
+    }
+}
+
+fn directory_share(share: &Share) -> Retained<VZDirectorySharingDeviceConfiguration> {
+    unsafe {
+        let directory = VZSharedDirectory::initWithURL_readOnly(
+            VZSharedDirectory::alloc(),
+            &file_url(&share.host),
+            share.read_only,
+        );
+        let single = VZSingleDirectoryShare::initWithDirectory(
+            VZSingleDirectoryShare::alloc(),
+            &directory,
+        );
+        let device = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+            VZVirtioFileSystemDeviceConfiguration::alloc(),
+            &NSString::from_str(&share.tag),
+        );
+        device.setShare(Some(&single));
+        Retained::into_super(device)
     }
 }
 

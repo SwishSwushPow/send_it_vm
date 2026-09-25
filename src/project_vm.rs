@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{ByteSize, VmSettings};
 use crate::image;
+use crate::mounts;
 use crate::paths::{Paths, Project};
 use crate::provision;
 use crate::vm::{self, VmDir, VmSpec};
@@ -23,6 +24,7 @@ use crate::vm::{self, VmDir, VmSpec};
 #[derive(Serialize)]
 struct Metadata<'a> {
     project_path: &'a Path,
+    base_revision: u32,
     send_it_version: &'a str,
     created_at_unix: u64,
 }
@@ -38,6 +40,12 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
     if !dir.path().exists() {
         create(paths, project, &dir)?;
     }
+    ensure!(
+        base_revision(&dir)? >= provision::BASE_REVISION,
+        "{} was created from an older base image that this version of send_it \
+         can't run; delete it to start over from the current base image",
+        paths.display(dir.path())
+    );
     let _lock = lock(&dir)?;
     resize_disk(paths, &dir, settings)?;
 
@@ -51,6 +59,7 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
+        shares: mounts::prepare(settings, &dir.path().join("run/meta"))?,
         seed: None,
         provision_log: None,
     };
@@ -61,6 +70,10 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
     ensure!(
         provision::marker(paths).exists(),
         "there is no base image yet; run `send_it provision` first"
+    );
+    ensure!(
+        provision::base_revision(paths)? >= provision::BASE_REVISION,
+        "the base image is outdated; rebuild it with `send_it provision --force`"
     );
     let base = VmDir::new(paths.base_dir());
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
@@ -73,6 +86,7 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
     image::clone_file(&base.efi_vars(), &partial.efi_vars())?;
     let metadata = toml::to_string(&Metadata {
         project_path: &project.root,
+        base_revision: provision::BASE_REVISION,
         send_it_version: env!("CARGO_PKG_VERSION"),
         created_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     })?;
@@ -80,6 +94,20 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir) -> Result<()> {
 
     fs::rename(partial.path(), dir.path())
         .with_context(|| format!("moving the new VM to {}", dir.path().display()))
+}
+
+/// The revision of the base image `dir` was cloned from.
+fn base_revision(dir: &VmDir) -> Result<u32> {
+    #[derive(Deserialize)]
+    struct Revision {
+        #[serde(default = "provision::first_revision")]
+        base_revision: u32,
+    }
+    let path = metadata_file(dir);
+    let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let metadata: Revision =
+        toml::from_str(&text).with_context(|| format!("in {}", path.display()))?;
+    Ok(metadata.base_revision)
 }
 
 /// Grows the disk to the configured size; the guest grows its root
