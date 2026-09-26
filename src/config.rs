@@ -814,7 +814,7 @@ mod tests {
         let none = Settings::default;
         let images = "cpus = 1\nmemory = \"2G\"\n\
                       [images.default]\ncpus = 3\n\
-                      [images.rust]\ncpus = 5\nmemory = \"6G\"\n\
+                      [images.rust]\ncpus = 2\nmemory = \"6G\"\n\
                       [provision.default]\ncpus = 8\n";
         // Without a choice, and without a VM, it's the default image.
         assert_eq!(resolve(images, none()), (3, ByteSize::gib(2)));
@@ -822,19 +822,19 @@ mod tests {
             image: Some("rust".parse().unwrap()),
             ..Settings::default()
         };
-        assert_eq!(resolve(images, rust.clone()), (5, ByteSize::gib(6)));
+        assert_eq!(resolve(images, rust.clone()), (2, ByteSize::gib(6)));
 
         // The project's table and the flags rank above the image's.
         let project = format!(
-            "image = \"rust\"\n{images}[projects.\"{}\"]\ncpus = 4\n",
+            "image = \"rust\"\n{images}[projects.\"{}\"]\ncpus = 3\n",
             fx.project.root.display()
         );
-        assert_eq!(resolve(&project, none()), (4, ByteSize::gib(6)));
+        assert_eq!(resolve(&project, none()), (3, ByteSize::gib(6)));
         let cli = Settings {
             memory: Some(ByteSize::gib(1)),
             ..rust
         };
-        assert_eq!(resolve(&project, cli), (4, ByteSize::gib(1)));
+        assert_eq!(resolve(&project, cli), (3, ByteSize::gib(1)));
     }
 
     #[test]
@@ -843,11 +843,11 @@ mod tests {
         let vm = project_vm::dir(&fx.paths, &fx.project);
         fs::create_dir_all(vm.path()).unwrap();
         fs::write(vm.metadata(), "project_path = \"/p\"\nimage = \"rust\"\n").unwrap();
-        let vm = Config::parse("[images.rust]\ncpus = 5\n")
+        let vm = Config::parse("[images.rust]\ncpus = 3\n")
             .unwrap()
             .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
             .unwrap();
-        assert_eq!(vm.cpus, 5);
+        assert_eq!(vm.cpus, 3);
         assert_eq!(vm.image, None);
     }
 
