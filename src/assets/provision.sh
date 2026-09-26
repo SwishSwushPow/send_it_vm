@@ -54,7 +54,11 @@ exec systemctl --no-block poweroff
 EOF
 chmod 755 /usr/local/sbin/sendit-console-logout
 mkdir -p /etc/systemd/system/serial-getty@hvc0.service.d
-# The getty waits for the host's terminal type (see Console terminal below).
+# The getty waits for the host's terminal type and size (see Console terminal
+# below). With TTYReset, systemd would also ask the terminal for its size
+# with ANSI queries, but gives up on the reply after 333ms; the host's
+# terminal is often slower to answer while the guest boots, and a late reply
+# ends up as input to the shell, garbling the first command line.
 cat > /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf <<EOF
 [Unit]
 Wants=sendit-console-terminal.service
@@ -64,14 +68,15 @@ After=sendit-console-terminal.service
 EnvironmentFile=-/run/sendit-console.env
 ExecStart=
 ExecStart=-/sbin/agetty --autologin $user --noclear --keep-baud 115200,57600,38400,9600 - \$TERM
+TTYReset=no
 Restart=no
 ExecStopPost=/usr/local/sbin/sendit-console-logout
 EOF
 
 # --- Console terminal -------------------------------------------------------
 # The console can't tell what the host's terminal is. Asked with a "?" over
-# /dev/hvc2, sendit answers with a "term <TERM> [<COLORTERM>]" line and the
-# size as a "<rows> <cols>" line, and it sends the size again whenever the
+# /dev/hvc2, sendit answers with the size as a "<rows> <cols>" line and a
+# "term <TERM> [<COLORTERM>]" line, and it sends the size again whenever the
 # terminal is resized. The type goes to /run/sendit-console.env for the
 # getty, which waits until it is there; the size is applied to the console,
 # which then tells the programs running there (SIGWINCH).

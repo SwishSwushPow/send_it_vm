@@ -404,9 +404,10 @@ mod tests {
 
     #[test]
     fn reads_metadata_from_before_named_images() {
-        let metadata: Metadata = toml::from_str(
-            "project_path = \"/p\"\nbase_revision = 7\nsendit_version = \"0.1.0\"\n",
-        )
+        let metadata: Metadata = toml::from_str(&format!(
+            "project_path = \"/p\"\nbase_revision = {}\nsendit_version = \"0.1.0\"\n",
+            provision::BASE_REVISION
+        ))
         .unwrap();
         assert_eq!(metadata.image, ImageName::default());
         assert!(!metadata.outdated());

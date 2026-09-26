@@ -9,7 +9,7 @@
 //!
 //! The guest's console can't tell what kind of terminal it is connected to
 //! or how large it is, so a third port carries both: when the guest asks,
-//! sendit sends the terminal's type ($TERM and $COLORTERM) and size, and it
+//! sendit sends the terminal's size and type ($TERM and $COLORTERM), and it
 //! sends the size again whenever the terminal is resized (SIGWINCH). A
 //! service in the guest applies them to the console.
 
@@ -232,9 +232,10 @@ fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
 }
 
 /// Sends the terminal to the guest. When the guest writes a "?" (which it
-/// does once it is ready), a "term <TERM> [<COLORTERM>]" line goes first,
-/// and the size follows as a "<rows> <cols>" line; the size alone goes again
-/// whenever `winch` is signalled.
+/// does once it is ready), the size goes as a "<rows> <cols>" line, followed
+/// by a "term <TERM> [<COLORTERM>]" line: the guest starts the login once it
+/// has the type, so the size must be there by then. The size alone goes
+/// again whenever `winch` is signalled.
 fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
     let mut fds = [pollfd(&winch), pollfd(&from_guest)];
     let mut buf = [0u8; 64];
@@ -255,13 +256,13 @@ fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
             }
         }
         let mut message = String::new();
-        if asked {
-            message.push_str(&terminal_type());
-        }
         if (asked || resized)
             && let Some(size) = terminal_size()
         {
             message.push_str(&size);
+        }
+        if asked {
+            message.push_str(&terminal_type());
         }
         if write_all(to_guest.as_raw_fd(), message.as_bytes()).is_err() {
             return;
