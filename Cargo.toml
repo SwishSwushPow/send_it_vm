@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "virtualization", "development-tools"]
 # The linker wrapper only signs builds in this repository; installed binaries
 # sign themselves (see src/sign.rs). The config and the script go together:
 # the config alone would point the linker at a missing file.
-exclude = [".cargo/", "scripts/", "provision-scripts/", ".gitignore"]
+exclude = [".cargo/", "scripts/", "provision-scripts/", ".gitignore", ".github"]
 
 [[bin]]
 name = "sendit"
