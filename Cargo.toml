@@ -1,6 +1,6 @@
 [package]
 name = "send_it_vm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Light and fast per-project Debian VMs on macOS, for running coding agents without giving them the rest of the machine"

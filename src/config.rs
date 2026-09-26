@@ -2,10 +2,11 @@
 //! effective VM settings for a project.
 //!
 //! Layers, lowest to highest precedence: built-in defaults, top-level keys of
-//! the config file, the matching `[projects."<path>"]` table, CLI flags.
-//! Scalars are overridden by higher layers; mounts accumulate across layers.
+//! the config file, the `[images.<name>]` table of the VM's image, the
+//! matching `[projects."<path>"]` table, CLI flags. Scalars are overridden by
+//! higher layers; mounts accumulate across layers.
 //! Provisioning a base image takes its CPUs and memory from the top-level
-//! keys, then the `[provision]` table, then the image's `[images.<name>]`
+//! keys, then the `[provision]` table, then the image's `[provision.<name>]`
 //! table, then the flags of `sendit provision`.
 
 use std::collections::BTreeMap;
@@ -18,7 +19,7 @@ use clap::Args;
 use serde::Deserialize;
 
 use crate::paths::{ImageName, Paths, Project};
-use crate::util;
+use crate::{project_vm, util};
 
 const DEFAULT_CPUS: u32 = 2;
 const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
@@ -171,8 +172,8 @@ pub struct Settings {
     pub image: Option<ImageName>,
 }
 
-/// Optional CPUs and memory: the `[provision]` and `[images.<name>]` tables, or the flags that
-/// `run` and `provision` share.
+/// Optional CPUs and memory: the `[images.<name>]` and `[provision.<name>]` tables, or the
+/// flags that `run` and `provision` share.
 #[derive(Args, Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
@@ -191,12 +192,56 @@ pub struct Config {
     #[serde(flatten)]
     pub defaults: Settings,
     #[serde(default)]
-    pub provision: Resources,
-    /// Provisioning resources for single images.
+    pub provision: Provision,
+    /// Resources for the VMs made from single images.
     #[serde(default)]
     pub images: BTreeMap<ImageName, Resources>,
     #[serde(default)]
     pub projects: BTreeMap<PathBuf, Settings>,
+}
+
+/// The `[provision]` table: resources for building all base images, and
+/// `[provision.<name>]` tables for single images.
+#[derive(Debug, Default, Deserialize)]
+#[serde(try_from = "BTreeMap<String, toml::Value>")]
+pub struct Provision {
+    pub resources: Resources,
+    pub images: BTreeMap<ImageName, Resources>,
+}
+
+/// Parsed by hand, since `#[serde(flatten)]` would report a bad key in
+/// `[provision.<name>]` as the unknown field `<name>`.
+impl TryFrom<BTreeMap<String, toml::Value>> for Provision {
+    type Error = String;
+
+    fn try_from(table: BTreeMap<String, toml::Value>) -> Result<Self, String> {
+        let mut provision = Self::default();
+        for (key, value) in table {
+            match key.as_str() {
+                "cpus" => {
+                    provision.resources.cpus =
+                        Some(value.try_into().map_err(|e| format!("cpus: {e}"))?)
+                }
+                "memory" => {
+                    provision.resources.memory =
+                        Some(value.try_into().map_err(|e| format!("memory: {e}"))?)
+                }
+                _ if value.is_table() => {
+                    let image = key.parse().map_err(|e| format!("{e:#}"))?;
+                    let resources = value
+                        .try_into()
+                        .map_err(|e| format!("in [provision.{key}]: {e}"))?;
+                    provision.images.insert(image, resources);
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown field `{key}`, expected `cpus`, `memory` or an image's table"
+                    ));
+                }
+            }
+        }
+        Ok(provision)
+    }
 }
 
 /// Fully resolved CPUs and memory for provisioning the base image.
@@ -273,9 +318,25 @@ impl Config {
         cli: &Settings,
         cwd: &Path,
     ) -> Result<VmSettings> {
+        let project_settings = self.project_settings(paths, project)?;
+        let chosen = [Some(cli), project_settings, Some(&self.defaults)]
+            .into_iter()
+            .flatten()
+            .find_map(|layer| layer.image.clone());
+        // The chosen image, else the one the VM was made from. `run` refuses
+        // to start a VM when the two differ.
+        let image_settings = self
+            .images
+            .get(&project_vm::image(paths, project, chosen.as_ref()))
+            .map(|resources| Settings {
+                cpus: resources.cpus,
+                memory: resources.memory,
+                ..Settings::default()
+            });
         let layers = [
             (Some(&self.defaults), None),
-            (self.project_settings(paths, project)?, None),
+            (image_settings.as_ref(), None),
+            (project_settings, None),
             (Some(cli), Some(cwd)),
         ];
 
@@ -283,7 +344,6 @@ impl Config {
         let mut memory = DEFAULT_MEMORY;
         let mut disk_size = DEFAULT_DISK_SIZE;
         let mut expose_git = false;
-        let mut image = None;
         let mut mounts = vec![Mount {
             host: project.root.clone(),
             guest: project_guest_path(project),
@@ -296,7 +356,6 @@ impl Config {
             memory = layer.memory.unwrap_or(memory);
             disk_size = layer.disk_size.unwrap_or(disk_size);
             expose_git = layer.expose_git.unwrap_or(expose_git);
-            image = layer.image.clone().or(image);
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
@@ -308,7 +367,7 @@ impl Config {
             disk_size,
             mounts,
             expose_git,
-            image,
+            image: chosen,
         };
         settings.validate()?;
         Ok(settings)
@@ -330,7 +389,10 @@ impl Config {
             .into_iter()
             .chain(self.projects.values())
             .filter_map(|settings| settings.image.as_ref());
-        self.images.keys().chain(chosen)
+        self.images
+            .keys()
+            .chain(self.provision.images.keys())
+            .chain(chosen)
     }
 
     /// Merges the layers that apply to provisioning `image` with the CLI flags.
@@ -341,9 +403,9 @@ impl Config {
     ) -> Result<ProvisionSettings> {
         let mut cpus = self.defaults.cpus.unwrap_or(DEFAULT_CPUS);
         let mut memory = self.defaults.memory.unwrap_or(DEFAULT_MEMORY);
-        for layer in [&self.provision]
+        for layer in [&self.provision.resources]
             .into_iter()
-            .chain(self.images.get(image))
+            .chain(self.provision.images.get(image))
             .chain([cli])
         {
             cpus = layer.cpus.unwrap_or(cpus);
@@ -532,6 +594,12 @@ mod tests {
             memory = "8G"
             mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
 
+            [provision]
+            cpus = 3
+
+            [provision.rust]
+            memory = "16G"
+
             [images.rust]
             memory = "12G"
 
@@ -549,11 +617,17 @@ mod tests {
         assert_eq!(project.cpus, Some(8));
         assert_eq!(project.expose_git, Some(true));
         assert_eq!(project.image, Some("rust".parse().unwrap()));
-        let rust = &config.images[&"rust".parse().unwrap()];
-        assert_eq!(rust.memory, Some(ByteSize::gib(12)));
+        let rust = "rust".parse().unwrap();
+        assert_eq!(config.images[&rust].memory, Some(ByteSize::gib(12)));
+        assert_eq!(config.provision.resources.cpus, Some(3));
+        assert_eq!(
+            config.provision.images[&rust].memory,
+            Some(ByteSize::gib(16))
+        );
 
         assert!(Config::parse("image = \"Rust\"").is_err());
         assert!(Config::parse("[images.\"../x\"]\ncpus = 1").is_err());
+        assert!(Config::parse("[provision.\"../x\"]\ncpus = 1").is_err());
     }
 
     #[test]
@@ -588,8 +662,12 @@ mod tests {
             ByteSize::gib(1)
         );
 
-        // Only the image's own table applies, above [provision].
-        let images = format!("{table}[images.rust]\ncpus = 2\n[images.go]\ncpus = 6\n");
+        // Only the image's own table applies, above [provision], and the
+        // resources for running VMs don't.
+        let images = format!(
+            "{table}[provision.rust]\ncpus = 2\n[provision.go]\ncpus = 6\n\
+             [images.rust]\ncpus = 7\nmemory = \"7G\"\n"
+        );
         let settings = resolve(&images, none()).unwrap();
         assert_eq!((settings.cpus, settings.memory), (2, ByteSize::gib(3)));
         assert_eq!(resolve(&images, cli).unwrap().memory, ByteSize::gib(1));
@@ -604,6 +682,8 @@ mod tests {
         assert!(Config::parse("[projects.\"/x\"]\nram = \"4G\"").is_err());
         assert!(Config::parse("[provision]\nmounts = []").is_err());
         assert!(Config::parse("[images.rust]\nimage = \"go\"").is_err());
+        assert!(Config::parse("[provision]\ndisk-size = \"8G\"").is_err());
+        assert!(Config::parse("[provision.rust]\nmounts = []").is_err());
     }
 
     struct Fixture {
@@ -712,9 +792,63 @@ mod tests {
         let other = format!("image = \"go\"\n{}", project("cpus = 3"));
         assert_eq!(resolve(&other, None), image("go"));
 
-        let config = Config::parse(&format!("[images.a]\n{}", project("image = \"b\""))).unwrap();
+        let config = Config::parse(&format!(
+            "[images.a]\n[provision.c]\n{}",
+            project("image = \"b\"")
+        ))
+        .unwrap();
         let named: Vec<_> = config.images().map(ImageName::as_str).collect();
-        assert_eq!(named, ["a", "b"]);
+        assert_eq!(named, ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn resolves_image_resources() {
+        let fx = Fixture::new("image-resources");
+        let resolve = |config: &str, cli: Settings| {
+            let vm = Config::parse(config)
+                .unwrap()
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .unwrap();
+            (vm.cpus, vm.memory)
+        };
+        let none = Settings::default;
+        let images = "cpus = 1\nmemory = \"2G\"\n\
+                      [images.default]\ncpus = 3\n\
+                      [images.rust]\ncpus = 5\nmemory = \"6G\"\n\
+                      [provision.default]\ncpus = 8\n";
+        // Without a choice, and without a VM, it's the default image.
+        assert_eq!(resolve(images, none()), (3, ByteSize::gib(2)));
+        let rust = Settings {
+            image: Some("rust".parse().unwrap()),
+            ..Settings::default()
+        };
+        assert_eq!(resolve(images, rust.clone()), (5, ByteSize::gib(6)));
+
+        // The project's table and the flags rank above the image's.
+        let project = format!(
+            "image = \"rust\"\n{images}[projects.\"{}\"]\ncpus = 4\n",
+            fx.project.root.display()
+        );
+        assert_eq!(resolve(&project, none()), (4, ByteSize::gib(6)));
+        let cli = Settings {
+            memory: Some(ByteSize::gib(1)),
+            ..rust
+        };
+        assert_eq!(resolve(&project, cli), (4, ByteSize::gib(1)));
+    }
+
+    #[test]
+    fn resolves_resources_of_the_vm_image() {
+        let fx = Fixture::new("vm-image-resources");
+        let vm = project_vm::dir(&fx.paths, &fx.project);
+        fs::create_dir_all(vm.path()).unwrap();
+        fs::write(vm.metadata(), "project_path = \"/p\"\nimage = \"rust\"\n").unwrap();
+        let vm = Config::parse("[images.rust]\ncpus = 5\n")
+            .unwrap()
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
+            .unwrap();
+        assert_eq!(vm.cpus, 5);
+        assert_eq!(vm.image, None);
     }
 
     #[test]

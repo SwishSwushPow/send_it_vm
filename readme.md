@@ -47,7 +47,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 
 ## Configuration
 
-`~/.config/sendit/config.toml`. Top-level keys apply to all projects, and a `[projects."<path>"]` table overrides them for one project. Command-line flags override both. Mounts from all layers are combined.
+`~/.config/sendit/config.toml`. Top-level keys apply to all projects, an `[images.<name>]` table overrides CPUs and memory for the VMs made from that image, and a `[projects."<path>"]` table overrides both for one project. Command-line flags override all of them. Mounts from all layers are combined.
 
 ```toml
 cpus = 4                  # default 2
@@ -57,10 +57,13 @@ mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
 
 image = "rust"            # the base image new VMs are made from; default "default"
 
+[images.rust]             # CPUs and memory for VMs made from one image
+cpus = 6
+
 [provision]               # CPUs and memory for building base images
 memory = "8G"
 
-[images.rust]             # ... and for building one of them
+[provision.rust]          # ... and for building one of them
 memory = "12G"
 
 [projects."~/Code/app"]
