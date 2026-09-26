@@ -194,6 +194,33 @@ ClientIdentifier=mac
 EOF
 systemctl enable systemd-networkd.service
 
+# The host is the NAT's gateway. Its subnet belongs to macOS's vmnet and can
+# change, so give the host a stable name instead, updated on every boot.
+cat > /usr/local/sbin/sendit-host-name <<'EOF'
+#!/bin/sh
+set -eu
+gw=$(ip -4 route show default | awk '{ print $3; exit }')
+sed -i '/\shost\.sendit\.internal$/d' /etc/hosts
+[ -n "$gw" ] && echo "$gw host.sendit.internal" >> /etc/hosts
+exit 0
+EOF
+chmod 755 /usr/local/sbin/sendit-host-name
+cat > /etc/systemd/system/sendit-host-name.service <<'EOF'
+[Unit]
+Description=Point host.sendit.internal at the host
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sendit-host-name
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable sendit-host-name.service
+
 # --- Disk -------------------------------------------------------------------
 # Project VMs get a larger (sparse) disk than the base image; grow the root
 # filesystem to fill it on every boot. Freed blocks go back to the host.
