@@ -589,9 +589,9 @@ mod tests {
         );
 
         // Only the image's own table applies, above [provision].
-        let images = format!("{table}[images.rust]\ncpus = 5\n[images.go]\ncpus = 6\n");
+        let images = format!("{table}[images.rust]\ncpus = 2\n[images.go]\ncpus = 6\n");
         let settings = resolve(&images, none()).unwrap();
-        assert_eq!((settings.cpus, settings.memory), (5, ByteSize::gib(3)));
+        assert_eq!((settings.cpus, settings.memory), (2, ByteSize::gib(3)));
         assert_eq!(resolve(&images, cli).unwrap().memory, ByteSize::gib(1));
 
         assert!(resolve("[provision]\ncpus = 0", none()).is_err());
