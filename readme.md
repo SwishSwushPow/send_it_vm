@@ -33,6 +33,8 @@ sendit prune              # delete VMs whose project directory is gone
 
 Commands act on the project in the current directory, or on the one given with `-C DIR`.
 
+`sendit ssh` ignores `~/.ssh/config`: settings meant for trusted hosts, like `ForwardAgent yes` under `Host *`, would hand your SSH agent to the VM.
+
 Inside the VM, the host is reachable as `host.sendit.internal`, whatever subnet macOS gives its VMs. Services on the host must listen on more than `127.0.0.1` for the VM to reach them.
 
 In the console, `exit` (or Ctrl-D) shuts the VM down. Ctrl-] asks the guest to shut down; pressing it again forces the VM off.

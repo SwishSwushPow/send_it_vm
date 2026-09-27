@@ -231,7 +231,10 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
     // Each VM gets its own known_hosts: IP addresses are reused across VMs,
     // but a VM's host keys stay the same for its lifetime.
     let known_hosts = dir.known_hosts();
+    // No config file: ~/.ssh/config may forward the SSH agent or ports to
+    // every host, and thereby hand them to the VM.
     let error = Command::new("ssh")
+        .args(["-F", "/dev/null"])
         .arg("-i")
         .arg(&key)
         .args(["-o", "IdentitiesOnly=yes"])
