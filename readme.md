@@ -41,7 +41,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 
 - `--cpus N`
 - `--memory 8G`
-- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, mounted at `/mnt/<name>` without `GUEST`. Repeatable.
+- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw` is given, mounted at `/mnt/<name>` without `GUEST`. Repeatable. Think twice before `:rw`: the VM can then change files that the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry` or a package in an npm cache.
 - `--expose-git`: lets the VM see `.git`.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
@@ -55,7 +55,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 cpus = 4                  # default 2
 memory = "8G"             # default 4G
 disk-size = "128G"        # default 64G; the disk file is sparse and only grows
-mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
+mounts = ["~/.cargo/registry:/home/dev/.cargo/registry"]  # read-only unless :rw
 
 image = "rust"            # the base image new VMs are made from; default "default"
 

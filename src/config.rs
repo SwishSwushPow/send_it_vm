@@ -113,6 +113,9 @@ impl fmt::Display for ByteSize {
 /// A mount as written by the user: `HOST[:GUEST][:ro|rw]`.
 ///
 /// Without `GUEST`, the directory is mounted at `/mnt/<basename of HOST>`.
+/// Read-only unless `rw` is given: a writable share lets the VM change
+/// files the host runs later, e.g. a crate's `build.rs` in the cargo
+/// registry.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "String")]
 pub struct MountSpec {
@@ -130,8 +133,8 @@ impl FromStr for MountSpec {
             Some(&"ro") => true,
             Some(&"rw") => false,
             _ => {
-                parts.push("rw");
-                false
+                parts.push("ro");
+                true
             }
         };
         parts.pop();
@@ -571,6 +574,18 @@ mod tests {
         let spec: MountSpec = "~/data".parse().unwrap();
         assert_eq!(spec.host, PathBuf::from("~/data"));
         assert_eq!(spec.guest, None);
+        assert!(spec.read_only);
+
+        let spec: MountSpec = "/a:/b".parse().unwrap();
+        assert_eq!(spec.guest, Some(PathBuf::from("/b")));
+        assert!(spec.read_only);
+
+        let spec: MountSpec = "/a:/b:rw".parse().unwrap();
+        assert_eq!(spec.guest, Some(PathBuf::from("/b")));
+        assert!(!spec.read_only);
+
+        let spec: MountSpec = "/a:rw".parse().unwrap();
+        assert_eq!(spec.guest, None);
         assert!(!spec.read_only);
 
         let spec: MountSpec = "/a:/b:ro".parse().unwrap();
@@ -717,7 +732,7 @@ mod tests {
             r#"
             cpus = 1
             memory = "2G"
-            mounts = ["~/extra:ro"]
+            mounts = ["~/extra"]
 
             [projects."{}"]
             memory = "3G"
@@ -728,7 +743,7 @@ mod tests {
         .unwrap();
         let cli = Settings {
             memory: Some(ByteSize::gib(1)),
-            mounts: vec!["proj:/data".parse().unwrap()],
+            mounts: vec!["proj:/data:rw".parse().unwrap()],
             ..Settings::default()
         };
 

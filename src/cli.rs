@@ -83,7 +83,8 @@ pub struct RunArgs {
     pub resources: Resources,
 
     /// Extra directory to share: HOST[:GUEST][:ro|rw] (repeatable).
-    /// Without GUEST it is mounted at /mnt/<name>.
+    /// Read-only unless :rw is given. Without GUEST it is mounted at
+    /// /mnt/<name>.
     #[arg(long = "mount", value_name = "SPEC")]
     pub mounts: Vec<MountSpec>,
 
