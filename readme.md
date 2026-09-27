@@ -45,6 +45,8 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--expose-git`: lets the VM see `.git`.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
+`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit`). Through those the VM could become root or run commands on the Mac.
+
 ## Configuration
 
 `~/.config/sendit/config.toml`. Top-level keys apply to all projects, an `[images.<name>]` table overrides CPUs and memory for the VMs made from that image, and a `[projects."<path>"]` table overrides both for one project. Command-line flags override all of them. Mounts from all layers are combined.

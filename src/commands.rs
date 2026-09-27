@@ -5,33 +5,92 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
 
-use crate::config::{ByteSize, Config, VmSettings};
+use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
 use crate::vm::{self, VmDir};
 
-/// Asks before sharing a project directory that contains the home directory:
-/// the VM could then read and change everything there, including sendit's
-/// SSH key and the disks of other VMs.
-pub fn confirm_home_share(paths: &Paths, project: &Project) -> Result<bool> {
-    let home = paths.home();
-    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    if !home.starts_with(&project.root) {
+/// Asks before sharing directories that contain the home directory, or
+/// contain or sit inside sendit's own state. Through those the VM could
+/// become root (the root SSH key), add shares on the next run (the config
+/// file) or run commands as root on the next boot (a VM's mount script).
+/// Read-only shares count too: reading the root key is enough.
+pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<bool> {
+    let risky = risky_shares(paths, &settings.mounts);
+    if risky.is_empty() {
         return Ok(true);
     }
-    let root = project.root.display();
+    let list: String = risky.iter().map(|line| format!("\n  {line}")).collect();
     confirm(
-        &format!("{root} contains your home directory. Share all of it with the VM, read-write?"),
         &format!(
-            "{root} contains your home directory; not sharing all of it with the VM \
-             without a terminal to confirm it"
+            "These shares let the VM get around its limits, e.g. become root or run \
+             commands on this Mac:{list}\nShare them anyway?"
         ),
+        &format!("not sharing these without a terminal to confirm it:{list}"),
     )
+}
+
+/// One line for each mount that `confirm_shares` asks about.
+fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
+    // Canonical, like the mounts' host paths, so that a symlinked
+    // ~/.config/sendit is caught through a share of its target. The files
+    // most worth protecting come last, for when they are symlinks of their
+    // own, e.g. into a dotfiles repo.
+    let state = [
+        (paths.config_dir(), "sendit's configuration"),
+        (paths.cache_dir(), "sendit's images and SSH keys"),
+        (paths.vms_dir(), "sendit's VMs"),
+        (paths.config_file(), "sendit's configuration"),
+        (
+            paths.provision_scripts_dir(),
+            "sendit's provisioning scripts",
+        ),
+        (paths.ssh_dir(), "sendit's SSH keys"),
+    ]
+    .map(|(path, what)| (canonical(&path), what));
+    let home = canonical(paths.home());
+
+    mounts
+        .iter()
+        .filter_map(|mount| {
+            let host = &mount.host;
+            let reason = if home.starts_with(host) {
+                "contains your home directory".to_string()
+            } else {
+                state.iter().find_map(|(path, what)| {
+                    if path.starts_with(host) {
+                        Some(format!("contains {what} ({})", paths.display(path)))
+                    } else if host.starts_with(path) {
+                        Some(format!("is inside {what} ({})", paths.display(path)))
+                    } else {
+                        None
+                    }
+                })?
+            };
+            let mode = if mount.read_only {
+                "read-only"
+            } else {
+                "read-write"
+            };
+            Some(format!("{} ({mode}) {reason}", paths.display(host)))
+        })
+        .collect()
+}
+
+/// `path` with symlinks resolved as far as it exists.
+fn canonical(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
@@ -295,4 +354,72 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::TempDir;
+
+    #[test]
+    fn flags_shares_of_home_and_sendit_state() {
+        let temp = TempDir::new("risky-shares");
+        let home = temp.path().join("home");
+        for dir in [
+            ".config/sendit",
+            ".cache/sendit/ssh",
+            "code/proj",
+            "dotfiles",
+        ] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        let paths = Paths::new(home.clone());
+        let mount = |host: &Path, read_only| Mount {
+            host: host.to_path_buf(),
+            guest: "/mnt/x".into(),
+            read_only,
+        };
+        let risky = |mounts: &[Mount]| risky_shares(&paths, mounts);
+
+        assert!(risky(&[mount(&home.join("code/proj"), false)]).is_empty());
+        assert_eq!(
+            risky(&[mount(temp.path(), true)]),
+            [format!(
+                "{} (read-only) contains your home directory",
+                temp.path().display()
+            )]
+        );
+        assert_eq!(
+            risky(&[mount(&home, false)]),
+            ["~ (read-write) contains your home directory"]
+        );
+        assert_eq!(
+            risky(&[mount(&home.join(".config"), true)]),
+            ["~/.config (read-only) contains sendit's configuration (~/.config/sendit)"]
+        );
+        assert_eq!(
+            risky(&[mount(&home.join(".cache/sendit/ssh"), true)]),
+            [
+                "~/.cache/sendit/ssh (read-only) is inside sendit's images and SSH keys (~/.cache/sendit)"
+            ]
+        );
+
+        // ~/.sendit doesn't exist yet, but will.
+        fs::create_dir_all(home.join("vm-parent")).unwrap();
+        assert!(risky(&[mount(&home.join("vm-parent"), false)]).is_empty());
+        assert_eq!(risky(&[mount(&home.join(".cache"), false)]).len(), 1);
+
+        // A config file symlinked into a dotfiles repo.
+        let dotfiles = home.join("dotfiles");
+        fs::write(dotfiles.join("config.toml"), "").unwrap();
+        std::os::unix::fs::symlink(
+            dotfiles.join("config.toml"),
+            home.join(".config/sendit/config.toml"),
+        )
+        .unwrap();
+        assert_eq!(
+            risky(&[mount(&dotfiles, false)]),
+            ["~/dotfiles (read-write) contains sendit's configuration (~/dotfiles/config.toml)"]
+        );
+    }
 }

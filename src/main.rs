@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         Command::Run(args) => {
             let project = project()?;
             let settings = resolve(&project, &args.settings())?;
-            if !commands::confirm_home_share(&paths, &project)? {
+            if !commands::confirm_shares(&paths, &settings)? {
                 return Ok(());
             }
             project_vm::run(&paths, &project, &settings)

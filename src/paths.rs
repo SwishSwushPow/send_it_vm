@@ -85,14 +85,19 @@ impl Paths {
         self.ssh_dir().join("id_ed25519_root")
     }
 
+    /// The user's configuration: `config.toml` and the provisioning scripts.
+    pub fn config_dir(&self) -> PathBuf {
+        self.home.join(".config/sendit")
+    }
+
     pub fn config_file(&self) -> PathBuf {
-        self.home.join(".config/sendit/config.toml")
+        self.config_dir().join("config.toml")
     }
 
     /// Custom provisioning scripts (`*.sh`) for all images, run in name order
     /// after the built-in provisioning of a base image.
     pub fn provision_scripts_dir(&self) -> PathBuf {
-        self.home.join(".config/sendit/provision-scripts")
+        self.config_dir().join("provision-scripts")
     }
 
     /// Custom provisioning scripts for `image` only.
@@ -120,6 +125,7 @@ impl Paths {
     /// Shortens paths below the home directory to `~/…` for display.
     pub fn display(&self, path: &Path) -> String {
         match path.strip_prefix(&self.home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
             Ok(rest) => Path::new("~").join(rest).display().to_string(),
             Err(_) => path.display().to_string(),
         }
