@@ -3,18 +3,21 @@
 # Usage: provision.sh <seed dir>
 #
 # The last line printed is a status sentinel that sendit looks for in the
-# console log to decide whether provisioning succeeded.
+# console log to decide whether provisioning succeeded. It ends in a token
+# that sendit makes up for each build, so that nothing else printing to the
+# console, such as a custom script, can produce it by accident.
 set -euxo pipefail
 
 seed="$1"
 user=dev
 export DEBIAN_FRONTEND=noninteractive
+read -r token < "$seed/token"
 
 report() {
     local status=FAILED
     [ "$1" -eq 0 ] && status=OK
     set +x
-    echo "SENDIT_PROVISION_${status}"
+    echo "SENDIT_PROVISION_${status} $token"
 }
 trap 'report $?' EXIT
 

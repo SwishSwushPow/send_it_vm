@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -42,7 +43,8 @@ const BANNER: &str = include_str!("assets/banner.txt");
 /// up in the shell.
 pub const BASE_REVISION: u32 = 8;
 
-/// Printed by provision.sh as its last line when it succeeded.
+/// Printed by provision.sh as its last line when it succeeded, followed by
+/// the build's token.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 
 /// Written into the base directory once provisioning has succeeded.
@@ -244,7 +246,8 @@ pub fn provision(
     let work = paths.provision_dir(name);
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
-    let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts)?;
+    let token = random_token()?;
+    let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts, &token)?;
 
     let partial = VmDir::new(paths.image_partial_dir(name));
     let _ = fs::remove_dir_all(partial.path());
@@ -279,7 +282,7 @@ pub fn provision(
 
     let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
     ensure!(
-        String::from_utf8_lossy(&output).contains(SUCCESS_SENTINEL),
+        String::from_utf8_lossy(&output).contains(&format!("{SUCCESS_SENTINEL} {token}")),
         "provisioning failed; see {} for details",
         paths.display(&log)
     );
@@ -328,6 +331,7 @@ fn build_seed_iso(
     public_key: &str,
     root_public_key: &str,
     scripts: &[CustomScript],
+    token: &str,
 ) -> Result<PathBuf> {
     ensure!(
         ![public_key, root_public_key]
@@ -348,6 +352,7 @@ fn build_seed_iso(
     )?;
     fs::write(dir.join("root.pub"), format!("{root_public_key}\n"))?;
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
+    fs::write(dir.join("token"), format!("{token}\n"))?;
     fs::write(dir.join("banner.txt"), BANNER)?;
     // Numbered file names survive the ISO's file name limits; `list` maps
     // them back to the original names for the log.
@@ -373,6 +378,16 @@ fn build_seed_iso(
     Ok(iso)
 }
 
+/// A token for provision.sh to print after its success sentinel: 128
+/// random bits in hex.
+fn random_token() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .context("reading /dev/urandom")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,10 +402,18 @@ mod tests {
         // The script must not contain the sentinel literally, or a failed run
         // that echoes its own source would look successful.
         assert!(!PROVISION_SCRIPT.contains(SUCCESS_SENTINEL));
-        assert!(PROVISION_SCRIPT.contains("SENDIT_PROVISION_${status}"));
+        assert!(PROVISION_SCRIPT.contains("echo \"SENDIT_PROVISION_${status} $token\""));
         assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
         assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
+    }
+
+    #[test]
+    fn makes_a_new_token_each_time() {
+        let token = random_token().unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(token, random_token().unwrap());
     }
 
     fn image(name: &str) -> ImageName {
