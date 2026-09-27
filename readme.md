@@ -8,7 +8,7 @@ I let Claude Code build this project based on my experiences with [vibe](https:/
 
 Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework. It's meant for running things like coding agents against a project without giving them the rest of the machine.
 
-A Debian base image is provisioned once, or several with different tools installed. Each project's VM starts as an APFS clone of one, so creating one is instant and takes no space until the guest writes. The project directory is shared into the VM read-write, and its `.git` is hidden behind an empty read-only mount, so the VM can't see or change the history. The VM's user has no sudo rights; only the host can become root.
+A Debian base image is provisioned once, or several with different tools installed. Each project's VM starts as an APFS clone of one, so creating one is instant and takes no space until the guest writes. The project directory is shared into the VM read-write, and its `.git` is hidden behind an empty read-only mount, so the VM can't see or change the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
 
 ## Building
 
@@ -44,7 +44,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--cpus N`
 - `--memory 8G`
 - `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw` is given, mounted at `/mnt/<name>` without `GUEST`. Repeatable. Think twice before `:rw`: the VM can then change files that the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry` or a package in an npm cache.
-- `--expose-git`: lets the VM see `.git`.
+- `--expose-git`: lets the VM see and change `.git`, including its hooks and config, which git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
 `run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit`). Through those the VM could become root or run commands on the Mac.
@@ -83,6 +83,16 @@ Scripts in `~/.config/sendit/provision-scripts/*.sh` run for every image at the 
 [`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code and the Pi coding agent. Copy the ones you want with a number in front to set the order, e.g. `00-rust.sh` before `01-helix.sh`, which builds Helix with Rust.
 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
+
+## Limits
+
+The VM is a boundary, but not one that makes it safe to run anything in it and then trust the project folder:
+
+- Hiding `.git` relies on root in the VM staying out of reach. The read-only mount over it is made inside the VM, so anything that gets root there can remove it and change the history, hooks or config, which git on the Mac then runs. Ways to root include a Linux kernel exploit, something a provisioning script left behind, or a package installed with `sendit ssh --root`.
+- Only the project's top-level `.git` is hidden, and only if it exists when the VM boots. The VM can plant a repository anywhere else in the project: a `.git` in a subfolder, a submodule's `.git` swapped for one of its own, or a top-level `.git` in a project that had none yet. Its config can make git run a command, e.g. through `core.fsmonitor`, as soon as git on the Mac looks inside: a `git status` in the project root is enough for a submodule, and so is a shell prompt or editor showing git status in a subfolder.
+- More generally, anything the VM changes in the project folder may run on the Mac later: `build.rs`, `.cargo/config.toml`, Makefiles, `package.json` scripts, `.vscode/tasks.json`, test suites. Review what the VM changed before building or running it on the Mac.
+- The VM's console output and `sendit ssh` sessions go straight to your terminal, including escape sequences. Depending on the terminal, these can set its title or, through OSC 52, the clipboard, so that a later paste into a shell on the Mac runs what the VM chose. Check your terminal's clipboard settings.
+- The VM has network access. It can reach the internet, the local network, and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
 
 ## Where things live
 
