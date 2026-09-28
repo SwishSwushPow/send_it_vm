@@ -135,9 +135,19 @@ pub struct VmSpec {
     pub shares: Vec<Share>,
     /// Extra read-only disk, e.g. a cloud-init seed ISO.
     pub seed: Option<PathBuf>,
-    /// Provisioning mode: show and log the guest's /dev/hvc1 to this file
-    /// instead of showing the login console.
-    pub provision_log: Option<PathBuf>,
+    /// Provisioning mode: show and log the guest's /dev/hvc1 instead of
+    /// showing the login console.
+    pub provision_log: Option<ProvisionLog>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProvisionLog {
+    /// Everything the guest writes to /dev/hvc1 is appended to this file.
+    pub path: PathBuf,
+    /// Output is shown up to the end of the line containing this, which
+    /// reports the result; what the guest writes while it shuts down after
+    /// that is only logged, so the result stays on screen.
+    pub last_line: String,
 }
 
 #[derive(Clone, Copy)]
@@ -214,7 +224,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     );
 
     handle_signals();
-    let console = Console::attach(spec.provision_log.as_deref())?;
+    let console = Console::attach(spec.provision_log.as_ref())?;
     let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
     let state = Rc::new(VmState::default());
     let delegate = VmDelegate::new(state.clone());

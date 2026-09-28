@@ -16,7 +16,6 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -26,6 +25,8 @@ use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachment};
+
+use super::ProvisionLog;
 
 /// Ctrl-]
 const ESCAPE_KEY: u8 = 0x1d;
@@ -55,11 +56,12 @@ pub struct Console {
 impl Console {
     /// Connects stdin to the guest's login console. Without `log`, the login
     /// console's output goes to stdout. With `log`, it is discarded instead,
-    /// and a second port's output is shown and appended to `log`: nothing
-    /// runs a getty on that port, so provisioning output can't be cut off by
-    /// one hanging up the terminal. Nothing in the guest reads keystrokes
-    /// then, so Ctrl-C keeps raising SIGINT instead of reaching the guest.
-    pub fn attach(log: Option<&Path>) -> Result<Self> {
+    /// and a second port's output is shown and appended to `log.path`:
+    /// nothing runs a getty on that port, so provisioning output can't be
+    /// cut off by one hanging up the terminal. Nothing in the guest reads
+    /// keystrokes then, so Ctrl-C keeps raising SIGINT instead of reaching
+    /// the guest.
+    pub fn attach(log: Option<&ProvisionLog>) -> Result<Self> {
         let provisioning = log.is_some();
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
@@ -69,13 +71,14 @@ impl Console {
             forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
         });
 
+        let shown = ShownOutput::new(log.map(|log| log.last_line.as_bytes()));
         let log = log
-            .map(|path| {
+            .map(|log| {
                 File::options()
                     .create(true)
                     .append(true)
-                    .open(path)
-                    .with_context(|| format!("opening {}", path.display()))
+                    .open(&log.path)
+                    .with_context(|| format!("opening {}", log.path.display()))
             })
             .transpose()?;
         let (output_read, output_write) = pipe()?;
@@ -91,7 +94,7 @@ impl Console {
             terminal: terminal_port()?,
             escapes,
             stop_input: Some(stop_input),
-            output: Some(OutputCopy::start(output_read, log)?),
+            output: Some(OutputCopy::start(output_read, shown, log)?),
             raw_mode: RawMode::enable(provisioning)?,
         })
     }
@@ -159,10 +162,10 @@ struct OutputCopy {
 }
 
 impl OutputCopy {
-    fn start(from_guest: OwnedFd, log: Option<File>) -> Result<Self> {
+    fn start(from_guest: OwnedFd, shown: ShownOutput, log: Option<File>) -> Result<Self> {
         let (finish_read, finish) = pipe()?;
         let thread = std::thread::spawn(move || {
-            copy_output(from_guest, libc::STDOUT_FILENO, log, finish_read)
+            copy_output(from_guest, libc::STDOUT_FILENO, shown, log, finish_read)
         });
         Ok(Self { finish, thread })
     }
@@ -175,13 +178,14 @@ impl OutputCopy {
     }
 }
 
-/// Copies guest output to `to` (stdout), and to `log` if given, until the
-/// guest side closes, or `finish` closes and no more output has come for
-/// `OUTPUT_GRACE_MS`. Returns whether the output left the terminal on the
-/// alternate screen.
+/// Copies guest output to `to` (stdout) as far as `shown` allows, and all
+/// of it to `log` if given, until the guest side closes, or `finish` closes
+/// and no more output has come for `OUTPUT_GRACE_MS`. Returns whether the
+/// output left the terminal on the alternate screen.
 fn copy_output(
     from_guest: OwnedFd,
     to: libc::c_int,
+    mut shown: ShownOutput,
     mut log: Option<File>,
     finish: OwnedFd,
 ) -> bool {
@@ -198,8 +202,9 @@ fn copy_output(
             let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) else {
                 return screen.alternate;
             };
-            screen.feed(&buf[..n]);
-            let _ = write_all(to, &buf[..n]);
+            let show = &buf[..shown.len(&buf[..n])];
+            screen.feed(show);
+            let _ = write_all(to, show);
             if let Some(log) = &mut log {
                 let _ = log.write_all(&buf[..n]);
             }
@@ -207,6 +212,63 @@ fn copy_output(
             // poll() skips negative descriptors.
             fds[1].fd = -1;
             timeout = OUTPUT_GRACE_MS;
+        }
+    }
+}
+
+/// Decides how much guest output is shown: all of it, or with a last line,
+/// everything up to the end of the line containing it.
+struct ShownOutput {
+    last_line: Option<Vec<u8>>,
+    /// The end of the output so far, for a `last_line` split across reads.
+    tail: Vec<u8>,
+    /// `last_line` has come; the rest of its line is still shown.
+    ending: bool,
+    /// The last line has ended; nothing more is shown.
+    done: bool,
+}
+
+impl ShownOutput {
+    fn new(last_line: Option<&[u8]>) -> Self {
+        Self {
+            last_line: last_line.filter(|l| !l.is_empty()).map(<[u8]>::to_vec),
+            tail: Vec::new(),
+            ending: false,
+            done: false,
+        }
+    }
+
+    /// How much of `data`, the output that comes next, to show.
+    fn len(&mut self, data: &[u8]) -> usize {
+        if self.done {
+            return 0;
+        }
+        let mut from = 0;
+        if !self.ending {
+            let Some(last_line) = &self.last_line else {
+                return data.len();
+            };
+            let kept = self.tail.len();
+            self.tail.extend_from_slice(data);
+            let Some(at) = self
+                .tail
+                .windows(last_line.len())
+                .position(|window| window == last_line.as_slice())
+            else {
+                let keep = self.tail.len().min(last_line.len() - 1);
+                self.tail.drain(..self.tail.len() - keep);
+                return data.len();
+            };
+            // The kept tail is shorter than `last_line`, so it ends in `data`.
+            from = at + last_line.len() - kept;
+            self.ending = true;
+        }
+        match data[from..].iter().position(|&b| b == b'\n') {
+            Some(newline) => {
+                self.done = true;
+                from + newline + 1
+            }
+            None => data.len(),
         }
     }
 }
@@ -561,6 +623,23 @@ mod tests {
     }
 
     #[test]
+    fn shows_output_up_to_the_last_line() {
+        let mut all = ShownOutput::new(None);
+        assert_eq!(all.len(b"anything\r\n"), 10);
+
+        let mut shown = ShownOutput::new(Some(b"TOKEN"));
+        assert_eq!(shown.len(b"custom script failed\r\nSTATUS TO"), 31);
+        // The line is shown to its end, even when that comes later.
+        assert_eq!(shown.len(b"KEN"), 3);
+        assert_eq!(shown.len(b" still\r\nshutting down\r\n"), 8);
+        assert_eq!(shown.len(b"more\r\n"), 0);
+
+        let mut shown = ShownOutput::new(Some(b"TOKEN"));
+        assert_eq!(shown.len(b"STATUS TOKEN\r\nkeys\r\n"), 14);
+        assert_eq!(shown.len(b"more"), 0);
+    }
+
+    #[test]
     fn tracks_the_alternate_screen() {
         let mut screen = ScreenTracker::default();
         screen.feed(b"plain output\r\n\x1b[1mbold\x1b[0m");
@@ -592,7 +671,13 @@ mod tests {
         let (finish_read, finish) = pipe().unwrap();
         let to_fd = to.as_raw_fd();
         let thread = std::thread::spawn(move || {
-            let alternate = copy_output(from_guest, to_fd, Some(log), finish_read);
+            let alternate = copy_output(
+                from_guest,
+                to_fd,
+                ShownOutput::new(None),
+                Some(log),
+                finish_read,
+            );
             drop(to);
             alternate
         });

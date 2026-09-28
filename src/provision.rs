@@ -25,7 +25,7 @@ use crate::config::{ByteSize, Config, ProvisionSettings};
 use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::util;
-use crate::vm::{self, VmDir, VmSpec};
+use crate::vm::{self, ProvisionLog, VmDir, VmSpec};
 
 /// Logical size of the base disk. Project VMs grow their clone further.
 const BASE_DISK_SIZE: ByteSize = ByteSize::gib(8);
@@ -276,7 +276,10 @@ pub fn provision(
         memory: settings.memory,
         shares: Vec::new(),
         seed: Some(seed),
-        provision_log: Some(log.clone()),
+        provision_log: Some(ProvisionLog {
+            path: log.clone(),
+            last_line: token.clone(),
+        }),
     };
     vm::run(&partial, &spec)?;
 
