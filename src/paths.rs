@@ -58,12 +58,6 @@ impl Paths {
         self.images_dir().join(format!(".{image}.partial"))
     }
 
-    /// The single base image of sendit versions before named images; it
-    /// becomes the `default` image.
-    pub fn legacy_base_dir(&self) -> PathBuf {
-        self.cache_dir().join("base")
-    }
-
     /// Scratch space for provisioning an image (seed ISO, console log).
     pub fn provision_dir(&self, image: &ImageName) -> PathBuf {
         self.cache_dir().join("provision").join(image.as_str())

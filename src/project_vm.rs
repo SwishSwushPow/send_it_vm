@@ -38,14 +38,9 @@ const LOCK_RETRIES: u32 = 5;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub project_path: PathBuf,
-    /// VMs from before named images were made from the `default` image.
-    #[serde(default)]
     pub image: ImageName,
-    #[serde(default = "provision::first_revision")]
     pub base_revision: u32,
-    #[serde(default)]
     pub sendit_version: String,
-    #[serde(default)]
     pub created_at_unix: u64,
 }
 
@@ -400,22 +395,12 @@ mod tests {
         fs::create_dir_all(vm.path()).unwrap();
         fs::write(
             vm.metadata(),
-            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 7\n",
+            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 7\n\
+             sendit_version = \"0.3.0\"\ncreated_at_unix = 0\n",
         )
         .unwrap();
         assert_eq!(image(&paths, &project, None), rust);
         assert_eq!(image(&paths, &project, Some(&go)), go);
-    }
-
-    #[test]
-    fn reads_metadata_from_before_named_images() {
-        let metadata: Metadata = toml::from_str(&format!(
-            "project_path = \"/p\"\nbase_revision = {}\nsendit_version = \"0.1.0\"\n",
-            provision::BASE_REVISION
-        ))
-        .unwrap();
-        assert_eq!(metadata.image, ImageName::default());
-        assert!(!metadata.outdated());
     }
 
     #[test]

@@ -24,7 +24,6 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
-    provision::migrate_legacy_base(&paths)?;
     let cwd = std::env::current_dir()?;
     let project = || Project::at(cli.project.as_deref().unwrap_or(&cwd));
     let resolve = |project: &Project, cli: &Settings| {

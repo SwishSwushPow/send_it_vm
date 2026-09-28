@@ -50,16 +50,10 @@ const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 /// Written into the base directory once provisioning has succeeded.
 #[derive(Deserialize, Serialize)]
 struct Marker {
-    /// Bases from before revisions were recorded are revision 1.
-    #[serde(default = "first_revision")]
     revision: u32,
-    #[serde(default)]
     sendit_version: String,
-    #[serde(default)]
     debian_image_sha512: String,
-    #[serde(default)]
     provisioned_at_unix: u64,
-    #[serde(default)]
     custom_scripts: Vec<ScriptStamp>,
 }
 
@@ -90,10 +84,6 @@ impl CustomScript {
 
 fn marker_file(dir: &VmDir) -> PathBuf {
     dir.path().join("provisioned.toml")
-}
-
-pub fn first_revision() -> u32 {
-    1
 }
 
 pub enum BaseState {
@@ -152,21 +142,6 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
         }
     }
     Ok(images.into_iter().collect())
-}
-
-/// Moves the single base image of sendit versions before named images to
-/// the `default` image.
-pub fn migrate_legacy_base(paths: &Paths) -> Result<()> {
-    let legacy = paths.legacy_base_dir();
-    let default = paths.image_dir(&ImageName::default());
-    if !legacy.exists() || default.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(paths.images_dir())?;
-    // Another sendit process may have moved it meanwhile.
-    util::if_exists(fs::rename(&legacy, &default))
-        .with_context(|| format!("moving {} to {}", legacy.display(), default.display()))?;
-    Ok(())
 }
 
 /// The custom scripts for `image`, in file name order: the shared ones and
@@ -486,26 +461,5 @@ mod tests {
             images(&paths, &config).unwrap(),
             [image("default"), image("go"), image("node"), image("rust")]
         );
-    }
-
-    #[test]
-    fn migrates_the_legacy_base_image() {
-        let home = TempDir::new("migrate");
-        let paths = Paths::new(home.path().to_path_buf());
-        migrate_legacy_base(&paths).unwrap();
-        assert!(!paths.images_dir().exists());
-
-        let legacy = paths.legacy_base_dir();
-        fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("provisioned.toml"), "").unwrap();
-        migrate_legacy_base(&paths).unwrap();
-        assert!(!legacy.exists());
-        let default = paths.image_dir(&ImageName::default());
-        assert!(default.join("provisioned.toml").exists());
-
-        // An existing default image is never replaced.
-        fs::create_dir_all(&legacy).unwrap();
-        migrate_legacy_base(&paths).unwrap();
-        assert!(legacy.exists());
     }
 }

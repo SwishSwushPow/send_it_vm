@@ -857,7 +857,12 @@ mod tests {
         let fx = Fixture::new("vm-image-resources");
         let vm = project_vm::dir(&fx.paths, &fx.project);
         fs::create_dir_all(vm.path()).unwrap();
-        fs::write(vm.metadata(), "project_path = \"/p\"\nimage = \"rust\"\n").unwrap();
+        fs::write(
+            vm.metadata(),
+            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 8\n\
+             sendit_version = \"0.3.0\"\ncreated_at_unix = 0\n",
+        )
+        .unwrap();
         let vm = Config::parse("[images.rust]\ncpus = 3\n")
             .unwrap()
             .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
