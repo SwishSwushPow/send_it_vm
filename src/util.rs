@@ -17,6 +17,19 @@ pub fn if_exists<T>(result: io::Result<T>) -> io::Result<Option<T>> {
     }
 }
 
+/// The entries of `dir`; none if it doesn't exist.
+pub fn read_dir(dir: &Path) -> Result<impl Iterator<Item = io::Result<fs::DirEntry>>> {
+    let entries =
+        if_exists(fs::read_dir(dir)).with_context(|| format!("reading {}", dir.display()))?;
+    Ok(entries.into_iter().flatten())
+}
+
+/// Creates `dir` empty, deleting whatever was there before.
+pub fn fresh_dir(dir: &Path) -> Result<()> {
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
 /// Reads and parses a TOML file; `None` if it doesn't exist.
 pub fn read_toml<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let Some(text) = if_exists(fs::read_to_string(path))
@@ -58,8 +71,7 @@ impl TempDir {
     /// Creates an empty, canonical directory unique to `name` and this process.
     pub fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("sendit-test-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        fresh_dir(&dir).unwrap();
         Self(dir.canonicalize().unwrap())
     }
 

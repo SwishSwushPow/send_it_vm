@@ -13,7 +13,7 @@ use sha2::{Digest, Sha512};
 
 use crate::config::ByteSize;
 use crate::paths::Paths;
-use crate::util::{run, run_output};
+use crate::util::{fresh_dir, run, run_output};
 
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
 const IMAGE_NAME: &str = "debian-13-genericcloud-arm64";
@@ -55,8 +55,7 @@ pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
 
     eprintln!("Unpacking {IMAGE_NAME}.tar.xz");
     let unpack_dir = dir.join("unpack");
-    let _ = fs::remove_dir_all(&unpack_dir);
-    fs::create_dir_all(&unpack_dir)?;
+    fresh_dir(&unpack_dir)?;
     run(Command::new("tar")
         .arg("-xJf")
         .arg(&tarball)

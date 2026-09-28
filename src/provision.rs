@@ -119,12 +119,7 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
     let mut images = BTreeSet::from([ImageName::default()]);
     images.extend(config.images().cloned());
     for dir in [paths.provision_scripts_dir(), paths.images_dir()] {
-        let Some(entries) = util::if_exists(fs::read_dir(&dir))
-            .with_context(|| format!("reading {}", dir.display()))?
-        else {
-            continue;
-        };
-        for entry in entries {
+        for entry in util::read_dir(&dir)? {
             let entry = entry?;
             // Partial images start with a dot, which names can't.
             let name = entry
@@ -158,13 +153,8 @@ fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>>
 
 /// The names and contents of the `*.sh` files in `dir`.
 fn script_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
-    let Some(entries) =
-        util::if_exists(fs::read_dir(dir)).with_context(|| format!("reading {}", dir.display()))?
-    else {
-        return Ok(Vec::new());
-    };
     let mut scripts = Vec::new();
-    for entry in entries {
+    for entry in util::read_dir(dir)? {
         let path = entry?.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
@@ -216,14 +206,12 @@ pub fn provision(
     let scripts = custom_scripts(paths, name)?;
 
     let work = paths.provision_dir(name);
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work)?;
+    util::fresh_dir(&work)?;
     let token = random_token()?;
     let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts, &token)?;
 
     let partial = VmDir::new(paths.image_partial_dir(name));
-    let _ = fs::remove_dir_all(partial.path());
-    fs::create_dir_all(partial.path())?;
+    util::fresh_dir(partial.path())?;
     image::clone_file(&image, &partial.disk())?;
     image::grow_disk(&partial.disk(), BASE_DISK_SIZE)?;
 

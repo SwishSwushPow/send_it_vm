@@ -102,14 +102,8 @@ pub fn state(dir: &VmDir) -> Result<State> {
 /// All project VM directories, sorted by name. Unfinished `.partial`
 /// directories are skipped.
 pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
-    let root = paths.vms_dir();
-    let Some(entries) = util::if_exists(fs::read_dir(&root))
-        .with_context(|| format!("reading {}", root.display()))?
-    else {
-        return Ok(Vec::new());
-    };
     let mut dirs = Vec::new();
-    for entry in entries {
+    for entry in util::read_dir(&paths.vms_dir())? {
         let entry = entry?;
         if entry.file_type()?.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
             dirs.push(VmDir::new(entry.path()));
@@ -286,9 +280,7 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir, image: &ImageName) -> R
     }
     let base = VmDir::new(paths.image_dir(image));
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
-    let _ = fs::remove_dir_all(partial.path());
-    fs::create_dir_all(partial.path())
-        .with_context(|| format!("creating {}", partial.path().display()))?;
+    util::fresh_dir(partial.path())?;
 
     eprintln!(
         "Creating {} from the {image} image",
