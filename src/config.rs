@@ -322,10 +322,10 @@ impl Config {
         cwd: &Path,
     ) -> Result<VmSettings> {
         let project_settings = self.project_settings(paths, project)?;
-        let chosen = [Some(cli), project_settings, Some(&self.defaults)]
-            .into_iter()
-            .flatten()
-            .find_map(|layer| layer.image.clone());
+        let chosen = cli
+            .image
+            .clone()
+            .or_else(|| self.chosen_image(project_settings));
         // The chosen image, else the one the VM was made from. `run` refuses
         // to start a VM when the two differ.
         let image_settings = self
@@ -379,11 +379,15 @@ impl Config {
     /// The image the config file chooses for `project`, if any, without
     /// resolving (and validating) the other settings.
     pub fn resolve_image(&self, paths: &Paths, project: &Project) -> Result<Option<ImageName>> {
-        let project = self.project_settings(paths, project)?;
-        Ok([project, Some(&self.defaults)]
+        Ok(self.chosen_image(self.project_settings(paths, project)?))
+    }
+
+    /// The image chosen by the project's table, else the top-level one.
+    fn chosen_image(&self, project: Option<&Settings>) -> Option<ImageName> {
+        [project, Some(&self.defaults)]
             .into_iter()
             .flatten()
-            .find_map(|layer| layer.image.clone()))
+            .find_map(|layer| layer.image.clone())
     }
 
     /// Every image the config file names.
