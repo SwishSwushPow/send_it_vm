@@ -18,17 +18,10 @@ use crate::util::{run, run_output};
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
 const IMAGE_NAME: &str = "debian-13-genericcloud-arm64";
 
-/// An unpacked Debian raw disk image.
-pub struct DebianImage {
-    pub path: PathBuf,
-    /// SHA-512 of the tarball it was unpacked from.
-    pub sha512: String,
-}
-
-/// Returns the unpacked, checksum-verified Debian raw disk image, downloading
+/// Returns the path of the unpacked, checksum-verified Debian raw disk image, downloading
 /// it first if the cached copy is missing or outdated. Falls back to the
 /// cached image when the checksum list can't be fetched (e.g. offline).
-pub fn debian_image(paths: &Paths) -> Result<DebianImage> {
+pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
     let dir = paths.downloads_dir();
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let tarball = dir.join(format!("{IMAGE_NAME}.tar.xz"));
@@ -36,24 +29,19 @@ pub fn debian_image(paths: &Paths) -> Result<DebianImage> {
     // Records the checksum of the tarball `raw` was unpacked from.
     let stamp = dir.join(format!("{IMAGE_NAME}.raw.sha512"));
 
-    let cached = || -> Option<DebianImage> {
-        let sha512 = fs::read_to_string(&stamp).ok()?.trim().to_string();
-        raw.exists().then(|| DebianImage {
-            path: raw.clone(),
-            sha512,
-        })
-    };
+    // The checksum of the tarball the cached `raw` was unpacked from.
+    let cached = fs::read_to_string(&stamp).ok().filter(|_| raw.exists());
 
     let expected = match fetch_checksum() {
         Ok(sum) => sum,
-        Err(e) => {
-            let image = cached().ok_or(e)?;
+        Err(e) if cached.is_none() => return Err(e),
+        Err(_) => {
             eprintln!("warning: could not check for a newer Debian image; using the cached one");
-            return Ok(image);
+            return Ok(raw);
         }
     };
-    if let Some(image) = cached().filter(|image| image.sha512 == expected) {
-        return Ok(image);
+    if cached.is_some_and(|sum| sum.trim() == expected) {
+        return Ok(raw);
     }
 
     if !tarball.exists() || sha512_file(&tarball)? != expected {
@@ -85,10 +73,7 @@ pub fn debian_image(paths: &Paths) -> Result<DebianImage> {
     fs::rename(&unpacked, &raw)?;
     fs::remove_dir_all(&unpack_dir)?;
     fs::write(&stamp, &expected)?;
-    Ok(DebianImage {
-        path: raw,
-        sha512: expected,
-    })
+    Ok(raw)
 }
 
 fn fetch_checksum() -> Result<String> {

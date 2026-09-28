@@ -40,8 +40,6 @@ pub struct Metadata {
     pub project_path: PathBuf,
     pub image: ImageName,
     pub base_revision: u32,
-    pub sendit_version: String,
-    pub created_at_unix: u64,
 }
 
 impl Metadata {
@@ -302,8 +300,6 @@ fn create(paths: &Paths, project: &Project, dir: &VmDir, image: &ImageName) -> R
         project_path: project.root.clone(),
         image: image.clone(),
         base_revision: provision::BASE_REVISION,
-        sendit_version: env!("CARGO_PKG_VERSION").into(),
-        created_at_unix: util::unix_now()?,
     })?;
     fs::write(partial.metadata(), metadata)?;
 
@@ -395,8 +391,7 @@ mod tests {
         fs::create_dir_all(vm.path()).unwrap();
         fs::write(
             vm.metadata(),
-            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 7\n\
-             sendit_version = \"0.3.0\"\ncreated_at_unix = 0\n",
+            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 7\n",
         )
         .unwrap();
         assert_eq!(image(&paths, &project, None), rust);

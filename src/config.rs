@@ -859,8 +859,7 @@ mod tests {
         fs::create_dir_all(vm.path()).unwrap();
         fs::write(
             vm.metadata(),
-            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 8\n\
-             sendit_version = \"0.3.0\"\ncreated_at_unix = 0\n",
+            "project_path = \"/p\"\nimage = \"rust\"\nbase_revision = 8\n",
         )
         .unwrap();
         let vm = Config::parse("[images.rust]\ncpus = 3\n")

@@ -1,10 +1,9 @@
-//! Small helpers for files, external commands and time.
+//! Small helpers for files and external commands.
 
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
 use serde::de::DeserializeOwned;
@@ -48,11 +47,6 @@ pub fn run_output(cmd: &mut Command) -> Result<Vec<u8>> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(output.stdout)
-}
-
-/// Seconds since the Unix epoch.
-pub fn unix_now() -> Result<u64> {
-    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
 
 /// A directory for a test, deleted again when dropped.

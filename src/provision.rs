@@ -51,9 +51,6 @@ const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 #[derive(Deserialize, Serialize)]
 struct Marker {
     revision: u32,
-    sendit_version: String,
-    debian_image_sha512: String,
-    provisioned_at_unix: u64,
     custom_scripts: Vec<ScriptStamp>,
 }
 
@@ -227,7 +224,7 @@ pub fn provision(
     let partial = VmDir::new(paths.image_partial_dir(name));
     let _ = fs::remove_dir_all(partial.path());
     fs::create_dir_all(partial.path())?;
-    image::clone_file(&image.path, &partial.disk())?;
+    image::clone_file(&image, &partial.disk())?;
     image::grow_disk(&partial.disk(), BASE_DISK_SIZE)?;
 
     let log = work.join("console.log");
@@ -267,9 +264,6 @@ pub fn provision(
 
     let marker = toml::to_string(&Marker {
         revision: BASE_REVISION,
-        sendit_version: env!("CARGO_PKG_VERSION").into(),
-        debian_image_sha512: image.sha512,
-        provisioned_at_unix: util::unix_now()?,
         custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
     })?;
     fs::write(marker_file(&partial), marker)?;
@@ -319,10 +313,9 @@ fn build_seed_iso(
     );
     let dir = work.join("seed");
     fs::create_dir_all(&dir)?;
-    let instance_id = format!("sendit-{}", util::unix_now()?);
     fs::write(
         dir.join("meta-data"),
-        format!("instance-id: {instance_id}\nlocal-hostname: sendit\n"),
+        format!("instance-id: sendit-{token}\nlocal-hostname: sendit\n"),
     )?;
     fs::write(
         dir.join("user-data"),
