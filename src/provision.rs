@@ -336,7 +336,7 @@ fn random_token() -> Result<String> {
     fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .context("reading /dev/urandom")?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hex::encode(bytes))
 }
 
 #[cfg(test)]

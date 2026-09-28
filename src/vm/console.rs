@@ -14,8 +14,8 @@
 //! service in the guest applies them to the console.
 
 use std::fs::File;
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::io::{self, IsTerminal, Write};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -469,13 +469,8 @@ fn forward_input(from: libc::c_int, to_guest: OwnedFd, escapes: &AtomicUsize, st
 }
 
 fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    // SAFETY: `fds` has room for the two descriptors.
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: pipe() just returned these descriptors, and nothing else owns them.
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+    let (read, write) = io::pipe()?;
+    Ok((read.into(), write.into()))
 }
 
 /// Runs a system call again while a signal interrupts it. Negative results
@@ -542,12 +537,12 @@ struct RawMode {
 
 impl RawMode {
     fn enable(keep_signals: bool) -> Result<Option<Self>> {
+        if !io::stdin().is_terminal() {
+            return Ok(None);
+        }
         let fd = libc::STDIN_FILENO;
         // SAFETY: plain libc calls on a valid descriptor with owned out-params.
         unsafe {
-            if libc::isatty(fd) == 0 {
-                return Ok(None);
-            }
             let mut original = std::mem::zeroed();
             if libc::tcgetattr(fd, &mut original) != 0 {
                 return Err(io::Error::last_os_error().into());
@@ -574,14 +569,14 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        if io::stdout().is_terminal() {
+            if self.alternate_screen {
+                let _ = write_all(libc::STDOUT_FILENO, LEAVE_ALTERNATE_SCREEN);
+            }
+            let _ = write_all(libc::STDOUT_FILENO, TERMINAL_RESET);
+        }
         // SAFETY: plain libc calls; restores the attributes read in `enable`.
         unsafe {
-            if libc::isatty(libc::STDOUT_FILENO) == 1 {
-                if self.alternate_screen {
-                    let _ = write_all(libc::STDOUT_FILENO, LEAVE_ALTERNATE_SCREEN);
-                }
-                let _ = write_all(libc::STDOUT_FILENO, TERMINAL_RESET);
-            }
             // Drop input nobody will read now, such as the terminal's replies
             // to queries the guest sent, so it doesn't end up in the shell.
             libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);

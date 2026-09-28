@@ -13,7 +13,7 @@ mod console;
 pub mod net;
 
 use std::cell::RefCell;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -63,9 +63,8 @@ fn notice(message: &str) {
 
 /// Clears the terminal's screen, if stdout is one.
 pub fn clear_screen() {
-    // SAFETY: plain libc call on a valid descriptor.
-    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
-        let mut stdout = std::io::stdout();
+    let mut stdout = std::io::stdout();
+    if stdout.is_terminal() {
         let _ = stdout
             .write_all(b"\x1b[H\x1b[2J")
             .and_then(|()| stdout.flush());
