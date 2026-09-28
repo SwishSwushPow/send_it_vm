@@ -61,6 +61,17 @@ fn notice(message: &str) {
     let _ = write!(std::io::stderr(), "\r\n[sendit] {message}\r\n");
 }
 
+/// Clears the terminal's screen, if stdout is one.
+pub fn clear_screen() {
+    // SAFETY: plain libc call on a valid descriptor.
+    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+        let mut stdout = std::io::stdout();
+        let _ = stdout
+            .write_all(b"\x1b[H\x1b[2J")
+            .and_then(|()| stdout.flush());
+    }
+}
+
 /// The files making up one VM (the base image or a project VM).
 #[derive(Clone, Debug)]
 pub struct VmDir(PathBuf);

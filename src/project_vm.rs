@@ -152,6 +152,8 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
         paths.display(dir.path())
     );
     let _lock = lock(&dir)?;
+    // The VM starts now: its boot and banner come first on the screen.
+    vm::clear_screen();
     resize_disk(paths, &dir, settings)?;
 
     eprintln!(
