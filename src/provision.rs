@@ -67,6 +67,10 @@ struct CustomScript {
     /// Relative to `Paths::provision_scripts_dir`, e.g. `10-apt.sh` or
     /// `rust/20-cargo.sh`.
     name: String,
+    /// The file name, e.g. `20-cargo.sh`.
+    file: String,
+    /// Whether it's from `Paths::image_scripts_dir` rather than shared.
+    own: bool,
     content: Vec<u8>,
 }
 
@@ -141,14 +145,50 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
 fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
     let mut scripts = BTreeMap::new();
     for (file, content) in script_files(&paths.provision_scripts_dir())? {
-        let name = file.clone();
-        scripts.insert(file, CustomScript { name, content });
+        let script = CustomScript {
+            name: file.clone(),
+            file: file.clone(),
+            own: false,
+            content,
+        };
+        scripts.insert(file, script);
     }
     for (file, content) in script_files(&paths.image_scripts_dir(image))? {
-        let name = format!("{image}/{file}");
-        scripts.insert(file, CustomScript { name, content });
+        let script = CustomScript {
+            name: format!("{image}/{file}"),
+            file: file.clone(),
+            own: true,
+            content,
+        };
+        scripts.insert(file, script);
     }
     Ok(scripts.into_values().collect())
+}
+
+/// Lists `scripts` one per line in run order, under the directory they come
+/// from. When they come from both, the image's own are tagged with its name.
+fn describe_scripts(paths: &Paths, image: &ImageName, scripts: &[CustomScript]) -> String {
+    let mixed = scripts.iter().any(|s| s.own) && scripts.iter().any(|s| !s.own);
+    let dir = if scripts.iter().all(|s| s.own) {
+        paths.image_scripts_dir(image)
+    } else {
+        paths.provision_scripts_dir()
+    };
+    let mut text = format!("Custom scripts from {}", paths.display(&dir));
+    text.push_str(if mixed { ", in run order:" } else { ":" });
+    let width = scripts
+        .iter()
+        .map(|s| s.file.chars().count())
+        .max()
+        .unwrap_or(0);
+    for script in scripts {
+        if mixed && script.own {
+            let _ = write!(text, "\n  {:width$}  ({image})", script.file);
+        } else {
+            let _ = write!(text, "\n  {}", script.file);
+        }
+    }
+    text
 }
 
 /// The names and contents of the `*.sh` files in `dir`.
@@ -225,12 +265,7 @@ pub fn provision(
         paths.display(&log)
     );
     if !scripts.is_empty() {
-        let names: Vec<_> = scripts.iter().map(|script| script.name.as_str()).collect();
-        eprintln!(
-            "Custom scripts from {}: {}",
-            paths.display(&paths.provision_scripts_dir()),
-            names.join(", ")
-        );
+        eprintln!("{}", describe_scripts(paths, name, &scripts));
     }
     let spec = VmSpec {
         cpus: settings.cpus,
@@ -413,6 +448,37 @@ mod tests {
         assert_eq!(
             names(&ImageName::default()),
             [shared("10-editors.sh"), shared("20-node.sh")]
+        );
+    }
+
+    #[test]
+    fn describes_custom_scripts() {
+        let home = TempDir::new("describe");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        let describe = || describe_scripts(&paths, &rust, &custom_scripts(&paths, &rust).unwrap());
+
+        let own = paths.image_scripts_dir(&rust);
+        fs::create_dir_all(&own).unwrap();
+        for name in ["00-rust.sh", "01-helix.sh"] {
+            fs::write(own.join(name), name).unwrap();
+        }
+        assert_eq!(
+            describe(),
+            "Custom scripts from ~/.config/sendit/provision-scripts/rust:\n  \
+             00-rust.sh\n  \
+             01-helix.sh"
+        );
+
+        fs::write(paths.provision_scripts_dir().join("00-apt.sh"), "apt").unwrap();
+        fs::write(paths.provision_scripts_dir().join("10-dotfiles.sh"), "dots").unwrap();
+        assert_eq!(
+            describe(),
+            "Custom scripts from ~/.config/sendit/provision-scripts, in run order:\n  \
+             00-apt.sh\n  \
+             00-rust.sh      (rust)\n  \
+             01-helix.sh     (rust)\n  \
+             10-dotfiles.sh"
         );
     }
 
