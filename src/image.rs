@@ -29,7 +29,6 @@ pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
     // Records the checksum of the tarball `raw` was unpacked from.
     let stamp = dir.join(format!("{IMAGE_NAME}.raw.sha512"));
 
-    // The checksum of the tarball the cached `raw` was unpacked from.
     let cached = fs::read_to_string(&stamp).ok().filter(|_| raw.exists());
 
     let expected = match fetch_checksum() {
@@ -44,6 +43,7 @@ pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
         return Ok(raw);
     }
 
+    // A tarball is only left over if unpacking it failed.
     if !tarball.exists() || sha512_file(&tarball)? != expected {
         download(&format!("{IMAGE_BASE_URL}/{IMAGE_NAME}.tar.xz"), &tarball)?;
         let actual = sha512_file(&tarball)?;
@@ -72,6 +72,8 @@ pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
     fs::rename(&unpacked, &raw)?;
     fs::remove_dir_all(&unpack_dir)?;
     fs::write(&stamp, &expected)?;
+    // Only `raw` is needed from now on.
+    let _ = fs::remove_file(&tarball);
     Ok(raw)
 }
 
