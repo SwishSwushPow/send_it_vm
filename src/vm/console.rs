@@ -44,6 +44,9 @@ pub struct Console {
     /// Carries the terminal's type and size, /dev/hvc2 in the guest.
     terminal: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
+    /// Closing it stops forwarding stdin, so the thread doesn't outlive the
+    /// console and swallow what is typed next, e.g. for the next VM.
+    stop_input: Option<OwnedFd>,
     /// Finished on drop, before the terminal is restored.
     output: Option<OutputCopy>,
     raw_mode: Option<RawMode>,
@@ -61,7 +64,10 @@ impl Console {
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
-        std::thread::spawn(move || forward_stdin(write_end, &counter));
+        let (stop_read, stop_input) = pipe()?;
+        std::thread::spawn(move || {
+            forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
+        });
 
         let log = log
             .map(|path| {
@@ -84,6 +90,7 @@ impl Console {
             log: serial_port(None, &log_output),
             terminal: terminal_port()?,
             escapes,
+            stop_input: Some(stop_input),
             output: Some(OutputCopy::start(output_read, log)?),
             raw_mode: RawMode::enable(provisioning)?,
         })
@@ -101,9 +108,11 @@ impl Console {
 }
 
 impl Drop for Console {
-    /// Waits until the guest's last output has been shown and logged, so
-    /// none of it lands after the terminal is restored or the log is read.
+    /// Stops forwarding stdin, and waits until the guest's last output has
+    /// been shown and logged, so none of it lands after the terminal is
+    /// restored or the log is read.
     fn drop(&mut self) {
+        drop(self.stop_input.take());
         if let Some(output) = self.output.take() {
             let alternate_screen = output.finish();
             if let Some(raw_mode) = &mut self.raw_mode {
@@ -360,10 +369,25 @@ fn terminal_size() -> Option<String> {
     Some(format!("{} {}\n", size.ws_row, size.ws_col))
 }
 
-fn forward_stdin(to_guest: OwnedFd, escapes: &AtomicUsize) {
+/// Forwards `from` (stdin) to the guest, counting escape keys, until `stop`
+/// closes.
+fn forward_input(from: libc::c_int, to_guest: OwnedFd, escapes: &AtomicUsize, stop: OwnedFd) {
+    let mut fds = [
+        libc::pollfd {
+            fd: from,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        pollfd(&stop),
+    ];
     let mut buf = [0u8; 4096];
     loop {
-        let n = match read(libc::STDIN_FILENO, &mut buf) {
+        // Stopping first: input that is already waiting is for whatever
+        // reads stdin next.
+        if poll(&mut fds, -1).is_err() || fds[1].revents != 0 {
+            return;
+        }
+        let n = match read(from, &mut buf) {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
         };
@@ -510,6 +534,31 @@ mod tests {
     use crate::util::TempDir;
     use std::io::Read;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn forwards_input_until_stopped() {
+        let (from, typed) = pipe().unwrap();
+        let (guest_reads, to_guest) = pipe().unwrap();
+        let (stop_read, stop) = pipe().unwrap();
+        let escapes = Arc::new(AtomicUsize::new(0));
+        let counter = escapes.clone();
+        let from_fd = from.as_raw_fd();
+        let thread = std::thread::spawn(move || {
+            forward_input(from_fd, to_guest, &counter, stop_read);
+            drop(from);
+        });
+
+        write_all(typed.as_raw_fd(), b"ls\x1d\n").unwrap();
+        let mut forwarded = [0u8; 3];
+        File::from(guest_reads).read_exact(&mut forwarded).unwrap();
+        assert_eq!(&forwarded, b"ls\n");
+        assert_eq!(escapes.load(Ordering::Relaxed), 1);
+
+        // Stopping ends the thread while the input stays open.
+        drop(stop);
+        thread.join().unwrap();
+        drop(typed);
+    }
 
     #[test]
     fn tracks_the_alternate_screen() {
