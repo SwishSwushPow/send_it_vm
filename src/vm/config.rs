@@ -26,15 +26,9 @@ pub fn build(
     serial_ports: &[&VZSerialPortAttachment],
 ) -> Result<Retained<VZVirtualMachineConfiguration>> {
     unsafe {
-        // `Config::resolve` has checked these against the host already; the
-        // framework's own limits are the ones that count, though.
-        let min_cpus = VZVirtualMachineConfiguration::minimumAllowedCPUCount();
-        let max_cpus = VZVirtualMachineConfiguration::maximumAllowedCPUCount();
-        ensure!(
-            (min_cpus..=max_cpus).contains(&(spec.cpus as usize)),
-            "cpus must be between {min_cpus} and {max_cpus}, got {}",
-            spec.cpus
-        );
+        // `Config::resolve` has checked CPUs against the host, but has no
+        // upper limit for memory. `validateWithError` below would catch it
+        // too, with a less helpful message.
         let min_mem = VZVirtualMachineConfiguration::minimumAllowedMemorySize();
         let max_mem = VZVirtualMachineConfiguration::maximumAllowedMemorySize();
         ensure!(

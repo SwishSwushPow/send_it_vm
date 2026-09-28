@@ -201,6 +201,7 @@ pub fn provision(
     }
 
     let image = image::debian_image(paths)?;
+    fs::create_dir_all(paths.ssh_dir())?;
     let public_key = ssh_public_key(&paths.ssh_key())?;
     let root_public_key = ssh_public_key(&paths.root_ssh_key())?;
     let scripts = custom_scripts(paths, name)?;
@@ -265,12 +266,9 @@ pub fn provision(
 }
 
 /// Returns the public key of the SSH keypair `key`, generating it first if
-/// needed.
+/// needed. Its directory must exist.
 fn ssh_public_key(key: &Path) -> Result<String> {
     if !key.exists() {
-        if let Some(dir) = key.parent() {
-            fs::create_dir_all(dir)?;
-        }
         util::run(
             Command::new("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", "", "-C", "sendit", "-f"])
@@ -293,12 +291,6 @@ fn build_seed_iso(
     scripts: &[CustomScript],
     token: &str,
 ) -> Result<PathBuf> {
-    ensure!(
-        ![public_key, root_public_key]
-            .iter()
-            .any(|key| key.contains(['\n', '"'])),
-        "unexpected SSH public key format"
-    );
     let dir = work.join("seed");
     fs::create_dir_all(&dir)?;
     fs::write(

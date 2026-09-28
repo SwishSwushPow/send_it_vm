@@ -202,25 +202,15 @@ impl VmDelegate {
 }
 
 /// Boots the VM with the console attached to this terminal and blocks until
-/// it has stopped. The guest powers off when its console user logs out.
-/// Pressing Ctrl-] (or sending SIGTERM, SIGHUP or SIGINT) asks the guest to
-/// shut down; doing it again, or the guest not reacting in time, stops the
-/// VM forcibly.
+/// it has stopped. Must be called on the main thread, the only one that
+/// drains the main dispatch queue the VM runs on. The guest powers off when
+/// its console user logs out. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
+/// or SIGINT) asks the guest to shut down; doing it again, or the guest not
+/// reacting in time, stops the VM forcibly.
 pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
-    // The VM runs on the main dispatch queue, which only the main thread drains.
-    // SAFETY: plain libc call without arguments.
-    ensure!(
-        unsafe { libc::pthread_main_np() } == 1,
-        "vm::run must be called on the main thread"
-    );
     ensure!(
         unsafe { VZVirtualMachine::isSupported() },
         "virtualization is not supported on this Mac"
-    );
-    ensure!(
-        dir.disk().exists(),
-        "{} does not exist",
-        dir.disk().display()
     );
 
     handle_signals();

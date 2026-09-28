@@ -231,7 +231,7 @@ struct ShownOutput {
 impl ShownOutput {
     fn new(last_line: Option<&[u8]>) -> Self {
         Self {
-            last_line: last_line.filter(|l| !l.is_empty()).map(<[u8]>::to_vec),
+            last_line: last_line.map(<[u8]>::to_vec),
             tail: Vec::new(),
             ending: false,
             done: false,
