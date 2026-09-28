@@ -127,21 +127,21 @@ pub fn list(paths: &Paths) -> Result<()> {
             State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
             State::Stopped => "stopped",
         };
-        let image = match &metadata {
-            Ok(metadata) => metadata.image.to_string(),
-            Err(_) => "?".to_string(),
-        };
-        let project = match metadata {
+        let (image, project) = match metadata {
             Ok(metadata) => {
                 let path = metadata.project_path.display();
-                match project_dir(&metadata.project_path) {
+                let project = match project_dir(&metadata.project_path) {
                     ProjectDir::Present => path.to_string(),
                     ProjectDir::Missing => format!("{path} (missing)"),
                     ProjectDir::Unmounted => format!("{path} (volume not mounted)"),
                     ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
-                }
+                };
+                (metadata.image.to_string(), project)
             }
-            Err(_) => format!("? ({})", paths.display(dir.path())),
+            Err(_) => (
+                "?".to_string(),
+                format!("? ({})", paths.display(dir.path())),
+            ),
         };
         rows.push((state, allocated(&dir.disk()), image, project));
     }
@@ -312,16 +312,16 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         "not created".to_string()
     } else {
         let metadata = project_vm::metadata(&vm_dir).ok();
-        match project_vm::state(&vm_dir)? {
-            State::Stopped if metadata.as_ref().is_some_and(|m| m.image != *image) => format!(
+        match (project_vm::state(&vm_dir)?, metadata) {
+            (State::Stopped, Some(m)) if m.image != *image => format!(
                 "stopped; made from the {} image, `sendit reset` recreates it from {image}",
-                metadata.map(|m| m.image).unwrap_or_default()
+                m.image
             ),
-            State::Stopped if metadata.is_some_and(|m| m.outdated()) => {
+            (State::Stopped, Some(m)) if m.outdated() => {
                 "stopped; made from an outdated base image, `sendit reset` recreates it".to_string()
             }
-            State::Stopped => "stopped".to_string(),
-            State::Running(_) => match vm::net::vm_ip(&vm_dir)? {
+            (State::Stopped, _) => "stopped".to_string(),
+            (State::Running(_), _) => match vm::net::vm_ip(&vm_dir)? {
                 Some(ip) => format!("running at {ip}"),
                 None => "running".to_string(),
             },

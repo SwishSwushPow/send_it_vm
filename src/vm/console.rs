@@ -189,7 +189,7 @@ fn copy_output(
     mut log: Option<File>,
     finish: OwnedFd,
 ) -> bool {
-    let mut fds = [pollfd(&from_guest), pollfd(&finish)];
+    let mut fds = [pollfd(from_guest.as_raw_fd()), pollfd(finish.as_raw_fd())];
     let mut timeout = -1;
     let mut buf = [0u8; 4096];
     let mut screen = ScreenTracker::default();
@@ -355,7 +355,7 @@ fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
 /// has the type, so the size must be there by then. The size alone goes
 /// again whenever `winch` is signalled.
 fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
-    let mut fds = [pollfd(&winch), pollfd(&from_guest)];
+    let mut fds = [pollfd(winch.as_raw_fd()), pollfd(from_guest.as_raw_fd())];
     let mut buf = [0u8; 64];
     loop {
         if poll(&mut fds, -1).is_err() {
@@ -434,14 +434,7 @@ fn terminal_size() -> Option<String> {
 /// Forwards `from` (stdin) to the guest, counting escape keys, until `stop`
 /// closes.
 fn forward_input(from: libc::c_int, to_guest: OwnedFd, escapes: &AtomicUsize, stop: OwnedFd) {
-    let mut fds = [
-        libc::pollfd {
-            fd: from,
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        pollfd(&stop),
-    ];
+    let mut fds = [pollfd(from), pollfd(stop.as_raw_fd())];
     let mut buf = [0u8; 4096];
     loop {
         // Stopping first: input that is already waiting is for whatever
@@ -508,9 +501,9 @@ fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
     syscall(|| unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } as isize)
 }
 
-fn pollfd(fd: &OwnedFd) -> libc::pollfd {
+fn pollfd(fd: libc::c_int) -> libc::pollfd {
     libc::pollfd {
-        fd: fd.as_raw_fd(),
+        fd,
         events: libc::POLLIN,
         revents: 0,
     }

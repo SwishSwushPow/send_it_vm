@@ -177,7 +177,7 @@ fn script_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
 pub fn command(image: &ImageName, force: bool) -> String {
     let mut command = "sendit provision".to_string();
     if *image != ImageName::default() {
-        write!(command, " {image}").unwrap();
+        let _ = write!(command, " {image}");
     }
     if force {
         command.push_str(" --force");
@@ -313,7 +313,7 @@ fn build_seed_iso(
     for (i, script) in scripts.iter().enumerate() {
         let file = format!("{:03}.sh", i + 1);
         fs::write(custom.join(&file), &script.content)?;
-        writeln!(list, "{file} {}", script.name)?;
+        let _ = writeln!(list, "{file} {}", script.name);
     }
     fs::write(custom.join("list"), list)?;
 

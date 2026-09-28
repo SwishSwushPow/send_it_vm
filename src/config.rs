@@ -48,9 +48,7 @@ impl ByteSize {
     pub const fn gib(n: u64) -> Self {
         Self(n << 30)
     }
-}
 
-impl ByteSize {
     /// Formats the size for humans, rounded to one decimal, e.g. `1.8 GiB`.
     pub fn approx(self) -> String {
         const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -129,15 +127,7 @@ impl FromStr for MountSpec {
 
     fn from_str(s: &str) -> Result<Self> {
         let mut parts: Vec<&str> = s.split(':').collect();
-        let read_only = match parts.last() {
-            Some(&"ro") => true,
-            Some(&"rw") => false,
-            _ => {
-                parts.push("ro");
-                true
-            }
-        };
-        parts.pop();
+        let read_only = parts.pop_if(|last| *last == "ro" || *last == "rw") != Some("rw");
         let (host, guest) = match parts.as_slice() {
             [host] => (*host, None),
             [host, guest] => (*host, Some(PathBuf::from(guest))),
