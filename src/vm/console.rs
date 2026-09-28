@@ -46,7 +46,7 @@ pub struct Console {
     escapes: Arc<AtomicUsize>,
     /// Finished on drop, before the terminal is restored.
     output: Option<OutputCopy>,
-    _raw_mode: Option<RawMode>,
+    raw_mode: Option<RawMode>,
 }
 
 impl Console {
@@ -85,7 +85,7 @@ impl Console {
             terminal: terminal_port()?,
             escapes,
             output: Some(OutputCopy::start(output_read, log)?),
-            _raw_mode: RawMode::enable(provisioning)?,
+            raw_mode: RawMode::enable(provisioning)?,
         })
     }
 
@@ -105,7 +105,10 @@ impl Drop for Console {
     /// none of it lands after the terminal is restored or the log is read.
     fn drop(&mut self) {
         if let Some(output) = self.output.take() {
-            output.finish();
+            let alternate_screen = output.finish();
+            if let Some(raw_mode) = &mut self.raw_mode {
+                raw_mode.alternate_screen = alternate_screen;
+            }
         }
     }
 }
@@ -143,7 +146,7 @@ fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
 struct OutputCopy {
     /// Closing it tells the thread to finish.
     finish: OwnedFd,
-    thread: JoinHandle<()>,
+    thread: JoinHandle<bool>,
 }
 
 impl OutputCopy {
@@ -155,29 +158,38 @@ impl OutputCopy {
         Ok(Self { finish, thread })
     }
 
-    /// Copies what is left, then waits for the thread to end.
-    fn finish(self) {
+    /// Copies what is left, then waits for the thread to end. Returns
+    /// whether the guest left the terminal on the alternate screen.
+    fn finish(self) -> bool {
         drop(self.finish);
-        let _ = self.thread.join();
+        self.thread.join().unwrap_or(false)
     }
 }
 
 /// Copies guest output to `to` (stdout), and to `log` if given, until the
 /// guest side closes, or `finish` closes and no more output has come for
-/// `OUTPUT_GRACE_MS`.
-fn copy_output(from_guest: OwnedFd, to: libc::c_int, mut log: Option<File>, finish: OwnedFd) {
+/// `OUTPUT_GRACE_MS`. Returns whether the output left the terminal on the
+/// alternate screen.
+fn copy_output(
+    from_guest: OwnedFd,
+    to: libc::c_int,
+    mut log: Option<File>,
+    finish: OwnedFd,
+) -> bool {
     let mut fds = [pollfd(&from_guest), pollfd(&finish)];
     let mut timeout = -1;
     let mut buf = [0u8; 4096];
+    let mut screen = ScreenTracker::default();
     loop {
         if matches!(poll(&mut fds, timeout), Ok(0) | Err(_)) {
-            return;
+            return screen.alternate;
         }
         // Output first: finishing waits until none is pending.
         if fds[0].revents != 0 {
             let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) else {
-                return;
+                return screen.alternate;
             };
+            screen.feed(&buf[..n]);
             let _ = write_all(to, &buf[..n]);
             if let Some(log) = &mut log {
                 let _ = log.write_all(&buf[..n]);
@@ -187,6 +199,41 @@ fn copy_output(from_guest: OwnedFd, to: libc::c_int, mut log: Option<File>, fini
             fds[1].fd = -1;
             timeout = OUTPUT_GRACE_MS;
         }
+    }
+}
+
+/// The sequences that switch the terminal to the alternate screen and back.
+const ALTERNATE_SCREEN_ON: [&[u8]; 3] = [b"\x1b[?1049h", b"\x1b[?1047h", b"\x1b[?47h"];
+const ALTERNATE_SCREEN_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b[?47l"];
+
+/// Follows whether output has switched the terminal to the alternate screen.
+/// Leaving it when it isn't on is not harmless: `ESC [ ? 1049 l` also moves
+/// the cursor back to where it was last saved, and later output overwrites
+/// what is shown there.
+#[derive(Default)]
+struct ScreenTracker {
+    alternate: bool,
+    /// The end of the output so far, for sequences split across reads.
+    tail: Vec<u8>,
+}
+
+impl ScreenTracker {
+    const LONGEST: usize = 8;
+
+    fn feed(&mut self, data: &[u8]) {
+        self.tail.extend_from_slice(data);
+        // Sequences already seen in the kept tail are seen again, which
+        // changes nothing: the last one wins either way.
+        for (i, _) in self.tail.iter().enumerate().filter(|(_, b)| **b == 0x1b) {
+            let rest = &self.tail[i..];
+            if ALTERNATE_SCREEN_ON.iter().any(|seq| rest.starts_with(seq)) {
+                self.alternate = true;
+            } else if ALTERNATE_SCREEN_OFF.iter().any(|seq| rest.starts_with(seq)) {
+                self.alternate = false;
+            }
+        }
+        let keep = self.tail.len().min(Self::LONGEST - 1);
+        self.tail.drain(..self.tail.len() - keep);
     }
 }
 
@@ -389,10 +436,13 @@ fn pollfd(fd: &OwnedFd) -> libc::pollfd {
 }
 
 /// Terminal modes a program in the guest may have switched on and not off
-/// when the VM went away: attributes, alternate screen, hidden cursor,
-/// application cursor keys and keypad, mouse reporting, bracketed paste.
+/// when the VM went away: attributes, hidden cursor, application cursor keys
+/// and keypad, mouse reporting, bracketed paste.
 const TERMINAL_RESET: &[u8] =
-    b"\x1b[0m\x1b[?1049l\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
+    b"\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
+
+/// Leaves the alternate screen, if the guest left the terminal on it.
+const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 
 /// Puts the terminal into raw mode, so keystrokes (including Ctrl-C) go to
 /// the guest unmodified, unless `keep_signals` leaves Ctrl-C raising SIGINT.
@@ -400,6 +450,8 @@ const TERMINAL_RESET: &[u8] =
 /// mode.
 struct RawMode {
     original: libc::termios,
+    /// Whether the guest left the terminal on the alternate screen.
+    alternate_screen: bool,
 }
 
 impl RawMode {
@@ -426,7 +478,10 @@ impl RawMode {
             if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
                 return Err(io::Error::last_os_error().into());
             }
-            Ok(Some(Self { original }))
+            Ok(Some(Self {
+                original,
+                alternate_screen: false,
+            }))
         }
     }
 }
@@ -436,6 +491,9 @@ impl Drop for RawMode {
         // SAFETY: plain libc calls; restores the attributes read in `enable`.
         unsafe {
             if libc::isatty(libc::STDOUT_FILENO) == 1 {
+                if self.alternate_screen {
+                    let _ = write_all(libc::STDOUT_FILENO, LEAVE_ALTERNATE_SCREEN);
+                }
                 let _ = write_all(libc::STDOUT_FILENO, TERMINAL_RESET);
             }
             // Drop input nobody will read now, such as the terminal's replies
@@ -454,6 +512,27 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn tracks_the_alternate_screen() {
+        let mut screen = ScreenTracker::default();
+        screen.feed(b"plain output\r\n\x1b[1mbold\x1b[0m");
+        assert!(!screen.alternate);
+        screen.feed(b"vim starts \x1b[?1049h\x1b[H");
+        assert!(screen.alternate);
+        screen.feed(b"\x1b[?1049l back");
+        assert!(!screen.alternate);
+
+        // Split across reads.
+        screen.feed(b"less \x1b[?10");
+        assert!(!screen.alternate);
+        screen.feed(b"49h");
+        assert!(screen.alternate);
+        screen.feed(b"\x1b[?47l then \x1b");
+        assert!(!screen.alternate);
+        screen.feed(b"[?1047h");
+        assert!(screen.alternate);
+    }
+
+    #[test]
     fn finishing_copies_pending_output() {
         let (from_guest, guest_writes) = pipe().unwrap();
         let (shown, to) = pipe().unwrap();
@@ -464,8 +543,9 @@ mod tests {
         let (finish_read, finish) = pipe().unwrap();
         let to_fd = to.as_raw_fd();
         let thread = std::thread::spawn(move || {
-            copy_output(from_guest, to_fd, Some(log), finish_read);
+            let alternate = copy_output(from_guest, to_fd, Some(log), finish_read);
             drop(to);
+            alternate
         });
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();
