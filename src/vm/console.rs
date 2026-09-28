@@ -16,8 +16,8 @@
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
@@ -45,9 +45,10 @@ pub struct Console {
     /// Carries the terminal's type and size, /dev/hvc2 in the guest.
     terminal: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
-    /// Closing it stops forwarding stdin, so the thread doesn't outlive the
-    /// console and swallow what is typed next, e.g. for the next VM.
-    stop_input: Option<OwnedFd>,
+    /// Closing it stops forwarding stdin and sending the terminal, so the
+    /// threads don't outlive the console, e.g. swallowing what is typed or
+    /// the resizes meant for the next VM.
+    stop: Option<OwnedFd>,
     /// Finished on drop, before the terminal is restored.
     output: Option<OutputCopy>,
     raw_mode: Option<RawMode>,
@@ -66,7 +67,8 @@ impl Console {
         let (read_end, write_end) = pipe()?;
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
-        let (stop_read, stop_input) = pipe()?;
+        let (stop_read, stop) = pipe()?;
+        let terminal = terminal_port(stop_read.try_clone()?)?;
         std::thread::spawn(move || {
             forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
         });
@@ -91,9 +93,9 @@ impl Console {
         Ok(Self {
             main: serial_port(Some(&file_handle(read_end)), &main_output),
             log: serial_port(None, &log_output),
-            terminal: terminal_port()?,
+            terminal,
             escapes,
-            stop_input: Some(stop_input),
+            stop: Some(stop),
             output: Some(OutputCopy::start(output_read, shown, log)?),
             raw_mode: RawMode::enable(provisioning)?,
         })
@@ -111,11 +113,11 @@ impl Console {
 }
 
 impl Drop for Console {
-    /// Stops forwarding stdin, and waits until the guest's last output has
-    /// been shown and logged, so none of it lands after the terminal is
-    /// restored or the log is read.
+    /// Stops forwarding stdin and sending the terminal, and waits until the
+    /// guest's last output has been shown and logged, so none of it lands
+    /// after the terminal is restored or the log is read.
     fn drop(&mut self) {
-        drop(self.stop_input.take());
+        drop(self.stop.take());
         if let Some(output) = self.output.take() {
             let alternate_screen = output.finish();
             if let Some(raw_mode) = &mut self.raw_mode {
@@ -311,6 +313,10 @@ impl ScreenTracker {
 /// Write end of the pipe that wakes up `send_terminal` on SIGWINCH, or -1.
 static WINCH_PIPE: AtomicI32 = AtomicI32::new(-1);
 
+/// Read end of that pipe. Both ends stay open for good: the signal handler
+/// may use the write end at any time.
+static WINCH_READ: OnceLock<OwnedFd> = OnceLock::new();
+
 extern "C" fn on_winch(_: libc::c_int) {
     // SAFETY: write() is async-signal-safe, and errno is restored for the
     // code the signal interrupted.
@@ -322,8 +328,24 @@ extern "C" fn on_winch(_: libc::c_int) {
 }
 
 /// Creates the port that carries the terminal's type and size to the guest,
-/// and starts sending them there.
-fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
+/// and starts sending them there until `stop` closes.
+fn terminal_port(stop: OwnedFd) -> Result<Retained<VZFileHandleSerialPortAttachment>> {
+    let winch = winch_pipe()?;
+    let (guest_reads, to_guest) = pipe()?;
+    let (from_guest, guest_writes) = pipe()?;
+    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch, stop));
+    Ok(serial_port(
+        Some(&file_handle(guest_reads)),
+        &file_handle(guest_writes),
+    ))
+}
+
+/// The read end of the pipe `on_winch` writes to, created on first use.
+/// Only called on the main thread.
+fn winch_pipe() -> io::Result<libc::c_int> {
+    if let Some(winch) = WINCH_READ.get() {
+        return Ok(winch.as_raw_fd());
+    }
     let (winch, winch_write) = pipe()?;
     // Never block the signal handler: one pending wakeup is as good as many.
     // SAFETY: plain fcntl calls on a descriptor we own.
@@ -335,41 +357,38 @@ fn terminal_port() -> Result<Retained<VZFileHandleSerialPortAttachment>> {
             flags | libc::O_NONBLOCK,
         );
     }
-    // Left open for good: the signal handler may use it at any time.
     WINCH_PIPE.store(winch_write.into_raw_fd(), Ordering::Relaxed);
     // SAFETY: the handler only makes async-signal-safe calls.
     unsafe { libc::signal(libc::SIGWINCH, on_winch as *const () as libc::sighandler_t) };
-
-    let (guest_reads, to_guest) = pipe()?;
-    let (from_guest, guest_writes) = pipe()?;
-    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch));
-    Ok(serial_port(
-        Some(&file_handle(guest_reads)),
-        &file_handle(guest_writes),
-    ))
+    Ok(WINCH_READ.get_or_init(|| winch).as_raw_fd())
 }
 
 /// Sends the terminal to the guest. When the guest writes a "?" (which it
 /// does once it is ready), the size goes as a "<rows> <cols>" line, followed
 /// by a "term <TERM> [<COLORTERM>]" line: the guest starts the login once it
 /// has the type, so the size must be there by then. The size alone goes
-/// again whenever `winch` is signalled.
-fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: OwnedFd) {
-    let mut fds = [pollfd(winch.as_raw_fd()), pollfd(from_guest.as_raw_fd())];
+/// again whenever `winch` is signalled. Ends when `stop` closes.
+fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: libc::c_int, stop: OwnedFd) {
+    let mut fds = [
+        pollfd(stop.as_raw_fd()),
+        pollfd(winch),
+        pollfd(from_guest.as_raw_fd()),
+    ];
     let mut buf = [0u8; 64];
     loop {
-        if poll(&mut fds, -1).is_err() {
+        // Stopping first: resizes after it are for the next VM.
+        if poll(&mut fds, -1).is_err() || fds[0].revents != 0 {
             return;
         }
         let (mut asked, mut resized) = (false, false);
-        for pollfd in &mut fds {
+        for pollfd in &mut fds[1..] {
             if pollfd.revents == 0 {
                 continue;
             }
             match read(pollfd.fd, &mut buf) {
                 // poll() skips negative descriptors.
                 Ok(0) | Err(_) => pollfd.fd = -1,
-                Ok(_) if pollfd.fd == winch.as_raw_fd() => resized = true,
+                Ok(_) if pollfd.fd == winch => resized = true,
                 Ok(n) => asked |= buf[..n].contains(&b'?'),
             }
         }
