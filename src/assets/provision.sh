@@ -53,7 +53,7 @@ cat > /usr/local/sbin/sendit-console-logout <<'EOF'
 #!/bin/sh
 [ "$(systemctl is-system-running)" = stopping ] && exit 0
 echo 'Logged out; shutting down the VM.' > /dev/hvc0 || true
-exec systemctl --no-block poweroff
+exec systemctl --no-block --no-wall poweroff
 EOF
 chmod 755 /usr/local/sbin/sendit-console-logout
 mkdir -p /etc/systemd/system/serial-getty@hvc0.service.d
