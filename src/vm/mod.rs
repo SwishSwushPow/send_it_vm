@@ -61,14 +61,21 @@ fn notice(message: &str) {
     let _ = write!(std::io::stderr(), "\r\n[sendit] {message}\r\n");
 }
 
-/// Clears the terminal's screen, if stdout is one.
+/// Clears the terminal's screen, if stdout is one, by scrolling everything on
+/// it up into the scrollback: a newline per row, then the cursor goes home.
 pub fn clear_screen() {
     let mut stdout = std::io::stdout();
-    if stdout.is_terminal() {
-        let _ = stdout
-            .write_all(b"\x1b[H\x1b[2J")
-            .and_then(|()| stdout.flush());
+    if !stdout.is_terminal() {
+        return;
     }
+    let Some((rows, _)) = console::window_size() else {
+        return;
+    };
+    let mut clear = "\n".repeat(rows.into());
+    clear.push_str("\x1b[H");
+    let _ = stdout
+        .write_all(clear.as_bytes())
+        .and_then(|()| stdout.flush());
 }
 
 /// The files making up one VM (the base image or a project VM).

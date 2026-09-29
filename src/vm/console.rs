@@ -434,6 +434,12 @@ fn is_terminal_name(value: &str) -> bool {
 
 /// The terminal's size as a "<rows> <cols>" line, if stdout is a terminal.
 fn terminal_size() -> Option<String> {
+    let (rows, cols) = window_size()?;
+    Some(format!("{rows} {cols}\n"))
+}
+
+/// The terminal's rows and columns, if stdout is a terminal.
+pub(super) fn window_size() -> Option<(u16, u16)> {
     let mut size = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -447,7 +453,7 @@ fn terminal_size() -> Option<String> {
     {
         return None;
     }
-    Some(format!("{} {}\n", size.ws_row, size.ws_col))
+    Some((size.ws_row, size.ws_col))
 }
 
 /// Forwards `from` (stdin) to the guest, counting escape keys, until `stop`
