@@ -40,8 +40,9 @@ const BANNER: &str = include_str!("assets/banner.txt");
 /// applies the host terminal's size to the console, 6 its type, 7 takes
 /// the guest user's sudo rights and lets the host log in as root, 8 stops
 /// systemd from asking the terminal for its size, whose late replies ended
-/// up in the shell.
-pub const BASE_REVISION: u32 = 8;
+/// up in the shell, 9 gives root's shell colours, a window title and a red
+/// prompt.
+pub const BASE_REVISION: u32 = 9;
 
 /// Printed by provision.sh as its last line when it succeeded, followed by
 /// the build's token.

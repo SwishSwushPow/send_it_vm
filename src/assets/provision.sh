@@ -310,6 +310,33 @@ systemctl enable sendit-ssh-hostkeys.service ssh.service
 install -d -m 700 /root/.ssh
 install -m 600 "$seed/root.pub" /root/.ssh/authorized_keys
 echo 'PermitRootLogin prohibit-password' > /etc/ssh/sshd_config.d/sendit.conf
+# Debian's root .bashrc has no colours; add those of /etc/skel/.bashrc and
+# its window title, with a red prompt so a root shell stands out from the
+# login user's.
+cat >> /root/.bashrc <<'EOF'
+
+# Added by sendit: colours and window title as in /etc/skel/.bashrc, with a
+# red prompt.
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+case "$TERM" in
+    xterm-color | *-256color)
+        PS1='${debian_chroot:+($debian_chroot)}\[\033[01;31m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+        ;;
+esac
+case "$TERM" in
+    xterm* | rxvt*)
+        PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+        ;;
+esac
+if [ -x /usr/bin/dircolors ]; then
+    eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+fi
+EOF
 
 # --- Custom scripts ---------------------------------------------------------
 # The user's scripts from ~/.config/sendit/provision-scripts, in name order.
