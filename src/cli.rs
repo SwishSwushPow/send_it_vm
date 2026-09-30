@@ -75,6 +75,10 @@ pub enum Command {
         /// until they are reset
         #[arg(long)]
         outdated: bool,
+        /// Delete every VM that isn't running, whatever its project or base
+        /// image
+        #[arg(long)]
+        all: bool,
         /// Don't ask for confirmation
         #[arg(short, long)]
         yes: bool,

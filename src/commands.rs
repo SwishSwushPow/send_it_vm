@@ -202,62 +202,84 @@ fn column_width<S: AsRef<str>>(header: &str, values: impl Iterator<Item = S>) ->
         .fold(header.len(), usize::max)
 }
 
-/// Deletes the VMs of missing projects, and with `outdated` also those made
-/// from an outdated base image. Those can't run anymore, so their project
-/// directory doesn't matter.
-pub fn prune(paths: &Paths, outdated: bool, yes: bool) -> Result<()> {
+/// Which VMs `prune` deletes. Each scope takes in the ones before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PruneScope {
+    /// VMs whose project directory no longer exists.
+    Missing,
+    /// Also VMs made from an outdated base image. They can't run anymore,
+    /// so their project directory doesn't matter.
+    Outdated,
+    /// Every VM that isn't running.
+    All,
+}
+
+pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
     let mut orphans = Vec::new();
     let mut old = Vec::new();
+    let mut others = Vec::new();
     for dir in project_vm::all(paths)? {
-        let Ok(metadata) = project_vm::metadata(&dir) else {
-            continue;
-        };
-        let path = &metadata.project_path;
-        let group = match project_dir(path) {
-            ProjectDir::Missing => &mut orphans,
-            _ if outdated && metadata.outdated() => &mut old,
-            ProjectDir::Present => continue,
-            ProjectDir::Unmounted => {
-                eprintln!("Skipping {}: its volume is not mounted.", path.display());
-                continue;
+        let all = scope == PruneScope::All;
+        let (project, group) = match project_vm::metadata(&dir) {
+            Ok(metadata) => {
+                let path = &metadata.project_path;
+                let group = match project_dir(path) {
+                    ProjectDir::Missing => &mut orphans,
+                    _ if scope >= PruneScope::Outdated && metadata.outdated() => &mut old,
+                    _ if all => &mut others,
+                    ProjectDir::Present => continue,
+                    ProjectDir::Unmounted => {
+                        eprintln!("Skipping {}: its volume is not mounted.", path.display());
+                        continue;
+                    }
+                    ProjectDir::Inaccessible(e) => {
+                        eprintln!("Skipping {}: {e}", path.display());
+                        continue;
+                    }
+                };
+                (path.display().to_string(), group)
             }
-            ProjectDir::Inaccessible(e) => {
-                eprintln!("Skipping {}: {e}", path.display());
-                continue;
-            }
+            Err(_) if all => ("?".to_string(), &mut others),
+            Err(_) => continue,
         };
         if project_vm::state(&dir)? != State::Stopped {
-            eprintln!("Skipping {}: it is still running.", path.display());
+            eprintln!("Skipping {project}: it is still running.");
             continue;
         }
-        group.push((dir, metadata.project_path));
+        group.push((dir, project));
     }
-    if orphans.is_empty() && old.is_empty() {
-        if outdated {
-            eprintln!("No VMs of missing projects or made from an outdated base image.");
-        } else {
-            eprintln!("No VMs of missing projects.");
-        }
+    if orphans.is_empty() && old.is_empty() && others.is_empty() {
+        eprintln!(
+            "{}",
+            match scope {
+                PruneScope::Missing => "No VMs of missing projects.",
+                PruneScope::Outdated => {
+                    "No VMs of missing projects or made from an outdated base image."
+                }
+                PruneScope::All => "No stopped VMs.",
+            }
+        );
         return Ok(());
     }
     for (heading, vms) in [
         ("VMs whose project directory no longer exists:", &orphans),
         ("VMs made from an outdated base image:", &old),
+        ("Other VMs:", &others),
     ] {
         if vms.is_empty() {
             continue;
         }
         eprintln!("{heading}");
         for (dir, project) in vms {
-            eprintln!("  {}  ({})", project.display(), paths.display(dir.path()));
+            eprintln!("  {project}  ({})", paths.display(dir.path()));
         }
     }
-    let count = match orphans.len() + old.len() {
+    let count = match orphans.len() + old.len() + others.len() {
         1 => "1 VM".to_string(),
         n => format!("{n} VMs"),
     };
     if yes || confirm(&format!("Delete {count}?"), PASS_YES)? {
-        for (dir, _) in orphans.iter().chain(&old) {
+        for (dir, _) in orphans.iter().chain(&old).chain(&others) {
             project_vm::delete(dir)?;
         }
         eprintln!("Deleted {count}.");
@@ -379,7 +401,7 @@ mod tests {
     use crate::util::TempDir;
 
     #[test]
-    fn prunes_outdated_vms_only_when_asked() {
+    fn prunes_more_vms_as_the_scope_widens() {
         let temp = TempDir::new("prune");
         let paths = Paths::new(temp.path().join("home"));
         let present = temp.path().join("present");
@@ -401,14 +423,21 @@ mod tests {
         let kept = vm("kept", &present, current);
         let outdated = vm("outdated", &present, current - 1);
         let orphan = vm("orphan", &temp.path().join("gone"), current);
+        let broken = paths.vms_dir().join("broken");
+        fs::create_dir_all(&broken).unwrap();
 
-        prune(&paths, false, true).unwrap();
+        prune(&paths, PruneScope::Missing, true).unwrap();
         assert!(!orphan.exists());
         assert!(outdated.exists());
 
-        prune(&paths, true, true).unwrap();
+        prune(&paths, PruneScope::Outdated, true).unwrap();
         assert!(!outdated.exists());
         assert!(kept.exists());
+        assert!(broken.exists());
+
+        prune(&paths, PruneScope::All, true).unwrap();
+        assert!(!kept.exists());
+        assert!(!broken.exists());
     }
 
     #[test]

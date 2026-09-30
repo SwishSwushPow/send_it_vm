@@ -17,6 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
+use crate::commands::PruneScope;
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
 
@@ -71,6 +72,15 @@ fn main() -> Result<()> {
         Command::Reset { yes } => commands::reset(&paths, &project()?, *yes),
         Command::List => commands::list(&paths),
         Command::Images => commands::images(&paths, &Config::load(&paths)?),
-        Command::Prune { outdated, yes } => commands::prune(&paths, *outdated, *yes),
+        Command::Prune { outdated, all, yes } => {
+            let scope = if *all {
+                PruneScope::All
+            } else if *outdated {
+                PruneScope::Outdated
+            } else {
+                PruneScope::Missing
+            };
+            commands::prune(&paths, scope, *yes)
+        }
     }
 }

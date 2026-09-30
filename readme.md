@@ -30,6 +30,7 @@ sendit list               # list all project VMs
 sendit images             # list the base images and how many VMs use each
 sendit prune              # delete VMs whose project directory is gone
 sendit prune --outdated   # ... and VMs made from an outdated base image
+sendit prune --all        # delete every VM that isn't running
 ```
 
 Commands act on the project in the current directory, or on the one given with `-C DIR`.
