@@ -202,15 +202,20 @@ fn column_width<S: AsRef<str>>(header: &str, values: impl Iterator<Item = S>) ->
         .fold(header.len(), usize::max)
 }
 
-pub fn prune(paths: &Paths, yes: bool) -> Result<()> {
+/// Deletes the VMs of missing projects, and with `outdated` also those made
+/// from an outdated base image. Those can't run anymore, so their project
+/// directory doesn't matter.
+pub fn prune(paths: &Paths, outdated: bool, yes: bool) -> Result<()> {
     let mut orphans = Vec::new();
+    let mut old = Vec::new();
     for dir in project_vm::all(paths)? {
         let Ok(metadata) = project_vm::metadata(&dir) else {
             continue;
         };
         let path = &metadata.project_path;
-        match project_dir(path) {
-            ProjectDir::Missing => {}
+        let group = match project_dir(path) {
+            ProjectDir::Missing => &mut orphans,
+            _ if outdated && metadata.outdated() => &mut old,
             ProjectDir::Present => continue,
             ProjectDir::Unmounted => {
                 eprintln!("Skipping {}: its volume is not mounted.", path.display());
@@ -220,27 +225,39 @@ pub fn prune(paths: &Paths, yes: bool) -> Result<()> {
                 eprintln!("Skipping {}: {e}", path.display());
                 continue;
             }
-        }
+        };
         if project_vm::state(&dir)? != State::Stopped {
             eprintln!("Skipping {}: it is still running.", path.display());
             continue;
         }
-        orphans.push((dir, metadata.project_path));
+        group.push((dir, metadata.project_path));
     }
-    if orphans.is_empty() {
-        eprintln!("No VMs of missing projects.");
+    if orphans.is_empty() && old.is_empty() {
+        if outdated {
+            eprintln!("No VMs of missing projects or made from an outdated base image.");
+        } else {
+            eprintln!("No VMs of missing projects.");
+        }
         return Ok(());
     }
-    eprintln!("VMs whose project directory no longer exists:");
-    for (dir, project) in &orphans {
-        eprintln!("  {}  ({})", project.display(), paths.display(dir.path()));
+    for (heading, vms) in [
+        ("VMs whose project directory no longer exists:", &orphans),
+        ("VMs made from an outdated base image:", &old),
+    ] {
+        if vms.is_empty() {
+            continue;
+        }
+        eprintln!("{heading}");
+        for (dir, project) in vms {
+            eprintln!("  {}  ({})", project.display(), paths.display(dir.path()));
+        }
     }
-    let count = match orphans.len() {
+    let count = match orphans.len() + old.len() {
         1 => "1 VM".to_string(),
         n => format!("{n} VMs"),
     };
     if yes || confirm(&format!("Delete {count}?"), PASS_YES)? {
-        for (dir, _) in &orphans {
+        for (dir, _) in orphans.iter().chain(&old) {
             project_vm::delete(dir)?;
         }
         eprintln!("Deleted {count}.");
@@ -360,6 +377,39 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
 mod tests {
     use super::*;
     use crate::util::TempDir;
+
+    #[test]
+    fn prunes_outdated_vms_only_when_asked() {
+        let temp = TempDir::new("prune");
+        let paths = Paths::new(temp.path().join("home"));
+        let present = temp.path().join("present");
+        fs::create_dir_all(&present).unwrap();
+        let vm = |name: &str, project: &Path, base_revision: u32| {
+            let dir = paths.vms_dir().join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("project.toml"),
+                format!(
+                    "project_path = \"{}\"\nimage = \"default\"\nbase_revision = {base_revision}\n",
+                    project.display()
+                ),
+            )
+            .unwrap();
+            dir
+        };
+        let current = provision::BASE_REVISION;
+        let kept = vm("kept", &present, current);
+        let outdated = vm("outdated", &present, current - 1);
+        let orphan = vm("orphan", &temp.path().join("gone"), current);
+
+        prune(&paths, false, true).unwrap();
+        assert!(!orphan.exists());
+        assert!(outdated.exists());
+
+        prune(&paths, true, true).unwrap();
+        assert!(!outdated.exists());
+        assert!(kept.exists());
+    }
 
     #[test]
     fn flags_shares_of_home_and_sendit_state() {

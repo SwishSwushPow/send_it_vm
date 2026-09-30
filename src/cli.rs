@@ -71,6 +71,10 @@ pub enum Command {
     Images,
     /// Delete VMs whose project directory no longer exists
     Prune {
+        /// Also delete VMs made from an outdated base image, which can't run
+        /// until they are reset
+        #[arg(long)]
+        outdated: bool,
         /// Don't ask for confirmation
         #[arg(short, long)]
         yes: bool,

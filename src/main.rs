@@ -71,6 +71,6 @@ fn main() -> Result<()> {
         Command::Reset { yes } => commands::reset(&paths, &project()?, *yes),
         Command::List => commands::list(&paths),
         Command::Images => commands::images(&paths, &Config::load(&paths)?),
-        Command::Prune { yes } => commands::prune(&paths, *yes),
+        Command::Prune { outdated, yes } => commands::prune(&paths, *outdated, *yes),
     }
 }
