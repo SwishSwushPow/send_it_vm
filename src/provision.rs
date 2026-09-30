@@ -32,7 +32,6 @@ const BASE_DISK_SIZE: ByteSize = ByteSize::gib(8);
 
 const USER_DATA: &str = include_str!("assets/user-data.yaml");
 const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
-const BANNER: &str = include_str!("assets/banner.txt");
 
 /// Bumped whenever the base image changes in a way the host code relies on.
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
@@ -341,7 +340,6 @@ fn build_seed_iso(
     fs::write(dir.join("root.pub"), format!("{root_public_key}\n"))?;
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
     fs::write(dir.join("token"), format!("{token}\n"))?;
-    fs::write(dir.join("banner.txt"), BANNER)?;
     // Numbered file names survive the ISO's file name limits; `list` maps
     // them back to the original names for the log.
     let custom = dir.join("custom");

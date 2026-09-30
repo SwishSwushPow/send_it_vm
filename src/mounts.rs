@@ -1,10 +1,10 @@
 //! Turning the configured mounts into virtiofs shares, plus the manifest that
 //! tells the guest where to mount them.
 //!
-//! Every VM gets a read-only `sendit-meta` share holding the manifest and the
-//! script that applies it (`assets/sendit-mounts.sh`). The base image only
-//! knows to mount that share and run the script, so the mount logic can
-//! change without re-provisioning.
+//! Every VM gets a read-only `sendit-meta` share holding the manifest, the
+//! script that applies it (`assets/sendit-mounts.sh`) and the login message.
+//! The base image only knows to mount that share and run the script, so the
+//! mount logic and the message can change without re-provisioning.
 //!
 //! Hiding `.git` keeps it out of reach of the guest user, which has no root
 //! rights to unmount the mask. Only the host can become root in the guest
@@ -20,6 +20,14 @@ use crate::config::VmSettings;
 
 pub const META_TAG: &str = "sendit-meta";
 const MOUNT_SCRIPT: &str = include_str!("assets/sendit-mounts.sh");
+const BANNER: &str = include_str!("assets/banner.txt");
+
+/// The login message below the banner.
+const MOTD: &str = "  Light and fast VMs. Your project is in your home directory.
+  Logging out of the console (exit or Ctrl-D) shuts the VM down.
+  There is no sudo here; for root, run `sendit ssh --root` on the host.
+
+";
 
 /// A host directory exposed to the guest under a virtiofs tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,12 +37,13 @@ pub struct Share {
     pub read_only: bool,
 }
 
-/// Writes the manifest and mount script into `meta_dir` and returns all
-/// shares for the VM, the meta share first.
+/// Writes the manifest, mount script and login message into `meta_dir` and
+/// returns all shares for the VM, the meta share first.
 pub fn prepare(settings: &VmSettings, meta_dir: &Path) -> Result<Vec<Share>> {
     fs::create_dir_all(meta_dir).with_context(|| format!("creating {}", meta_dir.display()))?;
     fs::write(meta_dir.join("mounts"), manifest(settings))?;
     fs::write(meta_dir.join("mount.sh"), MOUNT_SCRIPT)?;
+    fs::write(meta_dir.join("motd"), motd(settings))?;
     Ok(shares(settings, meta_dir))
 }
 
@@ -83,6 +92,17 @@ fn manifest(settings: &VmSettings) -> String {
     text
 }
 
+/// The login message, which mount.sh installs as /etc/motd: the banner in
+/// orange, unless turned off, then `MOTD`.
+fn motd(settings: &VmSettings) -> String {
+    if settings.banner {
+        format!("\x1b[1;38;5;208m{BANNER}\x1b[0m{MOTD}")
+    } else {
+        // Apart from the kernel line the login shows before it.
+        format!("\n{MOTD}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +124,7 @@ mod tests {
                 mount("/cache", "/home/dev/.cache", false),
             ],
             expose_git,
+            banner: true,
             image: None,
         }
     }
@@ -127,6 +148,15 @@ mod tests {
              hide /home/dev/p/.git\n\
              workdir /home/dev/p\n"
         );
+    }
+
+    #[test]
+    fn leaves_out_the_banner_on_request() {
+        let mut settings = settings(false);
+        assert!(motd(&settings).contains(BANNER));
+        settings.banner = false;
+        assert!(!motd(&settings).contains(BANNER));
+        assert!(motd(&settings).ends_with(MOTD));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 #!/bin/sh
-# Applies sendit's mount manifest. Runs as root on every boot, started by
-# sendit-mounts.service from the read-only sendit-meta share, so it always
-# matches the sendit version that booted the VM.
+# Applies sendit's mount manifest and installs the login message next to it.
+# Runs as root on every boot, started by sendit-mounts.service from the
+# read-only sendit-meta share, so it always matches the sendit version that
+# booted the VM.
 # Usage: mount.sh <manifest>
 #
 # Manifest lines, applied in order:
@@ -43,6 +44,7 @@ mkpoint() {
 }
 
 rm -f "$profile"
+cp "$(dirname "$1")/motd" /etc/motd || fail "could not write /etc/motd"
 
 while read -r kind rest; do
     case $kind in

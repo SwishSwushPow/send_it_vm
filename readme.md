@@ -59,6 +59,7 @@ cpus = 4                  # default 2
 memory = "8G"             # default 4G
 disk-size = "128G"        # default 64G; the disk file is sparse and only grows
 mounts = ["~/.cargo/registry:/home/dev/.cargo/registry"]  # read-only unless :rw
+banner = false            # leave the "Send It" banner out of the login message
 
 image = "rust"            # the base image new VMs are made from; default "default"
 

@@ -160,6 +160,8 @@ pub struct Settings {
     #[serde(default)]
     pub mounts: Vec<MountSpec>,
     pub expose_git: Option<bool>,
+    /// Whether the login message starts with the "Send It" banner.
+    pub banner: Option<bool>,
     /// The base image a new VM is created from, and the one an existing VM
     /// must have been created from.
     pub image: Option<ImageName>,
@@ -270,6 +272,7 @@ pub struct VmSettings {
     /// characters or surrounding spaces.
     pub mounts: Vec<Mount>,
     pub expose_git: bool,
+    pub banner: bool,
     /// `None` unless a layer chooses one: the VM keeps its image, and a new
     /// one is created from `default`.
     pub image: Option<ImageName>,
@@ -337,6 +340,7 @@ impl Config {
         let mut memory = DEFAULT_MEMORY;
         let mut disk_size = DEFAULT_DISK_SIZE;
         let mut expose_git = false;
+        let mut banner = true;
         let mut mounts = vec![Mount {
             host: project.root.clone(),
             guest: project_guest_path(project),
@@ -349,6 +353,7 @@ impl Config {
             memory = layer.memory.unwrap_or(memory);
             disk_size = layer.disk_size.unwrap_or(disk_size);
             expose_git = layer.expose_git.unwrap_or(expose_git);
+            banner = layer.banner.unwrap_or(banner);
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
@@ -360,6 +365,7 @@ impl Config {
             disk_size,
             mounts,
             expose_git,
+            banner,
             image: chosen,
         };
         settings.validate()?;

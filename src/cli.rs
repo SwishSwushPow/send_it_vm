@@ -109,6 +109,7 @@ impl RunArgs {
             disk_size: None,
             mounts: self.mounts.clone(),
             expose_git: self.expose_git.then_some(true),
+            banner: None,
             image: self.image.clone(),
         }
     }
