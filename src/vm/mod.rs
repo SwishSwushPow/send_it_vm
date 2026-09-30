@@ -32,7 +32,8 @@ use crate::config::ByteSize;
 use crate::mounts::Share;
 use console::Console;
 
-/// How long to wait for the guest to shut down after asking it to.
+/// How long to wait for the guest to shut down after asking it to, or after
+/// it said that it is shutting down on its own.
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often the guest is asked again while it hasn't reacted. Early in
@@ -212,7 +213,8 @@ impl VmDelegate {
 /// drains the main dispatch queue the VM runs on. The guest powers off when
 /// its console user logs out. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
 /// or SIGINT) asks the guest to shut down; doing it again, or the guest not
-/// reacting in time, stops the VM forcibly.
+/// reacting in time, stops the VM forcibly. So does a shutdown the guest
+/// started on its own that takes too long.
 pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     ensure!(
         unsafe { VZVirtualMachine::isSupported() },
@@ -269,6 +271,9 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         let escapes = console.escapes() + SIGNALS.load(Ordering::Relaxed);
         let escaped = escapes > seen_escapes;
         seen_escapes = escapes;
+        // Provisioning ends with the guest shutting down, which must not be
+        // cut short.
+        let guest_stopping = spec.provision_log.is_none() && console.guest_stopping();
         stopping = match stopping {
             Stopping::No if escaped => {
                 let next = stop(&vm, &state, stopping_notice);
@@ -276,6 +281,15 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
                     notice("The VM is still starting; it shuts down once it can.");
                 }
                 next
+            }
+            // The guest is already shutting down, e.g. after a logout: it
+            // gets as long as if it had been asked to.
+            Stopping::No | Stopping::Pending if guest_stopping => {
+                let now = Instant::now();
+                Stopping::Requested {
+                    since: now,
+                    last: now,
+                }
             }
             Stopping::Pending => stop(&vm, &state, stopping_notice),
             Stopping::Requested { since, last } if escaped || since.elapsed() > STOP_TIMEOUT => {

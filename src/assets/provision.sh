@@ -28,6 +28,11 @@ apt-get -y install --no-install-recommends \
     git curl ca-certificates build-essential pkg-config cmake sudo \
     openssh-server cloud-guest-utils less vim-tiny \
     unzip jq ripgrep fd-find htop
+# Updates come with a rebuilt base image, not in the background: an upgrade
+# running in the background holds up shutting down for up to 30 minutes, and
+# would be cut short when sendit forces the VM off.
+apt-get -y purge unattended-upgrades
+systemctl disable apt-daily.timer apt-daily-upgrade.timer
 apt-get -y autoremove --purge
 apt-get clean
 # Debian installs fd as fdfind because fdclone's file manager is also called
@@ -167,6 +172,24 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 systemctl enable sendit-console-terminal.service
+# When the VM starts shutting down, however that came about, a "!" on
+# /dev/hvc2 tells sendit, which forces the VM off if the shutdown hangs.
+# Nothing else here is ordered before this, so it runs right away.
+cat > /etc/systemd/system/sendit-shutdown-notice.service <<'EOF'
+[Unit]
+Description=Tell sendit that the VM is shutting down
+DefaultDependencies=no
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/echo !
+StandardOutput=file:/dev/hvc2
+
+[Install]
+WantedBy=poweroff.target halt.target
+EOF
+systemctl enable sendit-shutdown-notice.service
 cat > /etc/profile.d/sendit-terminal.sh <<'EOF'
 # login keeps only TERM from the getty's environment; bring back COLORTERM.
 if [ "$(tty)" = /dev/hvc0 ] && [ -r /run/sendit-console.env ]; then

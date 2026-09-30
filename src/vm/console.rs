@@ -11,12 +11,13 @@
 //! or how large it is, so a third port carries both: when the guest asks,
 //! sendit sends the terminal's size and type ($TERM and $COLORTERM), and it
 //! sends the size again whenever the terminal is resized (SIGWINCH). A
-//! service in the guest applies them to the console.
+//! service in the guest applies them to the console. The guest also says
+//! there when it starts shutting down.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -45,6 +46,7 @@ pub struct Console {
     /// Carries the terminal's type and size, /dev/hvc2 in the guest.
     terminal: Retained<VZFileHandleSerialPortAttachment>,
     escapes: Arc<AtomicUsize>,
+    guest_stopping: Arc<AtomicBool>,
     /// Closing it stops forwarding stdin and sending the terminal, so the
     /// threads don't outlive the console, e.g. swallowing what is typed or
     /// the resizes meant for the next VM.
@@ -68,7 +70,8 @@ impl Console {
         let escapes = Arc::new(AtomicUsize::new(0));
         let counter = escapes.clone();
         let (stop_read, stop) = pipe()?;
-        let terminal = terminal_port(stop_read.try_clone()?)?;
+        let guest_stopping = Arc::new(AtomicBool::new(false));
+        let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?)?;
         std::thread::spawn(move || {
             forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
         });
@@ -95,6 +98,7 @@ impl Console {
             log: serial_port(None, &log_output),
             terminal,
             escapes,
+            guest_stopping,
             stop: Some(stop),
             output: Some(OutputCopy::start(output_read, shown, log)?),
             raw_mode: RawMode::enable(provisioning)?,
@@ -109,6 +113,11 @@ impl Console {
     /// How often the escape key has been pressed so far.
     pub fn escapes(&self) -> usize {
         self.escapes.load(Ordering::Relaxed)
+    }
+
+    /// Whether the guest has said that it is shutting down.
+    pub fn guest_stopping(&self) -> bool {
+        self.guest_stopping.load(Ordering::Relaxed)
     }
 }
 
@@ -328,12 +337,16 @@ extern "C" fn on_winch(_: libc::c_int) {
 }
 
 /// Creates the port that carries the terminal's type and size to the guest,
-/// and starts sending them there until `stop` closes.
-fn terminal_port(stop: OwnedFd) -> Result<Retained<VZFileHandleSerialPortAttachment>> {
+/// and starts sending them there until `stop` closes. `guest_stopping` is
+/// set once the guest says it is shutting down.
+fn terminal_port(
+    guest_stopping: Arc<AtomicBool>,
+    stop: OwnedFd,
+) -> Result<Retained<VZFileHandleSerialPortAttachment>> {
     let winch = winch_pipe()?;
     let (guest_reads, to_guest) = pipe()?;
     let (from_guest, guest_writes) = pipe()?;
-    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch, stop));
+    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch, &guest_stopping, stop));
     Ok(serial_port(
         Some(&file_handle(guest_reads)),
         &file_handle(guest_writes),
@@ -367,8 +380,16 @@ fn winch_pipe() -> io::Result<libc::c_int> {
 /// does once it is ready), the size goes as a "<rows> <cols>" line, followed
 /// by a "term <TERM> [<COLORTERM>]" line: the guest starts the login once it
 /// has the type, so the size must be there by then. The size alone goes
-/// again whenever `winch` is signalled. Ends when `stop` closes.
-fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: libc::c_int, stop: OwnedFd) {
+/// again whenever `winch` is signalled. A "!" from the guest says that it has
+/// started shutting down, which sets `guest_stopping`. Ends when `stop`
+/// closes.
+fn send_terminal(
+    to_guest: OwnedFd,
+    from_guest: OwnedFd,
+    winch: libc::c_int,
+    guest_stopping: &AtomicBool,
+    stop: OwnedFd,
+) {
     let mut fds = [
         pollfd(stop.as_raw_fd()),
         pollfd(winch),
@@ -389,7 +410,12 @@ fn send_terminal(to_guest: OwnedFd, from_guest: OwnedFd, winch: libc::c_int, sto
                 // poll() skips negative descriptors.
                 Ok(0) | Err(_) => pollfd.fd = -1,
                 Ok(_) if pollfd.fd == winch => resized = true,
-                Ok(n) => asked |= buf[..n].contains(&b'?'),
+                Ok(n) => {
+                    asked |= buf[..n].contains(&b'?');
+                    if buf[..n].contains(&b'!') {
+                        guest_stopping.store(true, Ordering::Relaxed);
+                    }
+                }
             }
         }
         let mut message = String::new();

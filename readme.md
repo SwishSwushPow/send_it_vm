@@ -37,7 +37,7 @@ Commands act on the project in the current directory, or on the one given with `
 
 Inside the VM, the host is reachable as `host.sendit.internal`, whatever subnet macOS gives its VMs. Services on the host must listen on more than `127.0.0.1` for the VM to reach them.
 
-In the console, `exit` (or Ctrl-D) shuts the VM down. Ctrl-] asks the guest to shut down; pressing it again forces the VM off.
+In the console, `exit` (or Ctrl-D) shuts the VM down. Ctrl-] asks the guest to shut down; pressing it again forces the VM off. A shutdown that takes longer than 30 seconds is forced too.
 
 The project is mounted at `/home/dev/<name>`, where login shells start. `run` also takes these flags:
 

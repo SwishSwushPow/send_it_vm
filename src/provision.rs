@@ -41,7 +41,8 @@ const BANNER: &str = include_str!("assets/banner.txt");
 /// the guest user's sudo rights and lets the host log in as root, 8 stops
 /// systemd from asking the terminal for its size, whose late replies ended
 /// up in the shell, 9 gives root's shell colours, a window title and a red
-/// prompt.
+/// prompt, tells the host when the guest starts shutting down, and drops
+/// unattended-upgrades, which could hold up shutting down.
 pub const BASE_REVISION: u32 = 9;
 
 /// Printed by provision.sh as its last line when it succeeded, followed by
