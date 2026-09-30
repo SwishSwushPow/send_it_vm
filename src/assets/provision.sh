@@ -25,10 +25,14 @@ trap 'report $?' EXIT
 apt-get update
 apt-get -y -o Dpkg::Options::=--force-confold full-upgrade
 apt-get -y install --no-install-recommends \
-    git curl ca-certificates build-essential pkg-config sudo \
-    openssh-server cloud-guest-utils less vim-tiny
+    git curl ca-certificates build-essential pkg-config cmake sudo \
+    openssh-server cloud-guest-utils less vim-tiny \
+    unzip jq ripgrep fd-find htop
 apt-get -y autoremove --purge
 apt-get clean
+# Debian installs fd as fdfind because fdclone's file manager is also called
+# fd; fdclone isn't installed here.
+ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
 # --- Identity ---------------------------------------------------------------
 hostnamectl set-hostname sendit
