@@ -24,7 +24,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -156,11 +156,32 @@ fn seed_downloads(home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// One VM at a time: several would compete for CPUs and memory and slow
+/// How many tests may run VMs at the same time. Each VM gets the default 2
+/// CPUs and 4 GiB of memory; more of them would compete for those and slow
 /// each other down past the timeouts.
-fn serial() -> MutexGuard<'static, ()> {
-    static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+const MAX_VMS: usize = 2;
+
+/// Waits until fewer than `MAX_VMS` tests are running VMs; the test may run
+/// its VMs until it drops the returned slot.
+fn vm_slot() -> VmSlot {
+    let mut running = VM_SLOTS.0.lock().unwrap_or_else(|e| e.into_inner());
+    while *running >= MAX_VMS {
+        running = VM_SLOTS.1.wait(running).unwrap_or_else(|e| e.into_inner());
+    }
+    *running += 1;
+    VmSlot
+}
+
+/// The number of tests holding a `VmSlot`, and the signal that one ended.
+static VM_SLOTS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+struct VmSlot;
+
+impl Drop for VmSlot {
+    fn drop(&mut self) {
+        *VM_SLOTS.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        VM_SLOTS.1.notify_one();
+    }
 }
 
 /// A project directory, emptied and without a VM to start with.
@@ -678,7 +699,7 @@ fn host_timezone() -> Option<String> {
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn runs_commands_over_ssh() {
-    let _serial = serial();
+    let _slot = vm_slot();
     let project = Project::new("lifecycle");
     let vm = project.run(&[]);
 
@@ -711,7 +732,7 @@ fn runs_commands_over_ssh() {
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn shares_the_project_and_mounts() {
-    let _serial = serial();
+    let _slot = vm_slot();
     let project = Project::new("shares");
     fs::write(project.dir.join("hello.txt"), "from the host\n").unwrap();
     fs::create_dir(project.dir.join(".git")).unwrap();
@@ -761,7 +782,7 @@ fn shares_the_project_and_mounts() {
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn keeps_the_vm_until_reset() {
-    let _serial = serial();
+    let _slot = vm_slot();
     let project = Project::new("persistence");
 
     let vm = project.run(&[]);
@@ -781,7 +802,7 @@ fn keeps_the_vm_until_reset() {
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn console_follows_the_terminal() {
-    let _serial = serial();
+    let _slot = vm_slot();
     let project = Project::new("console");
     let raw = libc::ICANON | libc::ECHO | libc::ISIG;
     let mut term = project.run_in_terminal("xterm-256color", Some("truecolor"), 40, 120);
@@ -817,7 +838,7 @@ fn console_follows_the_terminal() {
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn escape_key_shuts_the_vm_down() {
-    let _serial = serial();
+    let _slot = vm_slot();
     let project = Project::new("escape");
     // Without terminfo in the guest, the console falls back.
     let mut term = project.run_in_terminal("sendit-unknown-terminal", None, 40, 120);
