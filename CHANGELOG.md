@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- sendit excludes `~/.cache/sendit/` and `~/.sendit/` from Time Machine backups. Both hold only downloads, base images and VMs that sendit can make again, and every run of a VM made Time Machine copy its whole disk again. Files in a VM outside the project directory are no longer backed up.
+
 ### Fixed
 
 - VMs use the host's time zone instead of UTC. sendit passes it on every boot, so existing VMs pick it up without rebuilding their image.

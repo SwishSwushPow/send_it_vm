@@ -4,21 +4,18 @@
 //! comment says otherwise, the `unsafe` blocks here only call them with
 //! valid, retained objects on the main thread.
 
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::NonNull;
 
 use anyhow::{Context, Result, ensure};
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSData, NSError, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSError, NSString};
 use objc2_virtualization::*;
 
 use super::{VmDir, VmSpec, ns_message};
 use crate::mounts::Share;
-use crate::util::if_exists;
+use crate::util::{file_url, if_exists};
 
 pub fn build(
     dir: &VmDir,
@@ -214,21 +211,6 @@ fn load_or_create<T>(
     let (value, bytes) = create();
     fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
     Ok(value)
-}
-
-/// A file URL for `path`, built from its bytes so that paths which aren't
-/// valid UTF-8 still point at the right file.
-fn file_url(path: &Path) -> Result<Retained<NSURL>> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
-    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
-    Ok(unsafe {
-        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-            NonNull::new_unchecked(c_path.as_ptr().cast_mut()),
-            path.is_dir(),
-            None,
-        )
-    })
 }
 
 fn ns_error(error: Retained<NSError>) -> anyhow::Error {

@@ -104,6 +104,14 @@ impl Paths {
         self.home.join(".sendit")
     }
 
+    /// The directories holding only what sendit can make again: downloads,
+    /// base images, SSH keys baked into them, and project VMs, which are
+    /// clones of the base images. Not worth backing up; only the
+    /// configuration is.
+    pub fn rebuildable_dirs(&self) -> [PathBuf; 2] {
+        [self.cache_dir(), self.vms_dir()]
+    }
+
     pub fn vm_dir(&self, project: &Project) -> PathBuf {
         self.vms_dir().join(&project.id)
     }

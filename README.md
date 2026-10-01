@@ -105,6 +105,8 @@ Nothing is written into project directories.
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 - `~/.config/sendit/`: configuration and custom provisioning scripts
 
+sendit excludes `~/.cache/sendit/` and `~/.sendit/` from Time Machine backups on every start. They hold only what sendit can make again, and a VM's disk changes whenever the VM runs, so each backup would copy all of it again. Keep anything inside a VM that you can't lose in the project directory, which lives on the Mac and is backed up as usual.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.

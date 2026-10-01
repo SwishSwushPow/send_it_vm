@@ -25,6 +25,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
+    // Every time, so that directories made by older versions, or deleted
+    // and made again, are excluded too.
+    for dir in paths.rebuildable_dirs() {
+        if let Err(error) = util::exclude_from_backups(&dir) {
+            eprintln!(
+                "warning: could not exclude {} from Time Machine backups: {error:#}",
+                paths.display(&dir)
+            );
+        }
+    }
     let cwd = std::env::current_dir()?;
     let project = || Project::at(cli.project.as_deref().unwrap_or(&cwd));
     let resolve = |project: &Project, cli: &Settings| {
