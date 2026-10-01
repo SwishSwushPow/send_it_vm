@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- VMs use the host's time zone instead of UTC. sendit passes it on every boot, so existing VMs pick it up without rebuilding their image.
+
 ## 0.4.0 - 2026-09-30
 
 ### Added

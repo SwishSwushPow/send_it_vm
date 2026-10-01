@@ -9,6 +9,7 @@
 #   share <virtiofs tag> <ro|rw> <guest path>
 #   hide <guest path>     (masks a directory or file with an empty read-only one)
 #   workdir <guest path>  (where interactive login shells start)
+#   timezone <name>       (the host's time zone, e.g. Europe/Berlin)
 set -u
 
 user=dev
@@ -80,6 +81,17 @@ while read -r kind rest; do
 # Written by sendit-mounts on boot: start login shells in the project.
 [ "\$PWD" = "\$HOME" ] && cd '$quoted' 2>/dev/null
 EOF
+            ;;
+        timezone)
+            # Like timedatectl set-timezone, which needs systemd-timedated
+            # and D-Bus, neither of which is up yet. systemd notices the
+            # change; login shells, which start after this, see the new zone.
+            zone=/usr/share/zoneinfo/$rest
+            if [ -f "$zone" ]; then
+                ln -sf "$zone" /etc/localtime || fail "could not set the time zone to $rest"
+            else
+                fail "unknown time zone $rest; staying on $(readlink /etc/localtime)"
+            fi
             ;;
         '' | '#'*) ;;
         *) fail "unknown manifest line: $kind $rest" ;;
