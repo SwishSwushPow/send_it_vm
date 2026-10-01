@@ -1,0 +1,522 @@
+//! Tests that boot real VMs, driving the sendit binary like a user would.
+//!
+//! They are ignored by default: they need Virtualization.framework, which
+//! GitHub's macOS runners lack, network access the first time, and a few
+//! minutes. Run them with
+//!
+//! ```sh
+//! cargo test --test vm -- --ignored
+//! ```
+//!
+//! sendit runs with a scratch home in `target/tmp/vm-tests/home`, so the
+//! real `~/.cache/sendit` and `~/.sendit` stay untouched. The first run
+//! provisions the `default` image there, which is kept until the files it is
+//! built from change. Provisioning reuses the Debian image in the real
+//! `~/.cache/sendit/downloads` if there is one, and downloads it otherwise.
+//!
+//! Output of `sendit run` goes to `target/tmp/vm-tests/logs/`.
+
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, bail, ensure};
+use sha2::{Digest, Sha256};
+
+const SENDIT: &str = env!("CARGO_BIN_EXE_sendit");
+
+/// What the base image is built from: when any of it changes, the tests
+/// provision their image again.
+const PROVISION_INPUTS: [&str; 3] = [
+    include_str!("../src/assets/provision.sh"),
+    include_str!("../src/assets/user-data.yaml"),
+    include_str!("../src/provision.rs"),
+];
+
+/// Including downloading Debian and its packages.
+const PROVISION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Until the VM answers over SSH.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
+/// `sendit stop` itself gives up after 45 seconds.
+const STOP_TIMEOUT: Duration = Duration::from_secs(90);
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
+/// For each attempt to reach a booting VM.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The scratch home and where the tests keep their files.
+struct Env {
+    root: PathBuf,
+    home: PathBuf,
+}
+
+impl Env {
+    fn sendit(&self) -> Command {
+        let mut cmd = Command::new(SENDIT);
+        cmd.env("HOME", &self.home);
+        cmd
+    }
+}
+
+/// The scratch home with a provisioned `default` image. Set up by the first
+/// test that needs it; if that fails, every test fails with the same error.
+fn env() -> &'static Env {
+    static ENV: OnceLock<Result<Env, String>> = OnceLock::new();
+    match ENV.get_or_init(|| setup().map_err(|e| format!("{e:#}"))) {
+        Ok(env) => env,
+        Err(e) => panic!("setting up the VM tests failed: {e}"),
+    }
+}
+
+fn setup() -> Result<Env> {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("vm-tests");
+    let env = Env {
+        home: root.join("home"),
+        root,
+    };
+    fs::create_dir_all(&env.home)?;
+
+    let key = hex::encode(
+        PROVISION_INPUTS
+            .iter()
+            .fold(Sha256::new(), |hasher, input| hasher.chain_update(input))
+            .finalize(),
+    );
+    let key_file = env.root.join("image.key");
+    let marker = env
+        .home
+        .join(".cache/sendit/images/default/provisioned.toml");
+    if marker.exists() && fs::read_to_string(&key_file).is_ok_and(|k| k == key) {
+        return Ok(env);
+    }
+
+    let _ = fs::remove_file(&key_file);
+    seed_downloads(&env.home)?;
+    eprintln!(
+        "Provisioning the base image for the VM tests in {}",
+        env.home.display()
+    );
+    let mut child = env
+        .sendit()
+        .args(["provision", "default", "--force"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("running sendit provision")?;
+    // Stdin stays open: the guest's console gets no end of input.
+    let _stdin = child.stdin.take();
+    let status = wait_timeout(&mut child, PROVISION_TIMEOUT).context("sendit provision")?;
+    ensure!(
+        status.success(),
+        "`sendit provision` failed with {status}; see its output above. \
+         It needs network access to download Debian and its packages."
+    );
+    fs::write(&key_file, key)?;
+    Ok(env)
+}
+
+/// Clones the downloads of the real home into the scratch home, so that
+/// provisioning doesn't download Debian again. Without any, sendit downloads
+/// it.
+fn seed_downloads(home: &Path) -> Result<()> {
+    let Some(real) = std::env::home_dir().map(|h| h.join(".cache/sendit/downloads")) else {
+        return Ok(());
+    };
+    let Ok(entries) = fs::read_dir(&real) else {
+        eprintln!("No Debian image in {} to reuse.", real.display());
+        return Ok(());
+    };
+    let downloads = home.join(".cache/sendit/downloads");
+    fs::create_dir_all(&downloads)?;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let to = downloads.join(entry.file_name());
+        let _ = fs::remove_file(&to);
+        // An APFS clone: instant, and takes no space.
+        let cloned = Command::new("cp")
+            .arg("-c")
+            .arg(entry.path())
+            .arg(&to)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !cloned {
+            fs::copy(entry.path(), &to)
+                .with_context(|| format!("copying {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// One VM at a time: several would compete for CPUs and memory and slow
+/// each other down past the timeouts.
+fn serial() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A project directory, emptied and without a VM to start with.
+struct Project {
+    name: String,
+    dir: PathBuf,
+    runs: std::cell::Cell<usize>,
+}
+
+impl Project {
+    fn new(name: &str) -> Self {
+        let dir = env().root.join("projects").join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let project = Self {
+            name: name.into(),
+            dir,
+            runs: Default::default(),
+        };
+        // A VM left over from an earlier run, maybe still running if that
+        // run was killed.
+        project.ok(&["stop"]);
+        project.ok(&["reset", "--yes"]);
+        project
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = env().sendit();
+        cmd.arg("-C").arg(&self.dir).args(args);
+        cmd
+    }
+
+    /// Runs `sendit <args>` for this project.
+    fn sendit(&self, args: &[&str]) -> Output {
+        output(self.command(args), COMMAND_TIMEOUT)
+            .unwrap_or_else(|e| panic!("sendit {}: {e:#}", args.join(" ")))
+    }
+
+    /// Runs `sendit <args>`, which must succeed, and returns its stdout.
+    fn ok(&self, args: &[&str]) -> String {
+        let output = self.sendit(args);
+        assert!(
+            output.status.success(),
+            "sendit {} failed with {}:\n{}",
+            args.join(" "),
+            output.status,
+            text(&output.stderr)
+        );
+        text(&output.stdout)
+    }
+
+    /// Starts `sendit run <args>` and waits until the VM answers over SSH.
+    fn run(&self, args: &[&str]) -> Vm<'_> {
+        let logs = env().root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        self.runs.set(self.runs.get() + 1);
+        let log = logs.join(format!("{}-{}.log", self.name, self.runs.get()));
+        let file = fs::File::create(&log).unwrap();
+        let mut child = self
+            .command(&[&["run"], args].concat())
+            .stdin(Stdio::piped())
+            .stdout(file.try_clone().unwrap())
+            .stderr(file)
+            .spawn()
+            .expect("running sendit run");
+        let stdin = child.stdin.take();
+        // From here on, a failure shuts the VM down.
+        let mut vm = Vm {
+            project: self,
+            child,
+            stdin,
+            log,
+        };
+
+        let start = Instant::now();
+        loop {
+            if let Some(status) = vm.child.try_wait().unwrap() {
+                panic!(
+                    "`sendit run` exited with {status} before the VM was up; see {}",
+                    vm.log.display()
+                );
+            }
+            // Fails while the VM has no IP address or sshd isn't up yet.
+            let probe = output(self.command(&["ssh", "--", "true"]), PROBE_TIMEOUT);
+            if probe.is_ok_and(|o| o.status.success()) {
+                return vm;
+            }
+            assert!(
+                start.elapsed() < BOOT_TIMEOUT,
+                "the VM did not answer over SSH within {} seconds; see {}",
+                BOOT_TIMEOUT.as_secs(),
+                vm.log.display()
+            );
+            sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+/// A running `sendit run`. Dropping it shuts the VM down.
+struct Vm<'a> {
+    project: &'a Project,
+    child: Child,
+    /// Kept open for typing into the console.
+    stdin: Option<ChildStdin>,
+    log: PathBuf,
+}
+
+impl Vm<'_> {
+    /// Runs `script` in the guest with `sh -c`, as root if `root`.
+    fn ssh(&self, root: bool, script: &str) -> Output {
+        let mut args = vec!["ssh"];
+        if root {
+            args.push("--root");
+        }
+        args.extend(["--", "sh", "-c", script]);
+        self.project.sendit(&args)
+    }
+
+    /// Runs `script` as the guest user, which must succeed, and returns its
+    /// trimmed stdout.
+    fn ok(&self, script: &str) -> String {
+        self.expect_ok(false, script)
+    }
+
+    /// Like `ok`, as root.
+    fn root_ok(&self, script: &str) -> String {
+        self.expect_ok(true, script)
+    }
+
+    fn expect_ok(&self, root: bool, script: &str) -> String {
+        let output = self.ssh(root, script);
+        assert!(
+            output.status.success(),
+            "`{script}` failed with {}:\n{}{}",
+            output.status,
+            text(&output.stdout),
+            text(&output.stderr)
+        );
+        text(&output.stdout).trim().to_string()
+    }
+
+    /// Runs `script` as the guest user, which must fail.
+    fn fails(&self, script: &str) {
+        let output = self.ssh(false, script);
+        assert!(
+            !output.status.success(),
+            "`{script}` succeeded:\n{}",
+            text(&output.stdout)
+        );
+    }
+
+    /// Shuts the VM down with `sendit stop`.
+    fn stop(mut self) {
+        self.project.ok(&["stop"]);
+        self.wait_for_exit();
+    }
+
+    /// Shuts the VM down by logging out of its console.
+    fn exit_console(mut self) {
+        let start = Instant::now();
+        // The console's shell may not be up yet, and drop what comes before.
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(
+                start.elapsed() < STOP_TIMEOUT,
+                "the VM did not shut down after `exit` on its console; see {}",
+                self.log.display()
+            );
+            if let Some(stdin) = &mut self.stdin {
+                // Fails once sendit has exited.
+                let _ = stdin.write_all(b"exit\n");
+            }
+            sleep(Duration::from_secs(5));
+        }
+        self.wait_for_exit();
+    }
+
+    /// Waits until `sendit run` has exited, which it must do successfully.
+    fn wait_for_exit(&mut self) {
+        let status = wait_timeout(&mut self.child, STOP_TIMEOUT).unwrap();
+        assert!(
+            status.success(),
+            "`sendit run` exited with {status}; see {}",
+            self.log.display()
+        );
+    }
+}
+
+impl Drop for Vm<'_> {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            terminate(&mut self.child);
+        }
+    }
+}
+
+/// Runs `cmd` with no input and returns its output, killing it after
+/// `timeout`.
+fn output(mut cmd: Command, timeout: Duration) -> Result<Output> {
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || tx.send(child.wait_with_output()));
+    match rx.recv_timeout(timeout) {
+        Ok(output) => Ok(output?),
+        Err(_) => {
+            // SAFETY: plain syscall; the child is still running, or exited
+            // only just now, too recently for its PID to be reused.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            bail!("timed out after {} seconds", timeout.as_secs())
+        }
+    }
+}
+
+/// Waits for `child` to exit, ending it with `terminate` after `timeout`.
+fn wait_timeout(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if start.elapsed() > timeout {
+            terminate(child);
+            bail!("timed out after {} seconds", timeout.as_secs());
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+/// Sends SIGTERM to `child`, which makes sendit shut its VM down, and kills
+/// it if it hasn't exited after `STOP_TIMEOUT`.
+fn terminate(child: &mut Child) {
+    // SAFETY: plain syscall; the child hasn't been waited for, so its PID
+    // is still its own.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    let start = Instant::now();
+    while start.elapsed() < STOP_TIMEOUT {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return;
+        }
+        sleep(Duration::from_millis(250));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The host's time zone, such as `Europe/Berlin`, as sendit tells the guest.
+fn host_timezone() -> Option<String> {
+    let target = fs::read_link("/etc/localtime").ok()?;
+    let (_, name) = target.to_str()?.rsplit_once("/zoneinfo/")?;
+    Some(name.into())
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn runs_commands_over_ssh() {
+    let _serial = serial();
+    let project = Project::new("lifecycle");
+    let vm = project.run(&[]);
+
+    assert_eq!(vm.ok("uname -m"), "aarch64");
+    assert_eq!(vm.ok("id -un"), "dev");
+    assert_eq!(vm.root_ok("id -u"), "0");
+    vm.fails("sudo -n true");
+    // The root filesystem grew from the base image's 8 GiB to the default
+    // disk size of 64 GiB.
+    let root_size: u64 = vm.ok("findmnt -bno SIZE /").parse().unwrap();
+    assert!(
+        root_size > 32 << 30,
+        "the root filesystem has {root_size} bytes"
+    );
+    assert!(project.ok(&["status"]).contains("running at"));
+
+    let second = project.sendit(&["run"]);
+    assert!(!second.status.success());
+    let stderr = text(&second.stderr);
+    assert!(stderr.contains("already running"), "{stderr}");
+
+    vm.stop();
+    assert!(project.ok(&["status"]).contains("stopped"));
+    let ssh = project.sendit(&["ssh", "--", "true"]);
+    assert!(!ssh.status.success());
+    let stderr = text(&ssh.stderr);
+    assert!(stderr.contains("not running"), "{stderr}");
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn shares_the_project_and_mounts() {
+    let _serial = serial();
+    let project = Project::new("shares");
+    fs::write(project.dir.join("hello.txt"), "from the host\n").unwrap();
+    fs::create_dir(project.dir.join(".git")).unwrap();
+    fs::write(project.dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let mounts = env().root.join("mounts");
+    let (ro, rw) = (mounts.join("ro-data"), mounts.join("rw-data"));
+    for dir in [&ro, &rw] {
+        let _ = fs::remove_dir_all(dir);
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(ro.join("data.txt"), "read only\n").unwrap();
+
+    let vm = project.run(&[
+        "--mount",
+        ro.to_str().unwrap(),
+        "--mount",
+        &format!("{}:/home/dev/rw:rw", rw.display()),
+    ]);
+
+    // The project is shared read-write at ~/<name>.
+    assert_eq!(vm.ok("cat ~/shares/hello.txt"), "from the host");
+    vm.ok("echo from the guest > ~/shares/guest.txt");
+    assert_eq!(
+        fs::read_to_string(project.dir.join("guest.txt")).unwrap(),
+        "from the guest\n"
+    );
+    // Its .git is hidden behind an empty read-only mount.
+    assert_eq!(vm.ok("ls -A ~/shares/.git"), "");
+    vm.fails("touch ~/shares/.git/HEAD");
+
+    // Without a guest path, a mount goes to /mnt/<name>; without :rw, it is
+    // read-only.
+    assert_eq!(vm.ok("cat /mnt/ro-data/data.txt"), "read only");
+    vm.fails("touch /mnt/ro-data/data.txt");
+    vm.ok("echo written > ~/rw/new.txt");
+    assert_eq!(fs::read_to_string(rw.join("new.txt")).unwrap(), "written\n");
+
+    if let Some(zone) = host_timezone() {
+        assert_eq!(
+            vm.ok("readlink /etc/localtime"),
+            format!("/usr/share/zoneinfo/{zone}")
+        );
+    }
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn keeps_the_vm_until_reset() {
+    let _serial = serial();
+    let project = Project::new("persistence");
+
+    let vm = project.run(&[]);
+    vm.ok("echo kept > ~/marker");
+    vm.exit_console();
+
+    let vm = project.run(&[]);
+    assert_eq!(vm.ok("cat ~/marker"), "kept");
+    vm.stop();
+
+    project.ok(&["reset", "--yes"]);
+    let vm = project.run(&[]);
+    vm.fails("test -e ~/marker");
+    vm.stop();
+}
