@@ -11,8 +11,11 @@
 //! sendit runs with a scratch home in `target/tmp/vm-tests/home`, so the
 //! real `~/.cache/sendit` and `~/.sendit` stay untouched. The first run
 //! provisions the `default` image there, which is kept until the files it is
-//! built from change. Provisioning reuses the Debian image in the real
-//! `~/.cache/sendit/downloads` if there is one, and downloads it otherwise.
+//! built from change. The custom provisioning scripts test has a scratch
+//! home of its own, `custom-home`, where it builds an image with its
+//! scripts, and one whose script fails. Provisioning reuses the Debian
+//! image in the real `~/.cache/sendit/downloads` if there is one, and
+//! downloads it otherwise.
 //!
 //! Most tests run `sendit run` with plain pipes and work in the VM over
 //! `sendit ssh`; the console tests run it on a pseudo-terminal and type into
@@ -20,6 +23,7 @@
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
@@ -33,8 +37,8 @@ use sha2::{Digest, Sha256};
 
 const SENDIT: &str = env!("CARGO_BIN_EXE_sendit");
 
-/// What the base image is built from: when any of it changes, the tests
-/// provision their image again.
+/// What the base images are built from, apart from custom scripts: when any
+/// of it changes, the tests provision their images again.
 const PROVISION_INPUTS: [&str; 3] = [
     include_str!("../src/assets/provision.sh"),
     include_str!("../src/assets/user-data.yaml"),
@@ -51,9 +55,29 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 /// For each attempt to reach a booting VM.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The scratch home and where the tests keep their files.
+/// Custom provisioning scripts for the `custom` and `broken` images, by path
+/// below `~/.config/sendit/provision-scripts`. Both images run the shared
+/// ones; `custom/20-replaced.sh` replaces the shared one of the same name.
+const CUSTOM_SCRIPTS: [(&str, &str); 4] = [
+    (
+        "10-shared.sh",
+        "echo \"10-shared as $(id -un) in $PWD\" >> ~/provisioned\n",
+    ),
+    ("20-replaced.sh", "echo 20-shared >> ~/provisioned\n"),
+    (
+        "custom/20-replaced.sh",
+        "echo 20-own >> ~/provisioned\nsudo sh -c 'echo made by root > /etc/sendit-test'\n",
+    ),
+    ("broken/30-fail.sh", "exit 3\n"),
+];
+
+/// Where the tests keep their files.
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("vm-tests")
+}
+
+/// A scratch home for sendit.
 struct Env {
-    root: PathBuf,
     home: PathBuf,
 }
 
@@ -63,60 +87,134 @@ impl Env {
         cmd.env("HOME", &self.home);
         cmd
     }
+
+    fn cache(&self) -> PathBuf {
+        self.home.join(".cache/sendit")
+    }
+
+    /// Runs `sendit provision <image> --force`.
+    fn provision(&self, image: &str) -> Result<ExitStatus> {
+        eprintln!(
+            "Provisioning the {image} image for the VM tests in {}",
+            self.home.display()
+        );
+        let mut child = self
+            .sendit()
+            .args(["provision", image, "--force"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("running sendit provision")?;
+        // Stdin stays open: the guest's console gets no end of input.
+        let _stdin = child.stdin.take();
+        wait_timeout(&mut child, PROVISION_TIMEOUT).context("sendit provision")
+    }
+
+    /// Like `provision`, which must succeed.
+    fn provision_ok(&self, image: &str) -> Result<()> {
+        let status = self.provision(image)?;
+        ensure!(
+            status.success(),
+            "`sendit provision {image}` failed with {status}; see its output above. \
+             It needs network access to download Debian and its packages."
+        );
+        Ok(())
+    }
 }
 
-/// The scratch home with a provisioned `default` image. Set up by the first
-/// test that needs it; if that fails, every test fails with the same error.
+/// The scratch home with a provisioned `default` image.
 fn env() -> &'static Env {
     static ENV: OnceLock<Result<Env, String>> = OnceLock::new();
-    match ENV.get_or_init(|| setup().map_err(|e| format!("{e:#}"))) {
+    fixture(&ENV, || {
+        setup("home", &[], &["default"], |env| env.provision_ok("default"))
+    })
+}
+
+/// A scratch home of its own with `CUSTOM_SCRIPTS`, whose shared scripts
+/// would otherwise change the state of the `default` image, and the
+/// `custom` image built with them. Building it also checks that a failing
+/// script fails the build of the `broken` image.
+fn custom_env() -> &'static Env {
+    static ENV: OnceLock<Result<Env, String>> = OnceLock::new();
+    fixture(&ENV, || {
+        setup("custom-home", &CUSTOM_SCRIPTS, &["custom"], |env| {
+            let status = env.provision("broken")?;
+            ensure!(
+                !status.success(),
+                "a failing custom script didn't fail the build"
+            );
+            ensure!(
+                !env.cache().join("images/broken").exists(),
+                "the failed build left an image behind"
+            );
+            let log = env.cache().join("provision/broken/console.log");
+            let log =
+                fs::read_to_string(&log).with_context(|| format!("reading {}", log.display()))?;
+            ensure!(
+                log.contains("sendit: custom script broken/30-fail.sh failed"),
+                "the console log doesn't say which custom script failed"
+            );
+            env.provision_ok("custom")
+        })
+    })
+}
+
+/// The `Env` in `cell`, set up with `init` by the first test that needs it.
+/// If that fails, every test using it fails with the same error.
+fn fixture(
+    cell: &'static OnceLock<Result<Env, String>>,
+    init: impl FnOnce() -> Result<Env>,
+) -> &'static Env {
+    match cell.get_or_init(|| init().map_err(|e| format!("{e:#}"))) {
         Ok(env) => env,
         Err(e) => panic!("setting up the VM tests failed: {e}"),
     }
 }
 
-fn setup() -> Result<Env> {
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("vm-tests");
+/// Sets up the scratch home `name` with the custom provisioning `scripts`
+/// and runs `build` in it to make `images`, unless an earlier run already
+/// did so from the same inputs.
+fn setup(
+    name: &str,
+    scripts: &[(&str, &str)],
+    images: &[&str],
+    build: impl FnOnce(&Env) -> Result<()>,
+) -> Result<Env> {
     let env = Env {
-        home: root.join("home"),
-        root,
+        home: root().join(name),
     };
     fs::create_dir_all(&env.home)?;
+    // Written every time, in case a test changed them and failed before
+    // changing them back.
+    let scripts_dir = env.home.join(".config/sendit/provision-scripts");
+    let _ = fs::remove_dir_all(&scripts_dir);
+    for (path, content) in scripts {
+        let path = scripts_dir.join(path);
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, content)?;
+    }
 
-    let key = hex::encode(
-        PROVISION_INPUTS
-            .iter()
-            .fold(Sha256::new(), |hasher, input| hasher.chain_update(input))
-            .finalize(),
-    );
-    let key_file = env.root.join("image.key");
-    let marker = env
-        .home
-        .join(".cache/sendit/images/default/provisioned.toml");
-    if marker.exists() && fs::read_to_string(&key_file).is_ok_and(|k| k == key) {
+    let mut hasher = Sha256::new();
+    for input in PROVISION_INPUTS {
+        hasher.update(input);
+    }
+    for (path, content) in scripts {
+        hasher.update(path);
+        hasher.update(content);
+    }
+    let key = hex::encode(hasher.finalize());
+    let key_file = root().join(format!("{name}.key"));
+    let built = images.iter().all(|image| {
+        env.cache()
+            .join(format!("images/{image}/provisioned.toml"))
+            .exists()
+    });
+    if built && fs::read_to_string(&key_file).is_ok_and(|k| k == key) {
         return Ok(env);
     }
 
     let _ = fs::remove_file(&key_file);
     seed_downloads(&env.home)?;
-    eprintln!(
-        "Provisioning the base image for the VM tests in {}",
-        env.home.display()
-    );
-    let mut child = env
-        .sendit()
-        .args(["provision", "default", "--force"])
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("running sendit provision")?;
-    // Stdin stays open: the guest's console gets no end of input.
-    let _stdin = child.stdin.take();
-    let status = wait_timeout(&mut child, PROVISION_TIMEOUT).context("sendit provision")?;
-    ensure!(
-        status.success(),
-        "`sendit provision` failed with {status}; see its output above. \
-         It needs network access to download Debian and its packages."
-    );
+    build(&env)?;
     fs::write(&key_file, key)?;
     Ok(env)
 }
@@ -186,17 +284,24 @@ impl Drop for VmSlot {
 
 /// A project directory, emptied and without a VM to start with.
 struct Project {
+    env: &'static Env,
     name: String,
     dir: PathBuf,
     runs: std::cell::Cell<usize>,
 }
 
 impl Project {
+    /// A project in the scratch home with the `default` image.
     fn new(name: &str) -> Self {
-        let dir = env().root.join("projects").join(name);
+        Self::in_env(env(), name)
+    }
+
+    fn in_env(env: &'static Env, name: &str) -> Self {
+        let dir = root().join("projects").join(name);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let project = Self {
+            env,
             name: name.into(),
             dir,
             runs: Default::default(),
@@ -209,7 +314,7 @@ impl Project {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = env().sendit();
+        let mut cmd = self.env.sendit();
         cmd.arg("-C").arg(&self.dir).args(args);
         cmd
     }
@@ -235,7 +340,7 @@ impl Project {
 
     /// A new log file for the next `sendit run`.
     fn next_log(&self) -> PathBuf {
-        let logs = env().root.join("logs");
+        let logs = root().join("logs");
         fs::create_dir_all(&logs).unwrap();
         self.runs.set(self.runs.get() + 1);
         logs.join(format!("{}-{}.log", self.name, self.runs.get()))
@@ -737,7 +842,7 @@ fn shares_the_project_and_mounts() {
     fs::write(project.dir.join("hello.txt"), "from the host\n").unwrap();
     fs::create_dir(project.dir.join(".git")).unwrap();
     fs::write(project.dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    let mounts = env().root.join("mounts");
+    let mounts = root().join("mounts");
     let (ro, rw) = (mounts.join("ro-data"), mounts.join("rw-data"));
     for dir in [&ro, &rw] {
         let _ = fs::remove_dir_all(dir);
@@ -852,4 +957,182 @@ fn escape_key_shuts_the_vm_down() {
     term.expect("[sendit] Shutting down.", CONSOLE_TIMEOUT);
     term.wait_for_exit();
     term.expect_end(&[LEAVE_ALTERNATE_SCREEN, TERMINAL_RESET].concat());
+}
+
+impl Project {
+    /// The directory of the project's VM, which must exist.
+    fn vm_dir(&self) -> PathBuf {
+        let prefix = format!("{}_", self.name);
+        fs::read_dir(self.env.home.join(".sendit"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&prefix)
+            })
+            .unwrap_or_else(|| panic!("{} has no VM", self.name))
+    }
+
+    /// The line `sendit images` prints for `image`.
+    fn image_line(&self, image: &str) -> String {
+        let images = self.ok(&["images"]);
+        images
+            .lines()
+            .find(|line| line.split_whitespace().next() == Some(image))
+            .unwrap_or_else(|| panic!("`sendit images` doesn't list {image}:\n{images}"))
+            .to_string()
+    }
+}
+
+/// Fails unless `output` failed with `message` in its stderr.
+fn assert_fails_with(output: &Output, message: &str) {
+    let stderr = text(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(message),
+        "expected an error saying {message:?}, got {}:\n{stderr}",
+        output.status
+    );
+}
+
+/// Replaces the value of `key` in the TOML file at `path`.
+fn set_toml_value(path: &Path, key: &str, value: &str) {
+    let text = fs::read_to_string(path).unwrap();
+    let prefix = format!("{key} =");
+    assert!(text.lines().any(|line| line.starts_with(&prefix)), "{text}");
+    let text: String = text
+        .lines()
+        .map(|line| match line.starts_with(&prefix) {
+            true => format!("{key} = {value}\n"),
+            false => format!("{line}\n"),
+        })
+        .collect();
+    fs::write(path, text).unwrap();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn creates_vms_from_the_chosen_image() {
+    let _slot = vm_slot();
+    let images = env().cache().join("images");
+    // Copies of the default image stand in for other images, which would
+    // take minutes to provision. `old` is from an earlier base revision.
+    for name in ["other", "old"] {
+        let dir = images.join(name);
+        let _ = fs::remove_dir_all(&dir);
+        let status = Command::new("cp")
+            .arg("-cR")
+            .arg(images.join("default"))
+            .arg(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    set_toml_value(&images.join("old/provisioned.toml"), "revision", "0");
+    let project = Project::new("images");
+
+    assert_fails_with(
+        &project.sendit(&["run", "--image", "old"]),
+        "the old image is outdated; rebuild it with `sendit provision old --force`",
+    );
+    assert!(project.image_line("old").contains("outdated"));
+
+    let vm = project.run(&["--image", "other"]);
+    vm.stop();
+    // Later runs keep using the image the VM was made from.
+    assert!(project.ok(&["status"]).contains("image    other"));
+    let line = project.image_line("other");
+    assert!(
+        line.contains("provisioned") && line.ends_with(" 1"),
+        "{line}"
+    );
+    assert_fails_with(
+        &project.sendit(&["run", "--image", "default"]),
+        "was created from the other image, not default",
+    );
+
+    // A VM from an earlier base revision can't run until it is reset, and
+    // `prune --outdated` deletes it.
+    let vm_dir = project.vm_dir();
+    set_toml_value(&vm_dir.join("project.toml"), "base_revision", "0");
+    assert_fails_with(
+        &project.sendit(&["run"]),
+        "was created from an older base image",
+    );
+    assert!(project.ok(&["status"]).contains("outdated base image"));
+    project.ok(&["prune", "--outdated", "--yes"]);
+    assert!(!vm_dir.exists());
+    assert!(project.ok(&["status"]).contains("not created"));
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn runs_custom_provisioning_scripts() {
+    let _slot = vm_slot();
+    let env = custom_env();
+    let project = Project::in_env(env, "custom-scripts");
+
+    let vm = project.run(&["--image", "custom"]);
+    // As the guest user from its home, in name order, with the image's own
+    // script in place of the shared one of the same name.
+    assert_eq!(
+        vm.ok("cat ~/provisioned"),
+        "10-shared as dev in /home/dev\n20-own"
+    );
+    // They could use sudo, which is gone afterwards.
+    assert_eq!(vm.ok("cat /etc/sendit-test"), "made by root");
+    vm.fails("sudo -n true");
+    vm.stop();
+
+    // The build that failed left nothing behind.
+    assert!(project.image_line("broken").contains("missing"));
+
+    // Changing a script marks the image until the script is changed back.
+    let script = env
+        .home
+        .join(".config/sendit/provision-scripts/10-shared.sh");
+    let original = fs::read_to_string(&script).unwrap();
+    assert!(project.image_line("custom").contains("provisioned"));
+    fs::write(&script, format!("{original}# changed\n")).unwrap();
+    assert!(project.image_line("custom").contains("scripts changed"));
+    assert!(project.ok(&["status"]).contains("custom scripts changed"));
+    fs::write(&script, original).unwrap();
+    assert!(project.image_line("custom").contains("provisioned"));
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn reaches_the_host() {
+    let _slot = vm_slot();
+    let project = Project::new("host");
+    // A service on the Mac that listens on more than 127.0.0.1. With the
+    // macOS firewall on, it may need allowing.
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nhello from the host");
+        }
+    });
+
+    let vm = project.run(&[]);
+    // host.sendit.internal is the default gateway, set once the network is
+    // up, which may be after sshd is.
+    let host = vm.ok("for _ in $(seq 30); do \
+             getent hosts host.sendit.internal && exit; sleep 1; \
+         done; exit 1");
+    let gateway = vm.ok("ip -4 route show default | awk '{ print $3; exit }'");
+    assert_eq!(host.split_whitespace().next(), Some(gateway.as_str()));
+    assert_eq!(
+        vm.ok(&format!(
+            "curl -sSf --max-time 10 http://host.sendit.internal:{port}/"
+        )),
+        "hello from the host"
+    );
+    vm.stop();
 }
