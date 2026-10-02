@@ -8,7 +8,9 @@
 //! Custom scripts travel on the seed ISO too and run after the built-in
 //! provisioning, e.g. to install more tools: those in
 //! `~/.config/sendit/provision-scripts/` for every image, and those in its
-//! `<name>/` subdirectory for that image only.
+//! `<name>/` subdirectory for that image only. A script can ask for host
+//! directories to be shared with the VMs made from the image, in comment
+//! lines at its top: `# sendit-mount: HOST[:GUEST][:ro|rw]`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -21,7 +23,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{ByteSize, Config, ProvisionSettings};
+use crate::config::{ByteSize, Config, MountSpec, ProvisionSettings};
 use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::util;
@@ -43,6 +45,9 @@ const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
 /// prompt, tells the host when the guest starts shutting down, and drops
 /// unattended-upgrades, which could hold up shutting down.
 pub const BASE_REVISION: u32 = 9;
+
+/// Starts a comment line in which a custom script asks for a mount.
+const MOUNT_COMMENT: &str = "# sendit-mount:";
 
 /// Printed by provision.sh as its last line when it succeeded, followed by
 /// the build's token.
@@ -81,6 +86,35 @@ impl CustomScript {
             name: self.name.clone(),
             sha256: hex::encode(Sha256::digest(&self.content)),
         }
+    }
+
+    /// The mounts asked for in the comments at the top of the script, before
+    /// its first command. Their host paths must be absolute or start with
+    /// `~`, as in the config file.
+    fn mounts(&self) -> Result<Vec<MountSpec>> {
+        let text = String::from_utf8_lossy(&self.content);
+        let mut mounts = Vec::new();
+        for line in text
+            .lines()
+            .map(str::trim)
+            .take_while(|line| line.is_empty() || line.starts_with('#'))
+        {
+            let Some(spec) = line.strip_prefix(MOUNT_COMMENT) else {
+                continue;
+            };
+            let spec: MountSpec = spec
+                .trim()
+                .parse()
+                .with_context(|| format!("in the custom script {}", self.name))?;
+            ensure!(
+                spec.host.is_absolute() || spec.host.starts_with("~"),
+                "in the custom script {}: mount {}: host path must be absolute or start with ~",
+                self.name,
+                spec.host.display()
+            );
+            mounts.push(spec);
+        }
+        Ok(mounts)
     }
 }
 
@@ -166,6 +200,31 @@ fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>>
     Ok(scripts.into_values().collect())
 }
 
+/// The mounts that the custom scripts for `image` ask for, in run order,
+/// each with the name of its script.
+pub fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<(String, MountSpec)>> {
+    mounts_of(&custom_scripts(paths, image)?)
+}
+
+fn mounts_of(scripts: &[CustomScript]) -> Result<Vec<(String, MountSpec)>> {
+    let mut mounts = Vec::new();
+    for script in scripts {
+        for spec in script.mounts()? {
+            mounts.push((script.name.clone(), spec));
+        }
+    }
+    Ok(mounts)
+}
+
+/// Lists `mounts` one per line, as written, each with its script.
+fn describe_mounts(mounts: &[(String, MountSpec)]) -> String {
+    let mut text = "VMs made from the image share what the scripts ask for:".to_string();
+    for (script, spec) in mounts {
+        let _ = write!(text, "\n  {spec}  ({script})");
+    }
+    text
+}
+
 /// Lists `scripts` one per line in run order, under the directory they come
 /// from. When they come from both, the image's own are tagged with its name.
 fn describe_scripts(paths: &Paths, image: &ImageName, scripts: &[CustomScript]) -> String {
@@ -246,6 +305,7 @@ pub fn provision(
     let public_key = ssh_public_key(&paths.ssh_key())?;
     let root_public_key = ssh_public_key(&paths.root_ssh_key())?;
     let scripts = custom_scripts(paths, name)?;
+    let mounts = mounts_of(&scripts)?;
 
     let work = paths.provision_dir(name);
     util::fresh_dir(&work)?;
@@ -267,6 +327,9 @@ pub fn provision(
     );
     if !scripts.is_empty() {
         eprintln!("{}", describe_scripts(paths, name, &scripts));
+    }
+    if !mounts.is_empty() {
+        eprintln!("{}", describe_mounts(&mounts));
     }
     let spec = VmSpec {
         cpus: settings.cpus,
@@ -479,6 +542,63 @@ mod tests {
              00-rust.sh      (rust)\n  \
              01-helix.sh     (rust)\n  \
              10-dotfiles.sh"
+        );
+    }
+
+    #[test]
+    fn reads_mounts_from_the_top_of_scripts() {
+        let home = TempDir::new("script-mounts");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        let mounts = || script_mounts(&paths, &rust);
+        let write = |name: &str, content: &str| {
+            let path = paths.provision_scripts_dir().join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        };
+
+        write(
+            "10-cargo.sh",
+            "#!/bin/sh\n\
+             # Installs cargo.\n\
+             # sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry\n\
+             \n  # sendit-mount: /opt/data:rw  \n\
+             set -eu\n\
+             # sendit-mount: ~/after-the-first-command\n",
+        );
+        write("rust/20-own.sh", "# sendit-mount: ~/notes\n");
+        write("go/20-other.sh", "# sendit-mount: ~/go\n");
+        let described: Vec<_> = mounts()
+            .unwrap()
+            .iter()
+            .map(|(script, spec)| format!("{script} {spec}"))
+            .collect();
+        assert_eq!(
+            described,
+            [
+                "10-cargo.sh ~/.cargo/registry:/home/dev/.cargo/registry:ro",
+                "10-cargo.sh /opt/data:rw",
+                "rust/20-own.sh ~/notes:ro",
+            ]
+        );
+        assert_eq!(
+            describe_mounts(&mounts().unwrap()),
+            "VMs made from the image share what the scripts ask for:\n  \
+             ~/.cargo/registry:/home/dev/.cargo/registry:ro  (10-cargo.sh)\n  \
+             /opt/data:rw  (10-cargo.sh)\n  \
+             ~/notes:ro  (rust/20-own.sh)"
+        );
+
+        // Mistakes name the script, and so does a relative host path, which
+        // would depend on where `sendit run` happens to be started.
+        write("rust/30-bad.sh", "# sendit-mount: a:b:c:d\n");
+        let error = format!("{:#}", mounts().unwrap_err());
+        assert!(error.contains("rust/30-bad.sh"), "{error}");
+        write("rust/30-bad.sh", "# sendit-mount: data:/data\n");
+        let error = format!("{:#}", mounts().unwrap_err());
+        assert!(
+            error.contains("rust/30-bad.sh") && error.contains("absolute"),
+            "{error}"
         );
     }
 

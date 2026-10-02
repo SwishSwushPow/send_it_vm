@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Custom provisioning scripts can ask for host directories to be shared with the VMs made from their image, with `# sendit-mount: HOST[:GUEST][:ro|rw]` lines in the comments at their top. A directory that doesn't exist on the Mac is left out with a notice.
+
 ### Changed
 
 - sendit excludes `~/.cache/sendit/` and `~/.sendit/` from Time Machine backups. Both hold only downloads, base images and VMs that sendit can make again, and every run of a VM made Time Machine copy its whole disk again. Files in a VM outside the project directory are no longer backed up.

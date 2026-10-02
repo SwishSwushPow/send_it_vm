@@ -57,7 +57,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Custom provisioning scripts for the `custom` and `broken` images, by path
 /// below `~/.config/sendit/provision-scripts`. Both images run the shared
-/// ones; `custom/20-replaced.sh` replaces the shared one of the same name.
+/// ones; `custom/20-replaced.sh` replaces the shared one of the same name
+/// and asks for two mounts, one of which doesn't exist.
 const CUSTOM_SCRIPTS: [(&str, &str); 4] = [
     (
         "10-shared.sh",
@@ -66,7 +67,9 @@ const CUSTOM_SCRIPTS: [(&str, &str); 4] = [
     ("20-replaced.sh", "echo 20-shared >> ~/provisioned\n"),
     (
         "custom/20-replaced.sh",
-        "echo 20-own >> ~/provisioned\nsudo sh -c 'echo made by root > /etc/sendit-test'\n",
+        "# sendit-mount: ~/script-share:/home/dev/script-share\n\
+         # sendit-mount: ~/script-missing\n\
+         echo 20-own >> ~/provisioned\nsudo sh -c 'echo made by root > /etc/sendit-test'\n",
     ),
     ("broken/30-fail.sh", "exit 3\n"),
 ];
@@ -1073,6 +1076,9 @@ fn runs_custom_provisioning_scripts() {
     let _slot = vm_slot();
     let env = custom_env();
     let project = Project::in_env(env, "custom-scripts");
+    let share = env.home.join("script-share");
+    fs::create_dir_all(&share).unwrap();
+    fs::write(share.join("shared.txt"), "asked for by a script\n").unwrap();
 
     let vm = project.run(&["--image", "custom"]);
     // As the guest user from its home, in name order, with the image's own
@@ -1084,7 +1090,20 @@ fn runs_custom_provisioning_scripts() {
     // They could use sudo, which is gone afterwards.
     assert_eq!(vm.ok("cat /etc/sendit-test"), "made by root");
     vm.fails("sudo -n true");
+    // The mount the script asks for, read-only without :rw; the one whose
+    // host directory doesn't exist is left out.
+    assert_eq!(
+        vm.ok("cat ~/script-share/shared.txt"),
+        "asked for by a script"
+    );
+    vm.fails("touch ~/script-share/shared.txt");
+    vm.fails("test -e /mnt/script-missing");
     vm.stop();
+    let status = project.sendit(&["status"]);
+    assert!(text(&status.stdout).contains("~/script-share -> /home/dev/script-share (ro)"));
+    assert!(text(&status.stderr).contains(
+        "Not sharing ~/script-missing, which the custom script custom/20-replaced.sh asks for"
+    ));
 
     // The build that failed left nothing behind.
     assert!(project.image_line("broken").contains("missing"));

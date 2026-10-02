@@ -2,9 +2,10 @@
 //! effective VM settings for a project.
 //!
 //! Layers, lowest to highest precedence: built-in defaults, top-level keys of
-//! the config file, the `[images.<name>]` table of the VM's image, the
-//! matching `[projects."<path>"]` table, CLI flags. Scalars are overridden by
-//! higher layers; mounts accumulate across layers.
+//! the config file, the `[images.<name>]` table of the VM's image along with
+//! the mounts its custom scripts ask for, the matching `[projects."<path>"]`
+//! table, CLI flags. Scalars are overridden by higher layers; mounts
+//! accumulate across layers.
 //! Provisioning a base image takes its CPUs and memory from the top-level
 //! keys, then the `[provision]` table, then the image's `[provision.<name>]`
 //! table, then the flags of `sendit provision`.
@@ -19,7 +20,7 @@ use clap::Args;
 use serde::Deserialize;
 
 use crate::paths::{ImageName, Paths, Project};
-use crate::{project_vm, util};
+use crate::{project_vm, provision, util};
 
 const DEFAULT_CPUS: u32 = 2;
 const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
@@ -147,6 +148,17 @@ impl TryFrom<String> for MountSpec {
 
     fn try_from(s: String) -> Result<Self> {
         s.parse()
+    }
+}
+
+/// `HOST[:GUEST]:ro|rw`, with the mode always given.
+impl fmt::Display for MountSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.host.display())?;
+        if let Some(guest) = &self.guest {
+            write!(f, ":{}", guest.display())?;
+        }
+        write!(f, ":{}", if self.read_only { "ro" } else { "rw" })
     }
 }
 
@@ -321,17 +333,17 @@ impl Config {
             .or_else(|| self.chosen_image(project_settings));
         // The chosen image, else the one the VM was made from. `run` refuses
         // to start a VM when the two differ.
-        let image_settings = self
-            .images
-            .get(&project_vm::image(paths, project, chosen.as_ref()))
-            .map(|resources| Settings {
-                cpus: resources.cpus,
-                memory: resources.memory,
-                ..Settings::default()
-            });
+        let image = project_vm::image(paths, project, chosen.as_ref());
+        let resources = self.images.get(&image).cloned().unwrap_or_default();
+        let image_settings = Settings {
+            cpus: resources.cpus,
+            memory: resources.memory,
+            mounts: script_mounts(paths, &image)?,
+            ..Settings::default()
+        };
         let layers = [
             (Some(&self.defaults), None),
-            (image_settings.as_ref(), None),
+            (Some(&image_settings), None),
             (project_settings, None),
             (Some(cli), Some(cwd)),
         ];
@@ -417,6 +429,25 @@ impl Config {
         validate_resources(cpus, memory)?;
         Ok(ProvisionSettings { cpus, memory })
     }
+}
+
+/// The mounts that the custom scripts for `image` ask for, without those
+/// whose host directory doesn't exist: a script may set up a tool that
+/// hasn't been used on this Mac yet.
+fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<MountSpec>> {
+    let mut mounts = Vec::new();
+    for (script, spec) in provision::script_mounts(paths, image)? {
+        let host = paths.expand_tilde(&spec.host);
+        if host.exists() {
+            mounts.push(spec);
+        } else {
+            eprintln!(
+                "Not sharing {}, which the custom script {script} asks for: it doesn't exist.",
+                paths.display(&host)
+            );
+        }
+    }
+    Ok(mounts)
 }
 
 fn project_guest_path(project: &Project) -> PathBuf {
@@ -868,6 +899,44 @@ mod tests {
             .unwrap();
         assert_eq!(vm.cpus, 3);
         assert_eq!(vm.image, None);
+    }
+
+    #[test]
+    fn adds_mounts_from_custom_scripts() {
+        let fx = Fixture::new("resolve-script-mounts");
+        let scripts = fx.paths.provision_scripts_dir();
+        fs::create_dir_all(scripts.join("rust")).unwrap();
+        fs::write(
+            scripts.join("rust/10-cargo.sh"),
+            "# sendit-mount: ~/extra:/home/dev/.cargo/registry\n\
+             # sendit-mount: ~/not-here\n",
+        )
+        .unwrap();
+        let resolve = |config: &str| {
+            let cli = Settings {
+                mounts: vec!["proj:/data".parse().unwrap()],
+                ..Settings::default()
+            };
+            let vm = Config::parse(config)
+                .unwrap()
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .unwrap();
+            let guests: Vec<_> = vm.mounts[1..].iter().map(|m| m.guest.clone()).collect();
+            guests
+        };
+
+        // Only VMs made from the image get them, ranked between the
+        // top-level mounts and the project's, and without the missing one.
+        assert_eq!(resolve(""), [PathBuf::from("/data")]);
+        let config = format!(
+            "image = \"rust\"\nmounts = [\"~/extra:/top\"]\n\
+             [projects.\"{}\"]\nmounts = [\"~/extra:/project\"]\n",
+            fx.project.root.display()
+        );
+        assert_eq!(
+            resolve(&config),
+            ["/top", "/home/dev/.cargo/registry", "/project", "/data"].map(PathBuf::from)
+        );
     }
 
     #[test]

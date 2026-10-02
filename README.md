@@ -83,6 +83,15 @@ A new VM is made from the `default` image unless `image` or `--image` picks anot
 
 Scripts in `~/.config/sendit/provision-scripts/*.sh` run for every image at the end of provisioning, and scripts in `provision-scripts/NAME/*.sh` only for image `NAME`. They run together in file name order; an image's own script replaces a shared one with the same file name. They run as the VM's user, with sudo available only while they run. Trust them, and whatever installers they download, as you would root in every VM made from the image: sendit takes the sudo rights away afterwards, but not a setuid binary or root service they may have left behind. `sendit status` and `sendit images` tell you when they have changed since an image was built; `sendit provision NAME --force` rebuilds it.
 
+A script can ask for host directories to be shared with the VMs made from its image, in comment lines at its top, before its first command:
+
+```sh
+#!/bin/sh
+# sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry
+```
+
+These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` is given, and host paths must be absolute or start with `~`. They join the mounts of the config file and the command line, after the top-level ones and before the project's. A directory that doesn't exist on the Mac is left out with a notice instead of failing the run. `sendit provision` lists them, and `sendit status` shows them with the other mounts. Read the mount lines of a script you copy: they give the VM access to files on the Mac, and with `:rw` it can change them.
+
 [`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code and the Pi coding agent. Copy the ones you want with a number in front to set the order, e.g. `00-rust.sh` before `01-helix.sh`, which builds Helix with Rust.
 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
