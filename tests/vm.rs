@@ -25,6 +25,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
@@ -829,6 +830,36 @@ fn runs_commands_over_ssh() {
     let stderr = text(&second.stderr);
     assert!(stderr.contains("already running"), "{stderr}");
 
+    // ~/.ssh/config may forward the agent or ports to every host, so
+    // `sendit ssh` leaves it out. ssh finds it through the user database,
+    // not $HOME, so the test can't plant one; instead an ssh on the PATH
+    // passes ssh a config that breaks every connection. sendit's own -F
+    // comes later and must win.
+    let bin = root().join("ssh-wrapper");
+    let _ = fs::remove_dir_all(&bin);
+    fs::create_dir_all(&bin).unwrap();
+    let config = bin.join("config");
+    fs::write(&config, "Host *\n  ProxyCommand /usr/bin/false\n").unwrap();
+    let used = bin.join("used");
+    let wrapper = bin.join("ssh");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nexec /usr/bin/ssh -F '{}' \"$@\"\n",
+            used.display(),
+            config.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut ssh = project.command(&["ssh", "--", "echo", "reached"]);
+    let path = std::env::var("PATH").unwrap_or_default();
+    ssh.env("PATH", format!("{}:{path}", bin.display()));
+    let ssh = output(ssh, COMMAND_TIMEOUT).unwrap();
+    assert!(used.exists(), "sendit ssh didn't run ssh from the PATH");
+    assert!(ssh.status.success(), "{}", text(&ssh.stderr));
+    assert_eq!(text(&ssh.stdout), "reached\n");
+
     vm.stop();
     assert!(project.ok(&["status"]).contains("stopped"));
     let ssh = project.sendit(&["ssh", "--", "true"]);
@@ -884,6 +915,16 @@ fn shares_the_project_and_mounts() {
             format!("/usr/share/zoneinfo/{zone}")
         );
     }
+    vm.stop();
+
+    // With --expose-git, .git is part of the project share.
+    let vm = project.run(&["--expose-git"]);
+    assert_eq!(vm.ok("cat ~/shares/.git/HEAD"), "ref: refs/heads/main");
+    vm.ok("echo from the guest > ~/shares/.git/guest");
+    assert_eq!(
+        fs::read_to_string(project.dir.join(".git/guest")).unwrap(),
+        "from the guest\n"
+    );
     vm.stop();
 }
 
@@ -1155,6 +1196,80 @@ fn reaches_the_host() {
             "curl -sSf --max-time 10 http://host.sendit.internal:{port}/"
         )),
         "hello from the host"
+    );
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn refuses_mounts_through_symlinks() {
+    let _slot = vm_slot();
+    let project = Project::new("symlinks");
+    let data = root().join("mounts/symlink-data");
+    let _ = fs::remove_dir_all(&data);
+    fs::create_dir_all(&data).unwrap();
+
+    // The guest user plants a symlink where a later mount goes, so that
+    // mount.sh, which runs as root, would create the mount point and mount
+    // the share elsewhere.
+    let vm = project.run(&[]);
+    vm.ok("ln -s /var/tmp ~/link");
+    vm.stop();
+
+    let vm = project.run(&[
+        "--mount",
+        &format!("{}:/home/dev/link/escaped", data.display()),
+    ]);
+    vm.root_ok("test ! -e /var/tmp/escaped");
+    let journal = vm.root_ok("journalctl -b -u sendit-mounts --no-pager");
+    assert!(
+        journal.contains("not mounting m0 at /home/dev/link/escaped: it leads through a symlink"),
+        "{journal}"
+    );
+    // The other shares are still there.
+    vm.ok("test -d ~/symlinks");
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn applies_resources_in_the_guest() {
+    let _slot = vm_slot();
+    let project = Project::new("resources");
+    // The disk size from the project's table in the config file, which the
+    // other tests sharing this home don't match. Renamed into place, since
+    // they read the file meanwhile.
+    let config = env().home.join(".config/sendit/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let partial = config.with_extension("toml.partial");
+    fs::write(
+        &partial,
+        format!(
+            "[projects.\"{}\"]\ndisk-size = \"20G\"\n",
+            project.dir.display()
+        ),
+    )
+    .unwrap();
+    fs::rename(&partial, &config).unwrap();
+
+    // The CPUs and memory from flags, unlike the defaults of 2 and 4 GiB.
+    let vm = project.run(&["--cpus", "1", "--memory", "2G"]);
+    assert_eq!(vm.ok("nproc"), "1");
+    // The kernel keeps some memory for itself.
+    let memory: u64 = vm
+        .ok("awk '/^MemTotal:/ { print $2 * 1024 }' /proc/meminfo")
+        .parse()
+        .unwrap();
+    assert!(
+        (3 << 29..=2 << 30).contains(&memory),
+        "the guest has {memory} bytes of memory"
+    );
+    // The root filesystem fills the 20 GiB disk, apart from the EFI
+    // partition and the filesystem's own overhead.
+    let root_size: u64 = vm.ok("findmnt -bno SIZE /").parse().unwrap();
+    assert!(
+        (16 << 30..=20 << 30).contains(&root_size),
+        "the root filesystem has {root_size} bytes"
     );
     vm.stop();
 }
