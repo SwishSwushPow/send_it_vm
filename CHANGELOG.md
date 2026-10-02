@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Changing the comments at the top of a custom provisioning script, before its first command, no longer marks the images built with it as changed. Images built with custom scripts by earlier versions show up as changed once; `sendit provision NAME --force` rebuilds them.
 - sendit excludes `~/.cache/sendit/` and `~/.sendit/` from Time Machine backups. Both hold only downloads, base images and VMs that sendit can make again, and every run of a VM made Time Machine copy its whole disk again. Files in a VM outside the project directory are no longer backed up.
 
 ### Fixed

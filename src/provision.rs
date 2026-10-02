@@ -64,6 +64,8 @@ struct Marker {
 #[derive(Debug, Deserialize, PartialEq, Eq, Serialize)]
 struct ScriptStamp {
     name: String,
+    /// Of the script below its header (see `CustomScript::split_header`),
+    /// so that changing its description or mounts doesn't mark the image.
     sha256: String,
 }
 
@@ -84,21 +86,32 @@ impl CustomScript {
     fn stamp(&self) -> ScriptStamp {
         ScriptStamp {
             name: self.name.clone(),
-            sha256: hex::encode(Sha256::digest(&self.content)),
+            sha256: hex::encode(Sha256::digest(self.split_header().1)),
         }
     }
 
-    /// The mounts asked for in the comments at the top of the script, before
-    /// its first command. Their host paths must be absolute or start with
-    /// `~`, as in the config file.
+    /// The header, the blank and comment lines at the top of the script
+    /// before its first command, and the rest. provision.sh runs scripts with
+    /// `bash FILE`, so the header, shebang included, does nothing. Comments
+    /// further down may not be comments, e.g. in a heredoc.
+    fn split_header(&self) -> (&[u8], &[u8]) {
+        let mut end = 0;
+        for line in self.content.split_inclusive(|&b| b == b'\n') {
+            let text = line.trim_ascii();
+            if !text.is_empty() && !text.starts_with(b"#") {
+                break;
+            }
+            end += line.len();
+        }
+        self.content.split_at(end)
+    }
+
+    /// The mounts asked for in the script's header. Their host paths must be
+    /// absolute or start with `~`, as in the config file.
     fn mounts(&self) -> Result<Vec<MountSpec>> {
-        let text = String::from_utf8_lossy(&self.content);
+        let header = String::from_utf8_lossy(self.split_header().0);
         let mut mounts = Vec::new();
-        for line in text
-            .lines()
-            .map(str::trim)
-            .take_while(|line| line.is_empty() || line.starts_with('#'))
-        {
+        for line in header.lines().map(str::trim) {
             let Some(spec) = line.strip_prefix(MOUNT_COMMENT) else {
                 continue;
             };
@@ -543,6 +556,35 @@ mod tests {
              01-helix.sh     (rust)\n  \
              10-dotfiles.sh"
         );
+    }
+
+    #[test]
+    fn stamps_scripts_without_their_header() {
+        let stamp = |content: &str| {
+            CustomScript {
+                name: "10-tool.sh".into(),
+                file: "10-tool.sh".into(),
+                own: false,
+                content: content.into(),
+            }
+            .stamp()
+            .sha256
+        };
+        let body = "set -eu\n# a comment, or maybe not:\ncat <<EOF\n# config\nEOF\n";
+        let original = stamp(&format!("#!/bin/sh\n# Installs a tool.\n\n{body}"));
+        assert_eq!(stamp(body), original);
+        assert_eq!(
+            stamp(&format!(
+                "#!/bin/bash\n  # Installs a tool.\r\n# sendit-mount: ~/x\n{body}"
+            )),
+            original
+        );
+        // Below the header, every byte counts.
+        assert_ne!(stamp(&body.replace("# config", "# other")), original);
+        assert_ne!(stamp(&format!("{body}\n")), original);
+        assert_ne!(stamp(&format!("echo\n{body}")), original);
+        // A script of comments only does nothing.
+        assert_eq!(stamp("# just notes\n"), stamp(""));
     }
 
     #[test]

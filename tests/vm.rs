@@ -1108,11 +1108,14 @@ fn runs_custom_provisioning_scripts() {
     // The build that failed left nothing behind.
     assert!(project.image_line("broken").contains("missing"));
 
-    // Changing a script marks the image until the script is changed back.
+    // Changing a script marks the image until the script is changed back,
+    // unless the change is in the comments at its top.
     let script = env
         .home
         .join(".config/sendit/provision-scripts/10-shared.sh");
     let original = fs::read_to_string(&script).unwrap();
+    assert!(project.image_line("custom").contains("provisioned"));
+    fs::write(&script, format!("# sendit-mount: /tmp\n{original}")).unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
     fs::write(&script, format!("{original}# changed\n")).unwrap();
     assert!(project.image_line("custom").contains("scripts changed"));
