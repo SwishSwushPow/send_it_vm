@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `sendit run --read-only`, or `read-only = true` in the config file, shares the project directory read-only. With `--expose-git`, `.git` is read-only too.
+
 ## 0.5.0 - 2026-10-02
 
 ### Added

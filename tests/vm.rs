@@ -926,6 +926,15 @@ fn shares_the_project_and_mounts() {
         "from the guest\n"
     );
     vm.stop();
+
+    // With --read-only, the project share is read-only, .git included.
+    let vm = project.run(&["--read-only", "--expose-git"]);
+    assert_eq!(vm.ok("cat ~/shares/hello.txt"), "from the host");
+    assert_eq!(vm.ok("cat ~/shares/.git/HEAD"), "ref: refs/heads/main");
+    vm.fails("touch ~/shares/hello.txt");
+    vm.fails("touch ~/shares/new.txt");
+    vm.fails("touch ~/shares/.git/HEAD");
+    vm.stop();
 }
 
 #[test]

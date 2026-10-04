@@ -96,6 +96,10 @@ pub struct RunArgs {
     #[arg(long = "mount", value_name = "SPEC")]
     pub mounts: Vec<MountSpec>,
 
+    /// Mount the project directory read-only
+    #[arg(long)]
+    pub read_only: bool,
+
     /// Let the VM see the project's .git directory (hidden by default)
     #[arg(long)]
     pub expose_git: bool,
@@ -112,6 +116,7 @@ impl RunArgs {
             memory: self.resources.memory,
             disk_size: None,
             mounts: self.mounts.clone(),
+            read_only: self.read_only.then_some(true),
             expose_git: self.expose_git.then_some(true),
             banner: None,
             image: self.image.clone(),
@@ -143,6 +148,7 @@ mod tests {
             "/a:/b:ro",
             "--mount",
             "/c",
+            "--read-only",
             "--expose-git",
             "--image",
             "rust",
@@ -155,6 +161,7 @@ mod tests {
         assert_eq!(settings.cpus, Some(4));
         assert_eq!(settings.memory, Some(ByteSize::gib(8)));
         assert_eq!(settings.mounts.len(), 2);
+        assert_eq!(settings.read_only, Some(true));
         assert_eq!(settings.expose_git, Some(true));
         assert_eq!(settings.image, Some("rust".parse().unwrap()));
     }

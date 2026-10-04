@@ -171,6 +171,8 @@ pub struct Settings {
     pub disk_size: Option<ByteSize>,
     #[serde(default)]
     pub mounts: Vec<MountSpec>,
+    /// Whether the project directory is shared read-only.
+    pub read_only: Option<bool>,
     pub expose_git: Option<bool>,
     /// Whether the login message starts with the "Send It" banner.
     pub banner: Option<bool>,
@@ -351,6 +353,7 @@ impl Config {
         let mut cpus = DEFAULT_CPUS;
         let mut memory = DEFAULT_MEMORY;
         let mut disk_size = DEFAULT_DISK_SIZE;
+        let mut read_only = false;
         let mut expose_git = false;
         let mut banner = true;
         let mut mounts = vec![Mount {
@@ -364,12 +367,14 @@ impl Config {
             cpus = layer.cpus.unwrap_or(cpus);
             memory = layer.memory.unwrap_or(memory);
             disk_size = layer.disk_size.unwrap_or(disk_size);
+            read_only = layer.read_only.unwrap_or(read_only);
             expose_git = layer.expose_git.unwrap_or(expose_git);
             banner = layer.banner.unwrap_or(banner);
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
         }
+        mounts[0].read_only = read_only;
 
         let settings = VmSettings {
             cpus,
@@ -764,6 +769,7 @@ mod tests {
             cpus = 1
             memory = "2G"
             mounts = ["~/extra"]
+            read-only = true
 
             [projects."{}"]
             memory = "3G"
@@ -797,7 +803,7 @@ mod tests {
                 (
                     fx.project.root.clone(),
                     PathBuf::from("/home/dev/proj"),
-                    false
+                    true
                 ),
                 (fx.dir.join("home/extra"), PathBuf::from("/mnt/extra"), true),
                 (fx.dir.join("proj"), PathBuf::from("/data"), false),
