@@ -28,6 +28,22 @@ apt-get -y install --no-install-recommends \
     git curl ca-certificates build-essential pkg-config cmake sudo \
     openssh-server cloud-guest-utils less vim-tiny \
     unzip jq ripgrep fd-find htop
+# The kernel with 16 KiB pages replaces the cloud image's kernel (4 KiB
+# pages): under memory pressure on the Mac, guests running that kernel lost
+# writes to their memory (page cache, kernel module code, page tables), and
+# none running this one have so far. Purging the running kernel would stop
+# at a question about it; it is only replaced on disk, the next boot runs
+# the new one.
+apt-get -y install --no-install-recommends linux-image-arm64-16k
+echo 'linux-base linux-base/removing-running-kernel boolean false' | debconf-set-selections
+mapfile -t old_kernels < <(dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' 'linux-image-*' |
+    awk '$1 == "ii" && $2 !~ /-16k$/ { print $2 }')
+apt-get -y purge "${old_kernels[@]}"
+kernels=(/boot/vmlinuz-*)
+if [ "${#kernels[@]}" -ne 1 ] || [[ ${kernels[0]} != *-16k ]]; then
+    echo "sendit: expected only the 16 KiB-page kernel, found: ${kernels[*]}"
+    exit 1
+fi
 # Updates come with a rebuilt base image, not in the background: an upgrade
 # running in the background holds up shutting down for up to 30 minutes, and
 # would be cut short when sendit forces the VM off.

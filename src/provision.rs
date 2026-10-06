@@ -43,8 +43,9 @@ const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
 /// systemd from asking the terminal for its size, whose late replies ended
 /// up in the shell, 9 gives root's shell colours, a window title and a red
 /// prompt, tells the host when the guest starts shutting down, and drops
-/// unattended-upgrades, which could hold up shutting down.
-pub const BASE_REVISION: u32 = 9;
+/// unattended-upgrades, which could hold up shutting down, 10 boots the
+/// kernel with 16 KiB pages.
+pub const BASE_REVISION: u32 = 10;
 
 /// Starts a comment line in which a custom script asks for a mount.
 const MOUNT_COMMENT: &str = "# sendit-mount:";

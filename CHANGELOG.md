@@ -6,6 +6,10 @@
 
 - `sendit run --read-only`, or `read-only = true` in the config file, shares the project directory read-only. With `--expose-git`, `.git` is read-only too.
 
+### Changed
+
+- Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have. Existing images are rebuilt; VMs made from them keep the old kernel until they are made again, e.g. after `sendit prune --outdated`.
+
 ## 0.5.0 - 2026-10-02
 
 ### Added
