@@ -5,6 +5,7 @@
 ### Added
 
 - `sendit run --read-only`, or `read-only = true` in the config file, shares the project directory read-only. With `--expose-git`, `.git` is read-only too.
+- `SENDIT_VM_DIR` keeps the project VMs in another directory instead of `~/.sendit`, e.g. on an external drive. See the README for its limits.
 
 ### Changed
 

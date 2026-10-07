@@ -1,13 +1,16 @@
 //! Where sendit keeps its state. Nothing is ever written into project folders:
 //!
 //! - `~/.cache/sendit/`: downloads, the provisioned base images, provisioning scratch
-//! - `~/.sendit/<project>_<uuid>/`: one directory per project VM
+//! - `~/.sendit/<project>_<uuid>/`: one directory per project VM, or in
+//!   `$SENDIT_VM_DIR` instead, e.g. on an external drive
 //! - `~/.config/sendit/config.toml`: user configuration
 //! - `~/.config/sendit/provision-scripts/`: custom provisioning scripts for
 //!   all base images, and in `<image>/` for one of them
 
 use std::fmt;
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -15,19 +18,79 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::util::canonical;
+
+/// Names the directory that holds the project VMs instead of `~/.sendit`.
+pub const VMS_DIR_ENV: &str = "SENDIT_VM_DIR";
+
 #[derive(Clone, Debug)]
 pub struct Paths {
     home: PathBuf,
+    vms_dir: PathBuf,
 }
 
 impl Paths {
     pub fn new(home: PathBuf) -> Self {
-        Self { home }
+        let vms_dir = home.join(".sendit");
+        Self { home, vms_dir }
     }
 
     pub fn from_env() -> Result<Self> {
         let home = std::env::home_dir().context("cannot determine the home directory")?;
-        Ok(Self::new(home))
+        let paths = Self::new(home);
+        match std::env::var_os(VMS_DIR_ENV).filter(|dir| !dir.is_empty()) {
+            Some(dir) => paths
+                .with_vms_dir(Path::new(&dir))
+                .with_context(|| format!("invalid {VMS_DIR_ENV}")),
+            None => Ok(paths),
+        }
+    }
+
+    /// Keeps the project VMs in `dir` instead of `~/.sendit`. It must exist
+    /// already, so that a drive that isn't connected is an error rather
+    /// than VMs made somewhere else. `prune --all` deletes everything in
+    /// it and every start keeps it out of backups, so it must not be the
+    /// root of a volume or hold the home directory or sendit's other files.
+    pub fn with_vms_dir(mut self, dir: &Path) -> Result<Self> {
+        // Without a trailing slash, for display.
+        let dir: PathBuf = self.expand_tilde(dir).components().collect();
+        ensure!(
+            dir.is_absolute(),
+            "{} is not an absolute path",
+            dir.display()
+        );
+        ensure!(
+            dir.is_dir(),
+            "{} is not a directory; create it, or connect the drive it is on",
+            dir.display()
+        );
+        let real = canonical(&dir);
+        let volume_root = match real.parent() {
+            None => true,
+            Some(parent) => fs::metadata(parent)?.dev() != fs::metadata(&real)?.dev(),
+        };
+        ensure!(
+            !volume_root,
+            "{} is the root of a volume; use a directory on it, e.g. {}",
+            dir.display(),
+            dir.join("sendit").display()
+        );
+        ensure!(
+            !canonical(&self.home).starts_with(&real),
+            "{} contains your home directory",
+            dir.display()
+        );
+        for other in [self.config_dir(), self.cache_dir()] {
+            let other_real = canonical(&other);
+            ensure!(
+                !other_real.starts_with(&real) && !real.starts_with(&other_real),
+                "{} must not contain or be inside {}",
+                dir.display(),
+                self.display(&other)
+            );
+        }
+        self.vms_dir = dir;
+        Ok(self)
     }
 
     pub fn home(&self) -> &Path {
@@ -101,7 +164,7 @@ impl Paths {
 
     /// Parent of all project VM directories.
     pub fn vms_dir(&self) -> PathBuf {
-        self.home.join(".sendit")
+        self.vms_dir.clone()
     }
 
     /// The directories holding only what sendit can make again: downloads,
@@ -236,6 +299,7 @@ fn file_url(path: &Path) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::TempDir;
 
     #[test]
     fn project_ids_are_stable_and_distinct() {
@@ -283,5 +347,37 @@ mod tests {
         );
         assert_eq!(paths.expand_tilde(Path::new("/x/~")), Path::new("/x/~"));
         assert_eq!(paths.display(Path::new("/home/me/.sendit")), "~/.sendit");
+    }
+
+    #[test]
+    fn vms_dir_can_move() {
+        let temp = TempDir::new("vms-dir");
+        let home = temp.path().join("home");
+        let external = temp.path().join("external");
+        for dir in [".config/sendit", ".cache/sendit", "vms"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        fs::create_dir_all(&external).unwrap();
+        let paths = Paths::new(home.clone());
+        let moved = |dir: &Path| paths.clone().with_vms_dir(dir).map(|p| p.vms_dir());
+
+        assert_eq!(moved(&external).unwrap(), external);
+        assert_eq!(moved(Path::new("~/vms/")).unwrap(), home.join("vms"));
+        assert_eq!(paths.display(&home.join("vms")), "~/vms");
+
+        let error = |dir: &Path| format!("{:#}", moved(dir).unwrap_err());
+        assert!(error(Path::new("vms")).contains("not an absolute path"));
+        assert!(error(&temp.path().join("missing")).contains("connect the drive"));
+        assert!(error(Path::new("/")).contains("root of a volume"));
+        assert!(error(&home).contains("contains your home directory"));
+        assert!(error(temp.path()).contains("contains your home directory"));
+        assert!(
+            error(&home.join(".cache")).contains("must not contain or be inside ~/.cache/sendit")
+        );
+        assert!(error(&home.join(".cache/sendit")).contains("~/.cache/sendit"));
+        assert!(error(&home.join(".config/sendit")).contains("~/.config/sendit"));
+        // Through a symlink, too.
+        std::os::unix::fs::symlink(&home, temp.path().join("link")).unwrap();
+        assert!(error(&temp.path().join("link")).contains("contains your home directory"));
     }
 }

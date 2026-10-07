@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
 
@@ -19,6 +19,17 @@ pub fn if_exists<T>(result: io::Result<T>) -> io::Result<Option<T>> {
         Ok(value) => Ok(Some(value)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// `path` with symlinks resolved as far as it exists.
+pub fn canonical(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical(parent).join(name),
+        _ => path.to_path_buf(),
     }
 }
 

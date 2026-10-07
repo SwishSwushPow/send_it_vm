@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -179,15 +180,48 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> Result<usize> {
 }
 
 /// Copies `src` to `dst` as an APFS copy-on-write clone: instant, and no
-/// extra space is used until either file changes.
+/// extra space is used until either file changes. Across volumes, e.g.
+/// with `SENDIT_VM_DIR` on an external drive, or on other file systems,
+/// it falls back to a sparse copy.
 pub fn clone_file(src: &Path, dst: &Path) -> Result<()> {
     let c_src = CString::new(src.as_os_str().as_bytes())?;
     let c_dst = CString::new(dst.as_os_str().as_bytes())?;
     // SAFETY: both arguments are valid NUL-terminated paths.
     if unsafe { libc::clonefile(c_src.as_ptr(), c_dst.as_ptr(), 0) } != 0 {
-        return Err(std::io::Error::last_os_error())
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) {
+            return copy_sparse(src, dst)
+                .with_context(|| format!("copying {} to {}", src.display(), dst.display()));
+        }
+        return Err(error)
             .with_context(|| format!("cloning {} to {}", src.display(), dst.display()));
     }
+    Ok(())
+}
+
+/// Copies `src` to a new file `dst`, leaving out the 64 KiB blocks that
+/// contain only zeros, so that they stay unallocated where the file system
+/// supports it.
+fn copy_sparse(src: &Path, dst: &Path) -> Result<()> {
+    const BLOCK: usize = 64 << 10;
+    let mut from = File::open(src)?;
+    let to = File::options().write(true).create_new(true).open(dst)?;
+    // Sized first: APFS allocates the gap when a write goes past the end,
+    // but not the holes a truncate leaves.
+    to.set_len(from.metadata()?.len())?;
+    let mut buf = vec![0; BLOCK];
+    let mut offset = 0;
+    loop {
+        let n = read_full(&mut from, &mut buf)?;
+        if buf[..n].iter().any(|&b| b != 0) {
+            to.write_all_at(&buf[..n], offset)?;
+        }
+        offset += n as u64;
+        if n < BLOCK {
+            break;
+        }
+    }
+    to.sync_all()?;
     Ok(())
 }
 
@@ -206,6 +240,28 @@ mod tests {
     use super::*;
     use crate::util::TempDir;
     use std::os::unix::fs::MetadataExt;
+
+    #[test]
+    fn copies_sparsely() {
+        let temp = TempDir::new("copy-sparse");
+        let src = temp.path().join("src.raw");
+        // APFS fully allocates smaller files that a truncate grew.
+        let mut data = vec![0u8; 64 << 20];
+        data[100] = 1;
+        data.extend_from_slice(&[3; 1000]); // partial tail block
+        fs::write(&src, &data).unwrap();
+
+        let dst = temp.path().join("dst.raw");
+        copy_sparse(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), data);
+        let allocated = fs::metadata(&dst).unwrap().blocks() * 512;
+        assert!(allocated <= 256 << 10, "allocated {allocated} bytes");
+        assert!(
+            copy_sparse(&src, &dst).is_err(),
+            "overwrote {}",
+            dst.display()
+        );
+    }
 
     #[test]
     fn punches_zero_blocks() {

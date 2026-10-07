@@ -89,6 +89,7 @@ impl Env {
     fn sendit(&self) -> Command {
         let mut cmd = Command::new(SENDIT);
         cmd.env("HOME", &self.home);
+        cmd.env_remove("SENDIT_VM_DIR");
         cmd
     }
 

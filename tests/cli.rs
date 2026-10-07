@@ -36,6 +36,7 @@ impl Env {
     fn run(&self, program: &Path, args: &[&str]) -> Output {
         Command::new(program)
             .env("HOME", &self.home)
+            .env_remove("SENDIT_VM_DIR")
             .arg("-C")
             .arg(&self.project)
             .args(args)
@@ -249,6 +250,7 @@ fn rejects_bad_arguments() {
     // Relative mounts on the command line are relative to where it runs.
     let output = Command::new(SENDIT)
         .env("HOME", &env.home)
+        .env_remove("SENDIT_VM_DIR")
         .current_dir(&env.project)
         .args(["run", "--mount", "does-not-exist"])
         .output()
@@ -259,6 +261,7 @@ fn rejects_bad_arguments() {
     );
     let output = Command::new(SENDIT)
         .env("HOME", &env.home)
+        .env_remove("SENDIT_VM_DIR")
         .args(["-C", "/does/not/exist", "status"])
         .output()
         .unwrap();
@@ -313,6 +316,65 @@ fn asks_before_risky_shares() {
     );
 }
 
+#[test]
+fn moves_vms_to_sendit_vm_dir() {
+    let env = Env::new("vm-dir");
+    let external = env.home.parent().unwrap().join("external");
+    let vms = external.join("vms");
+    let sendit = |vms: &Path, args: &[&str]| {
+        Command::new(SENDIT)
+            .env("HOME", &env.home)
+            .env("SENDIT_VM_DIR", vms)
+            .arg("-C")
+            .arg(&env.project)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    // A drive that isn't connected is an error, not VMs made elsewhere.
+    let output = sendit(&vms, &["list"]);
+    assert_fails_with(&output, "invalid SENDIT_VM_DIR");
+    assert_fails_with(
+        &output,
+        &format!(
+            "{} is not a directory; create it, or connect the drive it is on",
+            vms.display()
+        ),
+    );
+    assert!(!vms.exists());
+    assert_fails_with(
+        &sendit(&env.home, &["list"]),
+        "contains your home directory",
+    );
+
+    fs::create_dir_all(&vms).unwrap();
+    let output = sendit(&vms, &["list"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        format!("No VMs in {}.\n", vms.display())
+    );
+    assert!(!env.home.join(".sendit").exists());
+
+    // Shares of it are risky, ~/.sendit no longer is.
+    let output = sendit(&vms, &["run", "--mount", external.to_str().unwrap()]);
+    assert_fails_with(
+        &output,
+        &format!(
+            "{} (read-only) contains sendit's VMs ({})",
+            external.canonicalize().unwrap().display(),
+            vms.canonicalize().unwrap().display()
+        ),
+    );
+    fs::create_dir_all(env.home.join(".sendit")).unwrap();
+    assert_fails_with(
+        &sendit(&vms, &["run", "--mount", "~/.sendit"]),
+        "isn't provisioned yet",
+    );
+}
+
 /// The entitlements `binary` is signed with, as XML.
 fn entitlements(binary: &Path) -> String {
     let output = Command::new("codesign")
@@ -347,6 +409,7 @@ fn signs_itself_with_the_virtualization_entitlement() {
     // A signature that didn't take is an error, not a loop.
     let output = Command::new(&binary)
         .env("HOME", &env.home)
+        .env_remove("SENDIT_VM_DIR")
         .env("SENDIT_SIGNED", "1")
         .arg("list")
         .output()

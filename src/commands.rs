@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use anyhow::{Result, bail, ensure};
 
@@ -13,6 +13,7 @@ use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
+use crate::util::canonical;
 use crate::vm::{self, VmDir};
 
 /// Asks before sharing directories that contain the home directory, or
@@ -80,17 +81,6 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
             Some(format!("{} ({mode}) {reason}", paths.display(host)))
         })
         .collect()
-}
-
-/// `path` with symlinks resolved as far as it exists.
-fn canonical(path: &Path) -> PathBuf {
-    if let Ok(path) = path.canonicalize() {
-        return path;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => canonical(parent).join(name),
-        _ => path.to_path_buf(),
-    }
 }
 
 pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {

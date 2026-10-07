@@ -50,7 +50,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--expose-git`: lets the VM see and change `.git`, including its hooks and config, which git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
-`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit`). Through those the VM could become root or run commands on the Mac.
+`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`). Through those the VM could become root or run commands on the Mac.
 
 ## Configuration
 
@@ -118,7 +118,9 @@ Nothing is written into project directories.
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 - `~/.config/sendit/`: configuration and custom provisioning scripts
 
-sendit excludes `~/.cache/sendit/` and `~/.sendit/` from Time Machine backups on every start. They hold only what sendit can make again, and a VM's disk changes whenever the VM runs, so each backup would copy all of it again. Keep anything inside a VM that you can't lose in the project directory, which lives on the Mac and is backed up as usual.
+To keep the VMs somewhere else, e.g. on an external drive, set `SENDIT_VM_DIR` to an existing directory, such as `export SENDIT_VM_DIR=/Volumes/External/sendit`. sendit then uses it in place of `~/.sendit` and won't create it, so a drive that isn't connected is an error. It can't be the root of a volume, the home directory or a folder that contains it, and it can't contain or sit inside `~/.cache/sendit` or `~/.config/sendit`: `sendit prune --all` deletes whatever is in it. On another volume, a new VM's disk is a copy of the base image instead of an instant clone, so each VM takes the base image's space on top of its own changes. Format the drive as APFS: HFS+ (Mac OS Extended) and exFAT have no sparse files, so there every VM takes its full disk size, 64 GiB by default. If the drive ignores ownership, which external drives often do, other users of the Mac can change the VMs' files and so run commands as root in them.
+
+sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups on every start. They hold only what sendit can make again, and a VM's disk changes whenever the VM runs, so each backup would copy all of it again. Keep anything inside a VM that you can't lose in the project directory, which lives on the Mac and is backed up as usual.
 
 ## License
 
