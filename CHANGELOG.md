@@ -17,6 +17,7 @@
 - A Ctrl-C or other signal that ended one VM no longer stops the next one as soon as it starts, e.g. the next image's VM in `sendit provision --all`. Between VMs, Ctrl-C ends sendit right away again.
 - `sendit list`, `images` and `prune` only take directories named like a VM for VMs, so `sendit prune --all` leaves other folders in the VM directory alone. VMs of projects whose folder name starts with a dot are no longer skipped.
 - When an SSH key is missing, `sendit ssh` says that the images need rebuilding and the VM a reset, not just `sendit provision --force`.
+- On boot, the VM checks that each share and the `.git` mask landed where they belong, and undoes them otherwise: something writing to a shared directory meanwhile, such as another VM, could have swapped a folder on the way for a symlink.
 
 ### Base image
 
@@ -25,6 +26,7 @@ The base revision is now 10: rebuild images with `sendit provision --all --force
 - Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have.
 - Base images get a 16 GiB disk instead of 8 GiB, which leaves custom provisioning scripts more room.
 - A root partition that fails to grow shows up as a failed `sendit-growfs` service instead of being ignored.
+- The shares are mounted before cron and atd start, should a custom script install them, so that their jobs can't plant symlinks while the shares are mounted as root.
 
 ## 0.5.0 - 2026-10-02
 

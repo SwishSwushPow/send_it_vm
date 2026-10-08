@@ -295,7 +295,11 @@ systemctl enable sendit-growfs.service fstrim.timer
 
 # --- Mounts -----------------------------------------------------------------
 # sendit shares a manifest and the script that applies it (mount.sh) on the
-# read-only sendit-meta virtiofs share. Run it before anyone can log in.
+# read-only sendit-meta virtiofs share. Run it before anyone can log in, and
+# before anything else that could run the login user's code: mount.sh checks
+# paths in the user's home for symlinks, which only holds while nothing can
+# plant one meanwhile. User services (lingering) wait for user sessions;
+# cron and atd, should a custom script install them, wait for this.
 cat > /usr/local/sbin/sendit-mounts <<'EOF'
 #!/bin/sh
 set -eu
@@ -309,7 +313,7 @@ cat > /etc/systemd/system/sendit-mounts.service <<'EOF'
 [Unit]
 Description=Mount the directories shared by sendit
 After=local-fs.target
-Before=serial-getty@hvc0.service ssh.service systemd-user-sessions.service
+Before=serial-getty@hvc0.service ssh.service systemd-user-sessions.service cron.service atd.service
 
 [Service]
 Type=oneshot

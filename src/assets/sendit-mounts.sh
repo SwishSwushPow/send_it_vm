@@ -33,6 +33,19 @@ has_symlink() {
     return 1
 }
 
+# Whether the newest mount of source $1 is at $2. Something writing to a
+# share at the same time, e.g. another VM sharing the same directory, could
+# swap a directory on $2 for a symlink after has_symlink looked, and take
+# the mount elsewhere; the kernel records where it really went.
+mounted_at() {
+    [ "$(findmnt -n -o TARGET -S "$1" | tail -n 1)" = "$2" ]
+}
+
+# Undoes the newest mount of source $1, wherever it went.
+unmount_source() {
+    umount "$(findmnt -n -o TARGET -S "$1" | tail -n 1)"
+}
+
 # Creates a mount point and any missing parents. Directories created inside
 # the user's home belong to the user, so e.g. ~/.cache stays writable.
 mkpoint() {
@@ -56,10 +69,13 @@ while read -r kind rest; do
             path=${rest#* }
             if has_symlink "$path"; then
                 fail "not mounting $tag at $path: it leads through a symlink"
-            elif mkpoint "$path" && mount -t virtiofs -o "$mode" "$tag" "$path"; then
-                echo "sendit-mounts: $path ($mode)"
-            else
+            elif ! mkpoint "$path" || ! mount -t virtiofs -o "$mode" "$tag" "$path"; then
                 fail "could not mount $tag at $path"
+            elif ! mounted_at "$tag" "$path"; then
+                unmount_source "$tag"
+                fail "not mounting $tag at $path: a symlink appeared on the way"
+            else
+                echo "sendit-mounts: $path ($mode)"
             fi
             ;;
         hide)
@@ -67,10 +83,17 @@ while read -r kind rest; do
             if has_symlink "$path"; then
                 fail "not hiding $path: it leads through a symlink"
             elif [ -d "$path" ]; then
-                mount -t tmpfs -o ro,mode=0555,size=4k sendit-hidden "$path" ||
+                if ! mount -t tmpfs -o ro,mode=0555,size=4k sendit-hidden "$path"; then
                     fail "could not hide $path"
+                elif ! mounted_at sendit-hidden "$path"; then
+                    unmount_source sendit-hidden
+                    fail "could not hide $path: a symlink appeared on the way"
+                fi
             elif [ -e "$path" ]; then
-                # A file, e.g. the .git file of a worktree.
+                # A file, e.g. the .git file of a worktree. Not checked with
+                # mounted_at: findmnt names the source after /dev's file
+                # system. Whatever could race this shares the project and
+                # can change the file anyway.
                 mount --bind -o ro /dev/null "$path" || fail "could not hide $path"
             fi
             ;;
