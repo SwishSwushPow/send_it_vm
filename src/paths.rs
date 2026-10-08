@@ -1,6 +1,7 @@
 //! Where sendit keeps its state. Nothing is ever written into project folders:
 //!
-//! - `~/.cache/sendit/`: downloads, the provisioned base images, provisioning scratch
+//! - `~/.cache/sendit/`: downloads, the provisioned base images, the SSH keys
+//!   baked into them, provisioning scratch
 //! - `~/.sendit/<project>_<uuid>/`: one directory per project VM, or in
 //!   `$SENDIT_VM_DIR` instead, e.g. on an external drive
 //! - `~/.config/sendit/config.toml`: user configuration

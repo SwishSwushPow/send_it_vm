@@ -9,16 +9,22 @@
 
 ### Changed
 
-- Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have. Existing images are rebuilt; VMs made from them keep the old kernel until they are made again, e.g. after `sendit prune --outdated`.
-- Base images get a 16 GiB disk instead of 8 GiB, which leaves custom provisioning scripts more room. Existing images keep theirs until they are rebuilt.
 - `disk-size` in the config file must be at least 16 GiB, the size of a base image's disk, instead of 8 GiB. A VM's disk can't shrink below its base image's, so smaller sizes only got a warning on every run.
+- `sendit status` and `sendit run` describe a base image that needs building in the same words, e.g. "not provisioned yet; run `sendit provision`".
 
 ### Fixed
 
 - A Ctrl-C or other signal that ended one VM no longer stops the next one as soon as it starts, e.g. the next image's VM in `sendit provision --all`. Between VMs, Ctrl-C ends sendit right away again.
 - `sendit list`, `images` and `prune` only take directories named like a VM for VMs, so `sendit prune --all` leaves other folders in the VM directory alone. VMs of projects whose folder name starts with a dot are no longer skipped.
 - When an SSH key is missing, `sendit ssh` says that the images need rebuilding and the VM a reset, not just `sendit provision --force`.
-- In base images, a root partition that fails to grow shows up as a failed `sendit-growfs` service instead of being ignored.
+
+### Base image
+
+The base revision is now 10: rebuild images with `sendit provision --all --force`, then delete their VMs with `sendit prune --outdated`. Until then, sendit can't make VMs from the old images or run the VMs made from them.
+
+- Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have.
+- Base images get a 16 GiB disk instead of 8 GiB, which leaves custom provisioning scripts more room.
+- A root partition that fails to grow shows up as a failed `sendit-growfs` service instead of being ignored.
 
 ## 0.5.0 - 2026-10-02
 

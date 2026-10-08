@@ -25,8 +25,9 @@ pub enum Command {
         #[arg(value_name = "IMAGE", conflicts_with = "all")]
         image: Option<ImageName>,
 
-        /// Build every image: `default`, those with their own directory of
-        /// provisioning scripts, and those built before
+        /// Build every image: `default`, those named in the config file or
+        /// with their own directory of provisioning scripts, and those built
+        /// before
         #[arg(long)]
         all: bool,
 
@@ -104,7 +105,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub expose_git: bool,
 
-    /// Base image to create the VM from [default: default]
+    /// Base image to create the VM from; an existing VM must have been
+    /// made from it [default: `image` from the config file, else the one
+    /// the VM was made from, else default]
     #[arg(long, value_name = "IMAGE")]
     pub image: Option<ImageName>,
 }
