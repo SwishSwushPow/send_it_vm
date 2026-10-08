@@ -46,15 +46,24 @@ unmount_source() {
     umount "$(findmnt -n -o TARGET -S "$1" | tail -n 1)"
 }
 
-# Creates a mount point and any missing parents. Directories created inside
-# the user's home belong to the user, so e.g. ~/.cache stays writable.
+# Creates a mount point and any missing parents. Inside the user's home, the
+# user creates them, so they belong to the user (e.g. ~/.cache stays
+# writable), and a symlink swapped in on the way can only lead to where the
+# user could create directories anyway. Created by root and handed over,
+# one could end up e.g. in /etc/systemd/system, owned by the user.
 mkpoint() {
     [ -d "$1" ] && return 0
     mkpoint "$(dirname "$1")" || return 1
-    mkdir "$1" || return 1
     case $1 in
-        "/home/$user"/*) chown "$user:" "$1" ;;
+        "/home/$user"/*) as_user mkdir -- "$1" ;;
+        *) mkdir -- "$1" ;;
     esac
+}
+
+# Runs a command as the user. Not runuser: it opens a PAM session, which
+# this early in boot may wait for logind.
+as_user() {
+    setpriv --reuid="$user" --regid="$(id -g "$user")" --clear-groups "$@"
 }
 
 rm -f "$profile"

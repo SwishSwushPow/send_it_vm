@@ -18,6 +18,7 @@
 - `sendit list`, `images` and `prune` only take directories named like a VM for VMs, so `sendit prune --all` leaves other folders in the VM directory alone. VMs of projects whose folder name starts with a dot are no longer skipped.
 - When an SSH key is missing, `sendit ssh` says that the images need rebuilding and the VM a reset, not just `sendit provision --force`.
 - On boot, the VM checks that each share and the `.git` mask landed where they belong, and undoes them otherwise: something writing to a shared directory meanwhile, such as another VM, could have swapped a folder on the way for a symlink.
+- Mount points that the VM creates in the user's home are created as the user instead of by root and handed over, so a symlink swapped in on the way can't leave a folder owned by the user elsewhere, e.g. in `/etc`.
 
 ### Base image
 
