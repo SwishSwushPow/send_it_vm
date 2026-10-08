@@ -820,6 +820,7 @@ fn runs_commands_over_ssh() {
         root_size > 32 << 30,
         "the root filesystem has {root_size} bytes"
     );
+    vm.fails("systemctl is-failed --quiet sendit-growfs");
     assert!(project.ok(&["status"]).contains("running at"));
 
     let second = project.sendit(&["run"]);
@@ -946,6 +947,8 @@ fn keeps_the_vm_until_reset() {
 
     let vm = project.run(&[]);
     assert_eq!(vm.ok("cat ~/marker"), "kept");
+    // The disk has grown on the first boot; nothing to grow isn't a failure.
+    vm.fails("systemctl is-failed --quiet sendit-growfs");
     vm.stop();
 
     project.ok(&["reset", "--yes"]);

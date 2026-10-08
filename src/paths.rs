@@ -48,9 +48,9 @@ impl Paths {
 
     /// Keeps the project VMs in `dir` instead of `~/.sendit`. It must exist
     /// already, so that a drive that isn't connected is an error rather
-    /// than VMs made somewhere else. `prune --all` deletes everything in
-    /// it and every start keeps it out of backups, so it must not be the
-    /// root of a volume or hold the home directory or sendit's other files.
+    /// than VMs made somewhere else. Every start keeps it out of backups,
+    /// so it must not be the root of a volume or hold the home directory or
+    /// sendit's other files.
     pub fn with_vms_dir(mut self, dir: &Path) -> Result<Self> {
         // Without a trailing slash, for display.
         let dir: PathBuf = self.expand_tilde(dir).components().collect();
@@ -290,6 +290,19 @@ fn project_id(root: &Path) -> String {
     format!("{name}_{uuid}")
 }
 
+/// Whether `name` has the form of a project ID, `<name>_<UUID>`. Other
+/// directories next to the VMs, e.g. in `$SENDIT_VM_DIR`, aren't VMs.
+pub fn is_project_id(name: &str) -> bool {
+    name.rsplit_once('_').is_some_and(|(name, uuid)| {
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+            && uuid.len() == 36
+            && Uuid::try_parse(uuid).is_ok()
+    })
+}
+
 fn file_url(path: &Path) -> Vec<u8> {
     let mut url = b"file://".to_vec();
     url.extend_from_slice(path.as_os_str().as_bytes());
@@ -308,6 +321,24 @@ mod tests {
         assert_eq!(a, project_id(Path::new("/Users/me/dev/my app")));
         assert_ne!(a, project_id(Path::new("/Users/me/other/my app")));
         assert!(project_id(Path::new("/")).starts_with("root_"));
+    }
+
+    #[test]
+    fn recognizes_project_ids() {
+        for path in ["/Users/me/dev/my app", "/x/.dotted_name", "/"] {
+            assert!(is_project_id(&project_id(Path::new(path))), "{path}");
+        }
+        let uuid = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
+        for name in [
+            "photos",
+            "my_app",
+            &format!("_{uuid}"),
+            &format!("app_{}", uuid.replace('-', "")),
+            &format!(".app_{uuid}.partial"),
+            &format!("my app_{uuid}"),
+        ] {
+            assert!(!is_project_id(name), "{name}");
+        }
     }
 
     #[test]

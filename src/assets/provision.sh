@@ -267,8 +267,14 @@ root=$(findmnt -no SOURCE /)
 name=$(basename "$root")
 disk=/dev/$(lsblk -no PKNAME "$root")
 part=$(cat "/sys/class/block/$name/partition")
-growpart "$disk" "$part" || true   # exits 1 when there is nothing to grow
-resize2fs "$root"
+# growpart exits 1 when there is nothing to grow, and 2 when it fails.
+growpart "$disk" "$part" || [ $? -eq 1 ]
+# Like systemd-growfs-root.service, which the image's fstab asks for
+# (x-systemd.growfs) but which runs before the partition has grown. Not
+# resize2fs: with 16 KiB pages it rounds the size down to whole pages, and
+# once systemd has grown the filesystem to the partition's end, that would
+# mean shrinking it, which fails.
+/usr/lib/systemd/systemd-growfs /
 EOF
 chmod 755 /usr/local/sbin/sendit-growfs
 cat > /etc/systemd/system/sendit-growfs.service <<'EOF'

@@ -42,17 +42,40 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 
 /// SIGTERM (e.g. from `sendit stop`), SIGHUP (the terminal went away) and
-/// SIGINT received so far. Each one counts like a press of the escape key.
+/// SIGINT received so far while a VM ran. Each one counts like a press of
+/// the escape key.
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
+
+const CAUGHT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
 extern "C" fn on_signal(_: libc::c_int) {
     SIGNALS.fetch_add(1, Ordering::Relaxed);
 }
 
-fn handle_signals() {
-    for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+/// Counts `CAUGHT_SIGNALS` in `SIGNALS` instead of letting them end the
+/// process, until dropped. Then they act as before again, so that between
+/// VMs, e.g. while `provision --all` prepares the next image, they don't
+/// pile up for the next VM.
+struct CatchSignals {
+    previous: [libc::sighandler_t; CAUGHT_SIGNALS.len()],
+}
+
+impl CatchSignals {
+    fn new() -> Self {
         // SAFETY: the handler only touches an atomic, which is signal-safe.
-        unsafe { libc::signal(signal, on_signal as *const () as libc::sighandler_t) };
+        let previous = CAUGHT_SIGNALS.map(|signal| unsafe {
+            libc::signal(signal, on_signal as *const () as libc::sighandler_t)
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for CatchSignals {
+    fn drop(&mut self) {
+        for (signal, previous) in CAUGHT_SIGNALS.into_iter().zip(self.previous) {
+            // SAFETY: restores the disposition `new` replaced.
+            unsafe { libc::signal(signal, previous) };
+        }
     }
 }
 
@@ -221,7 +244,9 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         "virtualization is not supported on this Mac"
     );
 
-    handle_signals();
+    // Signals from before this VM, which ended an earlier one, don't count.
+    let mut seen_escapes = SIGNALS.load(Ordering::Relaxed);
+    let _signals = CatchSignals::new();
     let console = Console::attach(spec.provision_log.as_ref())?;
     let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
     let state = Rc::new(VmState::default());
@@ -253,7 +278,6 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     notice(started);
 
     let run_loop = NSRunLoop::currentRunLoop();
-    let mut seen_escapes = 0;
     let mut stopping = Stopping::No;
     let result = loop {
         let deadline = NSDate::dateWithTimeIntervalSinceNow(0.2);

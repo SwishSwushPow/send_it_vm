@@ -383,9 +383,15 @@ mod tests {
         let paths = Paths::new(temp.path().join("home"));
         let present = temp.path().join("present");
         fs::create_dir_all(&present).unwrap();
-        let vm = |name: &str, project: &Path, base_revision: u32| {
-            let dir = paths.vms_dir().join(name);
+        let vm_dir = |name: &str| {
+            let dir = paths
+                .vms_dir()
+                .join(format!("{name}_6ba7b811-9dad-11d1-80b4-00c04fd430c8"));
             fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let vm = |name: &str, project: &Path, base_revision: u32| {
+            let dir = vm_dir(name);
             fs::write(
                 dir.join("project.toml"),
                 format!(
@@ -400,8 +406,10 @@ mod tests {
         let kept = vm("kept", &present, current);
         let outdated = vm("outdated", &present, current - 1);
         let orphan = vm("orphan", &temp.path().join("gone"), current);
-        let broken = paths.vms_dir().join("broken");
-        fs::create_dir_all(&broken).unwrap();
+        let broken = vm_dir("broken");
+        // Not a VM, e.g. in a $SENDIT_VM_DIR that holds other things too.
+        let other = paths.vms_dir().join("photos");
+        fs::create_dir_all(&other).unwrap();
 
         prune(&paths, PruneScope::Missing, true).unwrap();
         assert!(!orphan.exists());
@@ -415,6 +423,7 @@ mod tests {
         prune(&paths, PruneScope::All, true).unwrap();
         assert!(!kept.exists());
         assert!(!broken.exists());
+        assert!(other.exists());
     }
 
     #[test]

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ByteSize, GUEST_USER, VmSettings};
 use crate::image;
 use crate::mounts;
-use crate::paths::{ImageName, Paths, Project};
+use crate::paths::{ImageName, Paths, Project, is_project_id};
 use crate::provision::{self, BaseState};
 use crate::util;
 use crate::vm::{self, VmDir, VmSpec, net};
@@ -99,13 +99,14 @@ pub fn state(dir: &VmDir) -> Result<State> {
     }
 }
 
-/// All project VM directories, sorted by name. Unfinished `.partial`
-/// directories are skipped.
+/// All project VM directories, sorted by name: those named like a project
+/// ID. Unfinished `.partial` directories and anything else are skipped.
 pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
     let mut dirs = Vec::new();
     for entry in util::read_dir(&paths.vms_dir())? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
+        let is_vm = entry.file_name().to_str().is_some_and(is_project_id);
+        if is_vm && entry.file_type()?.is_dir() {
             dirs.push(VmDir::new(entry.path()));
         }
     }
@@ -212,9 +213,13 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
     } else {
         (GUEST_USER, paths.ssh_key())
     };
+    // Its public key is baked into the base images, so a new one only
+    // reaches VMs made from images built after it.
     ensure!(
         key.exists(),
-        "{} is missing; `sendit provision --force` creates it",
+        "{} is missing, so no VM made so far can be reached as {user}; \
+         `sendit provision --all --force` makes a new key and rebuilds the images \
+         with it, then `sendit reset` makes this project's VM again",
         paths.display(&key)
     );
     // Each VM gets its own known_hosts: IP addresses are reused across VMs,
