@@ -29,8 +29,9 @@ use crate::paths::{ImageName, Paths};
 use crate::util;
 use crate::vm::{self, ProvisionLog, VmDir, VmSpec};
 
-/// Logical size of the base disk. Project VMs grow their clone further.
-const BASE_DISK_SIZE: ByteSize = ByteSize::gib(8);
+/// Logical size of the base disk. Project VMs grow their clone further, but
+/// can't shrink it, so this is also the smallest disk size they can have.
+pub const BASE_DISK_SIZE: ByteSize = ByteSize::gib(16);
 
 const USER_DATA: &str = include_str!("assets/user-data.yaml");
 const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");

@@ -818,7 +818,7 @@ fn runs_commands_over_ssh() {
     assert_eq!(vm.ok("id -un"), "dev");
     assert_eq!(vm.root_ok("id -u"), "0");
     vm.fails("sudo -n true");
-    // The root filesystem grew from the base image's 8 GiB to the default
+    // The root filesystem grew from the base image's 16 GiB to the default
     // disk size of 64 GiB.
     let root_size: u64 = vm.ok("findmnt -bno SIZE /").parse().unwrap();
     assert!(

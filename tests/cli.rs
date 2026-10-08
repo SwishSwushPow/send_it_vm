@@ -196,7 +196,7 @@ fn reports_bad_configuration() {
     );
     status_fails_with(
         "disk-size = \"4G\"\n",
-        "disk-size must be at least 8 GiB, got 4 GiB",
+        "disk-size must be at least 16 GiB, got 4 GiB",
     );
     status_fails_with(
         "mounts = [\"relative/dir\"]\n",

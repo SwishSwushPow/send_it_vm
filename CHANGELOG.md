@@ -10,6 +10,8 @@
 ### Changed
 
 - Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have. Existing images are rebuilt; VMs made from them keep the old kernel until they are made again, e.g. after `sendit prune --outdated`.
+- Base images get a 16 GiB disk instead of 8 GiB, which leaves custom provisioning scripts more room. Existing images keep theirs until they are rebuilt.
+- `disk-size` in the config file must be at least 16 GiB, the size of a base image's disk, instead of 8 GiB. A VM's disk can't shrink below its base image's, so smaller sizes only got a warning on every run.
 
 ## 0.5.0 - 2026-10-02
 

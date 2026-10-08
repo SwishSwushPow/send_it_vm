@@ -27,7 +27,7 @@ const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
 const DEFAULT_DISK_SIZE: ByteSize = ByteSize::gib(64);
 
 const MIN_MEMORY: ByteSize = ByteSize::mib(512);
-const MIN_DISK_SIZE: ByteSize = ByteSize::gib(8);
+const MIN_DISK_SIZE: ByteSize = provision::BASE_DISK_SIZE;
 
 /// The guest's login user, created by `assets/user-data.yaml`.
 pub const GUEST_USER: &str = "dev";
