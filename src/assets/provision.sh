@@ -17,6 +17,12 @@ report() {
     local status=FAILED
     [ "$1" -eq 0 ] && status=OK
     set +x
+    # cloud-init's power_state powers the VM off once this script is done,
+    # but only if cloud-init is still running then: systemd stops its unit
+    # (but not this script) when the OOM killer kills any process in it,
+    # e.g. a compiler in a custom script. Should the VM still be up
+    # 15 seconds later, it powers off anyway.
+    systemd-run --quiet --on-active=15 systemctl --no-block poweroff || true
     echo "SENDIT_PROVISION_${status} $token"
 }
 trap 'report $?' EXIT
