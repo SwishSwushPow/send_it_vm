@@ -41,6 +41,9 @@ const GUEST_HOME: &str = "/home/dev";
 #[serde(try_from = "String")]
 pub struct ByteSize(pub u64);
 
+/// Binary units; each is 1024 times the one before it.
+const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+
 impl ByteSize {
     pub const fn mib(n: u64) -> Self {
         Self(n << 20)
@@ -52,7 +55,6 @@ impl ByteSize {
 
     /// Formats the size for humans, rounded to one decimal, e.g. `1.8 GiB`.
     pub fn approx(self) -> String {
-        const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
         let mut size = self.0 as f64;
         let mut unit = 0;
         while size >= 1024.0 && unit < UNITS.len() - 1 {
@@ -98,9 +100,9 @@ impl TryFrom<String> for ByteSize {
 
 impl fmt::Display for ByteSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const UNITS: [(u32, &str); 4] = [(40, "TiB"), (30, "GiB"), (20, "MiB"), (10, "KiB")];
-        for (shift, name) in UNITS {
-            let unit = 1u64 << shift;
+        // The largest unit the size is a whole number of.
+        for (i, name) in UNITS.iter().enumerate().skip(1).rev() {
+            let unit = 1u64 << (10 * i);
             if self.0 >= unit && self.0.is_multiple_of(unit) {
                 return write!(f, "{} {name}", self.0 / unit);
             }
@@ -158,8 +160,13 @@ impl fmt::Display for MountSpec {
         if let Some(guest) = &self.guest {
             write!(f, ":{}", guest.display())?;
         }
-        write!(f, ":{}", if self.read_only { "ro" } else { "rw" })
+        write!(f, ":{}", mode(self.read_only))
     }
+}
+
+/// `ro` or `rw`, as in mount options.
+fn mode(read_only: bool) -> &'static str {
+    if read_only { "ro" } else { "rw" }
 }
 
 /// One layer of optional settings (config file section or CLI flags).
@@ -271,7 +278,7 @@ pub struct Mount {
 impl Mount {
     /// `ro` or `rw`, as in mount options.
     pub fn mode(&self) -> &'static str {
-        if self.read_only { "ro" } else { "rw" }
+        mode(self.read_only)
     }
 }
 

@@ -21,6 +21,8 @@
 //! `sendit ssh`; the console tests run it on a pseudo-terminal and type into
 //! it. Output of `sendit run` goes to `target/tmp/vm-tests/logs/`.
 
+mod common;
+
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -36,7 +38,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
-const SENDIT: &str = env!("CARGO_BIN_EXE_sendit");
+use common::{assert_fails_with, text};
 
 /// What the base images are built from, apart from custom scripts: when any
 /// of it changes, the tests provision their images again.
@@ -87,10 +89,7 @@ struct Env {
 
 impl Env {
     fn sendit(&self) -> Command {
-        let mut cmd = Command::new(SENDIT);
-        cmd.env("HOME", &self.home);
-        cmd.env_remove("SENDIT_VM_DIR");
-        cmd
+        common::sendit(&self.home)
     }
 
     fn cache(&self) -> PathBuf {
@@ -795,10 +794,6 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
 /// The host's time zone, such as `Europe/Berlin`, as sendit tells the guest.
 fn host_timezone() -> Option<String> {
     let target = fs::read_link("/etc/localtime").ok()?;
@@ -1040,16 +1035,6 @@ impl Project {
             .unwrap_or_else(|| panic!("`sendit images` doesn't list {image}:\n{images}"))
             .to_string()
     }
-}
-
-/// Fails unless `output` failed with `message` in its stderr.
-fn assert_fails_with(output: &Output, message: &str) {
-    let stderr = text(&output.stderr);
-    assert!(
-        !output.status.success() && stderr.contains(message),
-        "expected an error saying {message:?}, got {}:\n{stderr}",
-        output.status
-    );
 }
 
 /// Replaces the value of `key` in the TOML file at `path`.

@@ -86,9 +86,6 @@ pub fn build(
         config.setEntropyDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioEntropyDeviceConfiguration::new(),
         )]));
-        config.setMemoryBalloonDevices(&NSArray::from_retained_slice(&[Retained::into_super(
-            VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new(),
-        )]));
 
         config
             .validateWithError()

@@ -5,11 +5,13 @@
 //! Each test gets a scratch home and project directory of its own in
 //! `target/tmp/cli-tests/<test>/`.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const SENDIT: &str = env!("CARGO_BIN_EXE_sendit");
+use common::{SENDIT, assert_fails_with, text};
 
 /// A scratch home and an empty project directory.
 struct Env {
@@ -34,9 +36,7 @@ impl Env {
 
     /// Runs `program <args>` for the project, with no input.
     fn run(&self, program: &Path, args: &[&str]) -> Output {
-        Command::new(program)
-            .env("HOME", &self.home)
-            .env_remove("SENDIT_VM_DIR")
+        common::command(program, &self.home)
             .arg("-C")
             .arg(&self.project)
             .args(args)
@@ -77,31 +77,17 @@ impl Env {
     }
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// Fails unless `output` failed with `message` in its stderr.
-fn assert_fails_with(output: &Output, message: &str) {
-    let stderr = text(&output.stderr);
-    assert!(
-        !output.status.success() && stderr.contains(message),
-        "expected an error saying {message:?}, got {}:\n{stderr}",
-        output.status
-    );
-}
-
 #[test]
 fn explains_what_to_do_in_a_fresh_home() {
     let env = Env::new("fresh-home");
 
     assert_fails_with(
         &env.sendit(&["run"]),
-        "the default image isn't provisioned yet; run `sendit provision` first",
+        "the default image is not provisioned yet; run `sendit provision`",
     );
     assert_fails_with(
         &env.sendit(&["run", "--image", "rust"]),
-        "the rust image isn't provisioned yet; run `sendit provision rust` first",
+        "the rust image is not provisioned yet; run `sendit provision rust`",
     );
     // Failing to start left nothing behind.
     assert_eq!(fs::read_dir(env.home.join(".sendit")).unwrap().count(), 0);
@@ -110,7 +96,7 @@ fn explains_what_to_do_in_a_fresh_home() {
     let lines: Vec<_> = status.lines().collect();
     assert_eq!(
         lines[0],
-        "image    default in ~/.cache/sendit/images/default (run `sendit provision`)"
+        "image    default in ~/.cache/sendit/images/default (not provisioned yet; run `sendit provision`)"
     );
     assert_eq!(lines[1], format!("project  {}", env.project_path()));
     assert!(
@@ -248,9 +234,7 @@ fn rejects_bad_arguments() {
         "cpus must be between 1 and ",
     );
     // Relative mounts on the command line are relative to where it runs.
-    let output = Command::new(SENDIT)
-        .env("HOME", &env.home)
-        .env_remove("SENDIT_VM_DIR")
+    let output = common::sendit(&env.home)
         .current_dir(&env.project)
         .args(["run", "--mount", "does-not-exist"])
         .output()
@@ -259,9 +243,7 @@ fn rejects_bad_arguments() {
         &output,
         &format!("mount {}/does-not-exist", env.project_path()),
     );
-    let output = Command::new(SENDIT)
-        .env("HOME", &env.home)
-        .env_remove("SENDIT_VM_DIR")
+    let output = common::sendit(&env.home)
         .args(["-C", "/does/not/exist", "status"])
         .output()
         .unwrap();
@@ -312,7 +294,7 @@ fn asks_before_risky_shares() {
     fs::create_dir_all(&data).unwrap();
     assert_fails_with(
         &env.sendit(&["run", "--mount", data.to_str().unwrap()]),
-        "isn't provisioned yet",
+        "is not provisioned yet",
     );
 }
 
@@ -322,8 +304,7 @@ fn moves_vms_to_sendit_vm_dir() {
     let external = env.home.parent().unwrap().join("external");
     let vms = external.join("vms");
     let sendit = |vms: &Path, args: &[&str]| {
-        Command::new(SENDIT)
-            .env("HOME", &env.home)
+        common::sendit(&env.home)
             .env("SENDIT_VM_DIR", vms)
             .arg("-C")
             .arg(&env.project)
@@ -371,7 +352,7 @@ fn moves_vms_to_sendit_vm_dir() {
     fs::create_dir_all(env.home.join(".sendit")).unwrap();
     assert_fails_with(
         &sendit(&vms, &["run", "--mount", "~/.sendit"]),
-        "isn't provisioned yet",
+        "is not provisioned yet",
     );
 }
 
@@ -407,9 +388,7 @@ fn signs_itself_with_the_virtualization_entitlement() {
     assert!(!entitlements(&binary).contains(ENTITLEMENT));
 
     // A signature that didn't take is an error, not a loop.
-    let output = Command::new(&binary)
-        .env("HOME", &env.home)
-        .env_remove("SENDIT_VM_DIR")
+    let output = common::command(&binary, &env.home)
         .env("SENDIT_SIGNED", "1")
         .arg("list")
         .output()

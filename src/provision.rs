@@ -148,6 +148,23 @@ pub enum BaseState {
     Current,
 }
 
+impl BaseState {
+    /// The state of `image` and, unless it is current, the command that
+    /// builds it, e.g. "outdated; rebuild it with `sendit provision rust
+    /// --force`".
+    pub fn describe(&self, image: &ImageName) -> String {
+        match self {
+            Self::Missing => format!("not provisioned yet; run `{}`", command(image, false)),
+            Self::Outdated => format!("outdated; rebuild it with `{}`", command(image, true)),
+            Self::ScriptsChanged => format!(
+                "custom scripts changed; rebuild it with `{}`",
+                command(image, true)
+            ),
+            Self::Current => "provisioned".to_string(),
+        }
+    }
+}
+
 pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
     let base = VmDir::new(paths.image_dir(image));
     let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
@@ -289,7 +306,7 @@ fn script_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
 }
 
 /// The command that builds `image`, e.g. `sendit provision rust --force`.
-pub fn command(image: &ImageName, force: bool) -> String {
+fn command(image: &ImageName, force: bool) -> String {
     let mut command = "sendit provision".to_string();
     if *image != ImageName::default() {
         let _ = write!(command, " {image}");

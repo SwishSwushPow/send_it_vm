@@ -19,6 +19,10 @@ use crate::util::{fresh_dir, run, run_output};
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
 const IMAGE_NAME: &str = "debian-13-genericcloud-arm64";
 
+/// The blocks in which disk images are checked for zeros, which are then
+/// left unallocated.
+const SPARSE_BLOCK: usize = 64 << 10;
+
 /// Returns the path of the unpacked, checksum-verified Debian raw disk image, downloading
 /// it first if the cached copy is missing or outdated. Falls back to the
 /// cached image when the checksum list can't be fetched (e.g. offline).
@@ -124,20 +128,19 @@ fn sha512_file(path: &Path) -> Result<String> {
 
 /// Deallocates all 64 KiB blocks of `path` that contain only zeros.
 fn punch_zero_blocks(path: &Path) -> Result<()> {
-    const BLOCK: usize = 64 << 10;
     let mut file = File::options()
         .read(true)
         .write(true)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    let mut buf = vec![0; BLOCK];
+    let mut buf = vec![0; SPARSE_BLOCK];
     let mut offset = 0;
     // Start of the current run of zero blocks.
     let mut zero_run: Option<u64> = None;
     loop {
         let n = read_full(&mut file, &mut buf)?;
         // Only whole blocks can be punched; a partial tail stays allocated.
-        let zero = n == BLOCK && buf.iter().all(|&b| b == 0);
+        let zero = n == SPARSE_BLOCK && buf.iter().all(|&b| b == 0);
         match (zero, zero_run) {
             (true, None) => zero_run = Some(offset),
             (false, Some(start)) => {
@@ -146,7 +149,7 @@ fn punch_zero_blocks(path: &Path) -> Result<()> {
             }
             _ => {}
         }
-        if n < BLOCK {
+        if n < SPARSE_BLOCK {
             return Ok(());
         }
         offset += n as u64;
@@ -203,13 +206,12 @@ pub fn clone_file(src: &Path, dst: &Path) -> Result<()> {
 /// contain only zeros, so that they stay unallocated where the file system
 /// supports it.
 fn copy_sparse(src: &Path, dst: &Path) -> Result<()> {
-    const BLOCK: usize = 64 << 10;
     let mut from = File::open(src)?;
     let to = File::options().write(true).create_new(true).open(dst)?;
     // Sized first: APFS allocates the gap when a write goes past the end,
     // but not the holes a truncate leaves.
     to.set_len(from.metadata()?.len())?;
-    let mut buf = vec![0; BLOCK];
+    let mut buf = vec![0; SPARSE_BLOCK];
     let mut offset = 0;
     loop {
         let n = read_full(&mut from, &mut buf)?;
@@ -217,7 +219,7 @@ fn copy_sparse(src: &Path, dst: &Path) -> Result<()> {
             to.write_all_at(&buf[..n], offset)?;
         }
         offset += n as u64;
-        if n < BLOCK {
+        if n < SPARSE_BLOCK {
             break;
         }
     }

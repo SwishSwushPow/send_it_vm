@@ -322,20 +322,7 @@ fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let image = &project_vm::image(paths, project, settings.image.as_ref());
     let base_dir = paths.image_dir(image);
-    let base_state = match provision::base_state(paths, image)? {
-        BaseState::Missing => format!("run `{}`", provision::command(image, false)),
-        BaseState::Outdated => {
-            format!(
-                "outdated; `{}` rebuilds it",
-                provision::command(image, true)
-            )
-        }
-        BaseState::ScriptsChanged => format!(
-            "custom scripts changed; `{}` rebuilds it",
-            provision::command(image, true)
-        ),
-        BaseState::Current => "provisioned".to_string(),
-    };
+    let base_state = provision::base_state(paths, image)?.describe(image);
     let vm_dir = project_vm::dir(paths, project);
     let state = if !vm_dir.path().exists() {
         "not created".to_string()

@@ -267,16 +267,9 @@ pub fn delete(dir: &VmDir) -> Result<()> {
 }
 
 fn create(paths: &Paths, project: &Project, dir: &VmDir, image: &ImageName) -> Result<()> {
-    match provision::base_state(paths, image)? {
-        BaseState::Missing => bail!(
-            "the {image} image isn't provisioned yet; run `{}` first",
-            provision::command(image, false)
-        ),
-        BaseState::Outdated => bail!(
-            "the {image} image is outdated; rebuild it with `{}`",
-            provision::command(image, true)
-        ),
-        BaseState::ScriptsChanged | BaseState::Current => {}
+    let state = provision::base_state(paths, image)?;
+    if matches!(state, BaseState::Missing | BaseState::Outdated) {
+        bail!("the {image} image is {}", state.describe(image));
     }
     let base = VmDir::new(paths.image_dir(image));
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
