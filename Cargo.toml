@@ -8,10 +8,12 @@ repository = "https://github.com/SwishSwushPow/send_it_vm"
 readme = "README.md"
 keywords = ["vm", "virtualization", "macos", "sandbox", "debian"]
 categories = ["command-line-utilities", "virtualization", "development-tools"]
-# The linker wrapper only signs builds in this repository; installed binaries
-# sign themselves (see src/sign.rs). The config and the script go together:
-# the config alone would point the linker at a missing file.
-exclude = [".cargo/", "scripts/", "provision-scripts/", "tests/", ".gitignore", ".github"]
+# Only what the crate builds from, so nothing else in the working directory
+# (such as VM disk images) can end up in a package. Cargo.toml and Cargo.lock
+# are always included. The linker wrapper (.cargo/ and scripts/) stays out:
+# it only signs builds in this repository, and installed binaries sign
+# themselves (see src/sign.rs), which needs entitlements.plist.
+include = ["/src/", "/entitlements.plist", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 [[bin]]
 name = "sendit"
