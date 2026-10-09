@@ -38,7 +38,7 @@ pub enum Command {
         #[command(flatten)]
         resources: Resources,
     },
-    /// Boot the project's VM and attach to its console
+    /// Boot the project's VM and attach to its console, or run a command in it
     Run(RunArgs),
     /// Open an SSH session to the project's running VM
     Ssh {

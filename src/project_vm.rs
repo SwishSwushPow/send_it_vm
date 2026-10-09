@@ -597,7 +597,7 @@ fn create(
             eprintln!(
                 "Creating {} as a copy of the VM of {}",
                 paths.display(dir.path()),
-                metadata.project_path.display()
+                paths.display(&metadata.project_path)
             );
             (
                 parent.path().to_path_buf(),

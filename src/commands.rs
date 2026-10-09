@@ -93,10 +93,11 @@ pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
     if project_vm::state(&dir)? != State::Stopped {
         bail!("the VM is running; stop it first with `sendit stop`");
     }
-    let next = match project_vm::parent(paths, project) {
+    let parent = project_vm::parent(paths, project).and_then(|p| project_vm::metadata(&p).ok());
+    let next = match parent {
         Some(parent) => format!(
-            "of {} if it is stopped then, else of the base image",
-            paths.display(parent.path())
+            "of the VM of {}, or of the base image if that is running then",
+            paths.display(&parent.project_path)
         ),
         None => "of the base image".to_string(),
     };
