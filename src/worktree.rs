@@ -120,7 +120,8 @@ pub fn open(dir: &Path, branch: &str, from: Option<&str>, path: Option<&Path>) -
     } else {
         add.args(["-b", branch]).arg(&path).args(from);
     }
-    util::run(&mut add)?;
+    // Its report goes with sendit's own: stdout is the command's.
+    util::run(add.stdout(std::io::stderr()))?;
     Ok(path.canonicalize()?)
 }
 
