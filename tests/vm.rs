@@ -147,7 +147,8 @@ fn custom_env() -> &'static Env {
                 "a failing custom script didn't fail the build"
             );
             ensure!(
-                !env.cache().join("images/broken").exists(),
+                !env.cache().join("images/broken").exists()
+                    && !env.cache().join("images/.broken.partial").exists(),
                 "the failed build left an image behind"
             );
             let log = env.cache().join("provision/broken/console.log");

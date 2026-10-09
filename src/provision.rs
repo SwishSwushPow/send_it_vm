@@ -386,11 +386,6 @@ fn provision(
     let token = random_token()?;
     let seed = build_seed_iso(&work, &public_key, &root_public_key, &scripts, &token)?;
 
-    let partial = VmDir::new(paths.image_partial_dir(name));
-    util::fresh_dir(partial.path())?;
-    image::clone_file(&image, &partial.disk())?;
-    image::grow_disk(&partial.disk(), BASE_DISK_SIZE)?;
-
     let log = work.join("console.log");
     eprintln!(
         "Provisioning the {name} image ({} CPUs, {} memory). This takes a few minutes; \
@@ -416,15 +411,28 @@ fn provision(
         }),
         shutdown: None,
     };
-    report();
-    vm::run(&partial, &spec)?;
 
-    let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
-    ensure!(
-        String::from_utf8_lossy(&output).contains(&format!("{SUCCESS_SENTINEL} {token}")),
-        "provisioning failed; see {} for details",
-        paths.display(&log)
-    );
+    let partial = VmDir::new(paths.image_partial_dir(name));
+    util::fresh_dir(partial.path())?;
+    let built = (|| {
+        image::clone_file(&image, &partial.disk())?;
+        image::grow_disk(&partial.disk(), BASE_DISK_SIZE)?;
+        report();
+        vm::run(&partial, &spec)?;
+        let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
+        ensure!(
+            String::from_utf8_lossy(&output).contains(&format!("{SUCCESS_SENTINEL} {token}")),
+            "provisioning failed; see {} for details",
+            paths.display(&log)
+        );
+        Ok(())
+    })();
+    if let Err(e) = built {
+        // Its disk holds gigabytes by the time a script fails; the console
+        // log tells what went wrong.
+        let _ = fs::remove_dir_all(partial.path());
+        return Err(e);
+    }
 
     let marker = toml::to_string(&Marker {
         revision: BASE_REVISION,

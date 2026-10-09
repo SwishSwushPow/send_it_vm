@@ -24,6 +24,7 @@
 - `sendit stop` no longer signals whichever process now has the PID of the VM's last run while `sendit reset` or `prune` deletes the VM, or a git worktree's VM is copied from it.
 - A crash or power cut during a VM's first boot can no longer leave its MAC address or machine identifier file empty, which kept the VM from starting again.
 - `sendit run` reports that it failed to the terminal also when it fails before the VM starts, e.g. because the image isn't provisioned or the VM is already running.
+- A failed `sendit provision` deletes the image it was building, which took up gigabytes in `~/.cache/sendit/images/` until the image was built again. The console log stays.
 
 ## 0.6.0 - 2026-10-09
 

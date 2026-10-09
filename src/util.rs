@@ -42,7 +42,7 @@ pub fn read_dir(dir: &Path) -> Result<impl Iterator<Item = io::Result<fs::DirEnt
 
 /// Creates `dir` empty, deleting whatever was there before.
 pub fn fresh_dir(dir: &Path) -> Result<()> {
-    let _ = fs::remove_dir_all(dir);
+    if_exists(fs::remove_dir_all(dir)).with_context(|| format!("deleting {}", dir.display()))?;
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
 }
 
