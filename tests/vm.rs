@@ -830,6 +830,9 @@ fn runs_commands_over_ssh() {
     assert!(!second.status.success());
     let stderr = text(&second.stderr);
     assert!(stderr.contains("already running"), "{stderr}");
+    // With a command, the way to run it there.
+    let second = project.sendit(&["run", "echo", "a b"]);
+    assert_fails_with(&second, "ssh echo 'a b'` runs the command there");
 
     // ~/.ssh/config may forward the agent or ports to every host, so
     // `sendit ssh` leaves it out. ssh finds it through the user database,

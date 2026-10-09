@@ -182,7 +182,7 @@ pub fn run(
         // Rather now than after booting.
         login(paths, false)?;
     }
-    let _lock = lock(&dir)?;
+    let _lock = lock(&dir, project, command)?;
     // The VM starts now: its boot and banner come first on the screen. A
     // command's output follows on from what is there, like any command's.
     if command.is_empty() {
@@ -655,10 +655,24 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
 
 /// Makes sure only one process runs a VM at a time; two would corrupt its
 /// disk. The lock is released when the returned file is closed, even if the
-/// process dies.
-fn lock(dir: &VmDir) -> Result<File> {
+/// process dies. If the VM is running, the error says how to reach it, to
+/// run `command` there or else open a shell.
+fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<File> {
     let Some(mut file) = try_lock(dir)? else {
-        bail!("this project's VM is already running; `sendit ssh` opens another shell in it");
+        // Run elsewhere, e.g. with --worktree, `sendit ssh` needs the
+        // project too.
+        let here = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
+        let mut ssh = match here {
+            Ok(cwd) if cwd == project.root => "sendit ssh".to_string(),
+            _ => format!("sendit -C {} ssh", quote(&project.root.to_string_lossy())),
+        };
+        let does = if command.is_empty() {
+            "opens another shell in it"
+        } else {
+            ssh = format!("{ssh} {}", shell_command(command));
+            "runs the command there"
+        };
+        bail!("this project's VM is already running; `{ssh}` {does}");
     };
     file.set_len(0)?;
     write!(file, "{}", std::process::id())?;
@@ -772,7 +786,7 @@ mod tests {
 
         // Running: nothing unless the user agrees to the base image, which
         // isn't there.
-        let running = lock(&parent).unwrap();
+        let running = lock(&parent, &wt, &[]).unwrap();
         assert_eq!(
             create(&paths, &wt, &vm, &rust, &no).unwrap(),
             Created::Declined
@@ -815,6 +829,34 @@ mod tests {
             .collect();
         words.pop();
         words
+    }
+
+    #[test]
+    fn points_to_ssh_while_running() {
+        let temp = crate::util::TempDir::new("vm-running");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        fs::create_dir_all(vm.path()).unwrap();
+        let _running = lock(&vm, &project, &[]).unwrap();
+        let error = |command: &[&str]| {
+            let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+            lock(&vm, &project, &command).unwrap_err().to_string()
+        };
+        // Tests don't run in the project, so it is named.
+        let ssh = format!("sendit -C {} ssh", quote(&temp.path().to_string_lossy()));
+        let shell = error(&[]);
+        assert!(
+            shell.ends_with(&format!("`{ssh}` opens another shell in it")),
+            "{shell}"
+        );
+        let command = error(&["cargo", "test", "it's"]);
+        assert!(
+            command.ends_with(&format!(
+                "`{ssh} cargo test 'it'\\''s'` runs the command there"
+            )),
+            "{command}"
+        );
     }
 
     #[test]
