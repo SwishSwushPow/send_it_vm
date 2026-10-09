@@ -48,7 +48,8 @@ pub fn main_worktree(root: &Path) -> Option<PathBuf> {
 /// needed: the one `branch` is checked out in, else a new one at `path`,
 /// by default `<main>.worktrees/<branch>` next to the main worktree. A new
 /// branch starts at `from`, else HEAD; one that only a single remote has
-/// tracks it, as with `git checkout`.
+/// tracks it, as with `git checkout`, and one that several remotes have
+/// needs `from` to pick one.
 pub fn open(dir: &Path, branch: &str, from: Option<&str>, path: Option<&Path>) -> Result<PathBuf> {
     let top = git(dir, &["rev-parse", "--show-toplevel"])
         .with_context(|| format!("finding the git repository of {}", dir.display()))?;
@@ -105,17 +106,21 @@ pub fn open(dir: &Path, branch: &str, from: Option<&str>, path: Option<&Path>) -
             &format!("refs/remotes/*/{branch}"),
         ],
     )?;
-    let remote = remotes
+    let remotes = remotes
         .split(|&b| b == b'\n')
         .filter(|l| !l.is_empty())
-        .count()
-        == 1;
+        .count();
     let mut add = Command::new("git");
     add.arg("-C").arg(&main).args(["worktree", "add"]);
     if local {
         ensure!(from.is_none(), "{}", exists("exists already"));
         add.arg(&path).arg(branch);
-    } else if remote && from.is_none() {
+    } else if remotes > 0 && from.is_none() {
+        // A new branch from HEAD would hardly be what was meant.
+        ensure!(
+            remotes == 1,
+            "{branch} is a branch of several remotes; pick one with --from <remote>/{branch}"
+        );
         add.arg(&path).arg(branch);
     } else {
         add.args(["-b", branch]).arg(&path).args(from);
@@ -336,6 +341,27 @@ mod tests {
 
         assert!(open(&repo, "a..b", None, None).is_err());
         assert!(open(temp.path(), "x", None, None).is_err());
+    }
+
+    #[test]
+    fn tracks_remote_branches() {
+        let temp = TempDir::new("worktree-remote");
+        let repo = repo(temp.path());
+        let upstream = |dir: &Path| git_in(dir, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+        for remote in ["a", "b"] {
+            git_in(&repo, &["remote", "add", remote, "/nonexistent"]);
+        }
+        git_in(&repo, &["update-ref", "refs/remotes/a/x", "HEAD"]);
+        let x = open(&repo, "x", None, None).unwrap();
+        assert_eq!(upstream(&x), "a/x");
+
+        // Not guessing between remotes.
+        git_in(&repo, &["update-ref", "refs/remotes/a/y", "HEAD"]);
+        git_in(&repo, &["update-ref", "refs/remotes/b/y", "HEAD"]);
+        let error = open(&repo, "y", None, None).unwrap_err();
+        assert!(error.to_string().contains("--from <remote>/y"), "{error:#}");
+        let y = open(&repo, "y", Some("b/y"), None).unwrap();
+        assert_eq!(upstream(&y), "b/y");
     }
 
     #[test]
