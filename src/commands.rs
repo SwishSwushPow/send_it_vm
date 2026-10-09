@@ -21,14 +21,15 @@ use crate::vm::{self, VmDir};
 /// contain or sit inside sendit's own state. Through those the VM could
 /// become root (the root SSH key), add shares on the next run (the config
 /// file) or run commands as root on the next boot (a VM's mount script).
-/// Read-only shares count too: reading the root key is enough.
-pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<bool> {
+/// Read-only shares count too: reading the root key is enough. Fails with
+/// `Declined` if the user says no.
+pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
     let risky = risky_shares(paths, &settings.mounts);
     if risky.is_empty() {
-        return Ok(true);
+        return Ok(());
     }
     let list: String = risky.iter().map(|line| format!("\n  {line}")).collect();
-    confirm(
+    confirmed(
         &format!(
             "These shares let the VM get around its limits, e.g. become root or run \
              commands on this Mac:{list}\nShare them anyway?"
@@ -105,10 +106,11 @@ pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
         "Delete {} and everything stored in it? The next `run` starts from a fresh copy {next}.",
         paths.display(dir.path())
     );
-    if yes || confirm(&question, PASS_YES)? {
-        project_vm::delete(&dir)?;
-        eprintln!("Deleted {}.", paths.display(dir.path()));
+    if !yes {
+        confirmed(&question, PASS_YES)?;
     }
+    project_vm::delete(&dir)?;
+    eprintln!("Deleted {}.", paths.display(dir.path()));
     Ok(())
 }
 
@@ -277,12 +279,13 @@ pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
         1 => "1 VM".to_string(),
         n => format!("{n} VMs"),
     };
-    if yes || confirm(&format!("Delete {count}?"), PASS_YES)? {
-        for (dir, _) in orphans.iter().chain(&old).chain(&others) {
-            project_vm::delete(dir)?;
-        }
-        eprintln!("Deleted {count}.");
+    if !yes {
+        confirmed(&format!("Delete {count}?"), PASS_YES)?;
     }
+    for (dir, _) in orphans.iter().chain(&old).chain(&others) {
+        project_vm::delete(dir)?;
+    }
+    eprintln!("Deleted {count}.");
     Ok(())
 }
 
@@ -316,6 +319,28 @@ fn project_dir(path: &Path) -> ProjectDir {
 }
 
 const PASS_YES: &str = "not asking for confirmation without a terminal; pass --yes";
+
+/// The user answered no to a question, so nothing was done. `main` exits
+/// with 1 for it, without a message: the user knows.
+#[derive(Debug)]
+pub struct Declined;
+
+impl std::fmt::Display for Declined {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("declined")
+    }
+}
+
+impl std::error::Error for Declined {}
+
+/// Like `confirm`, but fails with `Declined` unless the answer is yes.
+fn confirmed(question: &str, no_terminal: &str) -> Result<()> {
+    if confirm(question, no_terminal)? {
+        Ok(())
+    } else {
+        Err(Declined.into())
+    }
+}
 
 /// Asks a yes/no question on the terminal; "no" unless the answer is yes.
 /// Fails with `no_terminal` if stdin isn't a terminal.

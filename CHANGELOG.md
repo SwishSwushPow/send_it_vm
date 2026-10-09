@@ -13,6 +13,7 @@
 ### Changed
 
 - Commands given to `sendit ssh` run in a login shell, in the project directory, like an interactive session: they find what the provisioning scripts added to the PATH in `~/.profile`. In a terminal, they get one in the VM too, so interactive programs work.
+- Answering no to one of sendit's questions, e.g. whether to share the home directory or to delete a VM, makes it exit with 1, as nothing was done.
 - When the VM is already running, `sendit run` points to `sendit ssh`, or for `sendit run <command>`, to `sendit ssh <command>`, with `-C` if the project isn't the current directory.
 
 ## 0.6.0 - 2026-10-09

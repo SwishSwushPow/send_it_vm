@@ -15,15 +15,30 @@ mod util;
 mod vm;
 mod worktree;
 
+use std::process::ExitCode;
+
 use anyhow::Result;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
-use crate::commands::PruneScope;
+use crate::commands::{Declined, PruneScope};
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
+    match sendit() {
+        Ok(code) => code,
+        // The user said no to a question; there is nothing to add.
+        Err(e) if e.is::<Declined>() => ExitCode::FAILURE,
+        // As for an error returned from `main`.
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn sendit() -> Result<ExitCode> {
     let cli = Cli::parse();
     sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
@@ -43,7 +58,7 @@ fn main() -> Result<()> {
         Config::load(&paths)?.resolve(&paths, project, cli, &cwd)
     };
 
-    match &cli.command {
+    let done = match &cli.command {
         Command::Status => {
             let project = project()?;
             let settings = resolve(&project, &Settings::default())?;
@@ -60,14 +75,10 @@ fn main() -> Result<()> {
                 None => project()?,
             };
             let settings = resolve(&project, &args.settings())?;
-            if !commands::confirm_shares(&paths, &settings)? {
-                return Ok(());
-            }
+            commands::confirm_shares(&paths, &settings)?;
             let code = project_vm::run(&paths, &project, &settings, &args.command)?;
-            if code != 0 {
-                std::process::exit(code);
-            }
-            Ok(())
+            // Exit codes and 128 plus a signal number fit.
+            return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }
         Command::Provision {
             image,
@@ -102,5 +113,6 @@ fn main() -> Result<()> {
             };
             commands::prune(&paths, scope, *yes)
         }
-    }
+    };
+    done.map(|()| ExitCode::SUCCESS)
 }

@@ -156,10 +156,7 @@ pub fn run(
     let mut note = None;
     if !dir.path().exists() {
         let image = image(paths, project, settings.image.as_ref());
-        match create(paths, project, &dir, &image, &commands::confirm)? {
-            Created::Made(made_note) => note = made_note,
-            Created::Declined => return Ok(0),
-        }
+        note = create(paths, project, &dir, &image, &commands::confirm)?;
     }
     let metadata = metadata(&dir)?;
     if let Some(image) = &settings.image {
@@ -515,15 +512,15 @@ type Ask<'a> = &'a dyn Fn(&str, &str) -> Result<bool>;
 /// The parent VM, locked, if the project has one and it can be copied for
 /// `image`; else the base image, with a note why if there is a parent.
 /// While the parent runs, the base image only if the user agrees, else
-/// `None`.
+/// `commands::Declined`.
 fn source(
     paths: &Paths,
     project: &Project,
     image: &ImageName,
     ask: Ask,
-) -> Result<Option<(Source, Option<String>)>> {
+) -> Result<(Source, Option<String>)> {
     let Some(parent) = parent(paths, project) else {
-        return Ok(Some((Source::Base, None)));
+        return Ok((Source::Base, None));
     };
     let why_not = match metadata(&parent) {
         Err(e) => format!("{e:#}"),
@@ -536,7 +533,7 @@ fn source(
                     metadata,
                     _lock: lock,
                 };
-                return Ok(Some((source, None)));
+                return Ok((source, None));
             }
             None => {
                 let main = paths.display(&metadata.project_path);
@@ -550,12 +547,12 @@ fn source(
                      copy of it, or confirm in a terminal to start from the {image} image"
                 );
                 if ask(&question, &no_terminal)? {
-                    return Ok(Some((Source::Base, None)));
+                    return Ok((Source::Base, None));
                 }
                 eprintln!(
                     "Stop it (`sendit stop` in {main}), then run again to start from a copy."
                 );
-                return Ok(None);
+                return Err(commands::Declined.into());
             }
         },
     };
@@ -563,31 +560,20 @@ fn source(
         "This VM started from the {image} image, not as a copy of {}: {why_not}.",
         paths.display(parent.path())
     );
-    Ok(Some((Source::Base, Some(note))))
-}
-
-/// What `create` did.
-#[derive(Debug, PartialEq)]
-enum Created {
-    /// Made the VM, with a note on why it isn't a copy of its parent VM if
-    /// it has one.
-    Made(Option<String>),
-    /// Left it: the parent VM runs and the user would rather wait for it.
-    Declined,
+    Ok((Source::Base, Some(note)))
 }
 
 /// Creates the project's VM as a copy of its parent VM, or else of the base
-/// image, asking with `ask` first if the parent is running.
+/// image, asking with `ask` first if the parent is running. Returns a note
+/// on why it isn't a copy of its parent VM if it has one.
 fn create(
     paths: &Paths,
     project: &Project,
     dir: &VmDir,
     image: &ImageName,
     ask: Ask,
-) -> Result<Created> {
-    let Some((source, note)) = source(paths, project, image, ask)? else {
-        return Ok(Created::Declined);
-    };
+) -> Result<Option<String>> {
+    let (source, note) = source(paths, project, image, ask)?;
     let (from, base_revision, copy_of) = match &source {
         Source::Parent {
             dir: parent,
@@ -633,7 +619,7 @@ fn create(
 
     fs::rename(partial.path(), dir.path())
         .with_context(|| format!("moving the new VM to {}", dir.path().display()))?;
-    Ok(Created::Made(note))
+    Ok(note)
 }
 
 /// Grows the disk to the configured size; the guest grows its root
@@ -787,10 +773,8 @@ mod tests {
         // Running: nothing unless the user agrees to the base image, which
         // isn't there.
         let running = lock(&parent, &wt, &[]).unwrap();
-        assert_eq!(
-            create(&paths, &wt, &vm, &rust, &no).unwrap(),
-            Created::Declined
-        );
+        let declined = create(&paths, &wt, &vm, &rust, &no).unwrap_err();
+        assert!(declined.is::<commands::Declined>(), "{declined:#}");
         assert!(!vm.path().exists());
         let error = create(&paths, &wt, &vm, &rust, &yes).unwrap_err();
         assert!(error.to_string().contains("rust image"), "{error:#}");
@@ -800,10 +784,7 @@ mod tests {
         let go: ImageName = "go".parse().unwrap();
         assert!(create(&paths, &wt, &vm, &go, &never).is_err());
 
-        assert_eq!(
-            create(&paths, &wt, &vm, &rust, &never).unwrap(),
-            Created::Made(None)
-        );
+        assert_eq!(create(&paths, &wt, &vm, &rust, &never).unwrap(), None);
         assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "disk");
         assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "efi");
         let metadata = metadata(&vm).unwrap();
