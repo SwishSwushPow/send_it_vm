@@ -1,6 +1,7 @@
 //! Tests that drive the sendit binary without booting VMs, so they run in
-//! CI: what it says in a home without images or VMs, how it reports bad
-//! configuration, which shares it refuses, and how it signs itself.
+//! CI: what it says in a home without images or VMs, how it lists them
+//! (made up for the test), how it reports bad configuration, which shares
+//! it refuses, and how it signs itself.
 //!
 //! Each test gets a scratch home and project directory of its own in
 //! `target/tmp/cli-tests/<test>/`.
@@ -158,6 +159,94 @@ fn has_nothing_to_list_or_remove_without_vms() {
         &env.sendit(&["ssh", "--", "true"]),
         "the VM is not running; start it with `sendit run`",
     );
+}
+
+#[test]
+fn lists_vms_and_images() {
+    let env = Env::new("listing");
+    let vms = env.home.join(".sendit");
+    let images = env.home.join(".cache/sendit/images");
+    // From a base revision no sendit has yet, so never outdated.
+    fs::create_dir_all(images.join("rust")).unwrap();
+    fs::write(
+        images.join("rust/provisioned.toml"),
+        "revision = 999\ncustom_scripts = []\n",
+    )
+    .unwrap();
+    fs::write(images.join("rust/disk.img"), vec![1; 8192]).unwrap();
+    let vm = |name: &str, uuid: &str, metadata: Option<(&Path, &str, u32)>| {
+        let dir = vms.join(format!("{name}_6ba7b811-9dad-11d1-80b4-00c04fd430{uuid}"));
+        fs::create_dir_all(&dir).unwrap();
+        if let Some((project, image, revision)) = metadata {
+            fs::write(
+                dir.join("project.toml"),
+                format!(
+                    "project_path = \"{}\"\nimage = \"{image}\"\nbase_revision = {revision}\n",
+                    project.display()
+                ),
+            )
+            .unwrap();
+        }
+        dir
+    };
+    let gone = env.home.parent().unwrap().join("gone");
+    vm("app", "c1", Some((&env.project, "rust", 999)));
+    vm("gone", "c2", Some((&gone, "rust", 999)));
+    vm("old", "c3", Some((&env.project, "default", 0)));
+    vm("broken", "c4", None);
+
+    let (list, _) = env.ok(&["list"]);
+    let rows: Vec<Vec<_>> = list
+        .lines()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    let project = env.project.display().to_string();
+    let gone = gone.display().to_string();
+    assert_eq!(
+        rows,
+        [
+            vec!["STATE", "DISK", "IMAGE", "PROJECT"],
+            vec!["stopped", "0", "B", "rust", &project],
+            vec![
+                "stopped",
+                "0",
+                "B",
+                "?",
+                "?",
+                "(~/.sendit/broken_6ba7b811-9dad-11d1-80b4-00c04fd430c4)"
+            ],
+            vec!["stopped", "0", "B", "rust", &gone, "(missing)"],
+            vec!["outdated", "0", "B", "default", &project],
+        ],
+        "{list}"
+    );
+
+    let (images, _) = env.ok(&["images"]);
+    let rows: Vec<Vec<_>> = images
+        .lines()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["IMAGE", "STATE", "DISK", "VMS"],
+            vec!["default", "missing", "-", "1"],
+            vec!["rust", "provisioned", "8.0", "KiB", "2"],
+        ],
+        "{images}"
+    );
+
+    // Without a terminal, prune only lists what it would delete.
+    let output = env.sendit(&["prune"]);
+    assert_fails_with(&output, "pass --yes");
+    assert_fails_with(
+        &output,
+        &format!("VMs whose project directory no longer exists:\n  {gone}  (~/.sendit/gone_"),
+    );
+    let (_, deleted) = env.ok(&["prune", "--yes"]);
+    assert!(deleted.ends_with("Deleted 1 VM.\n"), "{deleted}");
+    let (list, _) = env.ok(&["list"]);
+    assert!(!list.contains(&gone), "{list}");
 }
 
 #[test]
