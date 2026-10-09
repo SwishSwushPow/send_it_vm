@@ -168,7 +168,7 @@ pub struct VmSpec {
     pub seed: Option<PathBuf>,
     pub console: ConsoleMode,
     /// Set from another thread to shut the VM down, as if Ctrl-] had been
-    /// pressed.
+    /// pressed once: setting it again doesn't force the VM off.
     pub shutdown: Option<Arc<AtomicBool>>,
 }
 
@@ -309,15 +309,18 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         }
 
         let escapes = console.escapes() + SIGNALS.load(Ordering::Relaxed);
+        let escaped = escapes > seen_escapes;
+        seen_escapes = escapes;
+        // Unlike pressing Ctrl-] again, asking again doesn't force the VM
+        // off: a command run over SSH ends when the guest shuts down, and
+        // asks once more then.
         let shutdown =
             (spec.shutdown.as_ref()).is_some_and(|flag| flag.swap(false, Ordering::Relaxed));
-        let escaped = escapes > seen_escapes || shutdown;
-        seen_escapes = escapes;
         // Provisioning ends with the guest shutting down, which must not be
         // cut short.
         let guest_stopping = !provisioning && console.guest_stopping();
         stopping = match stopping {
-            Stopping::No if escaped => {
+            Stopping::No if escaped || shutdown => {
                 let next = stop(&vm, &state, stopping_notice);
                 if matches!(next, Stopping::Pending) {
                     notice("The VM is still starting; it shuts down once it can.");

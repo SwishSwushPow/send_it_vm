@@ -889,6 +889,16 @@ fn runs_a_command_instead_of_the_console() {
     assert_eq!(output.status.code(), Some(3), "{stderr}");
     // The VM shut down when the command ended.
     assert!(project.ok(&["status"]).contains("stopped"));
+
+    // Stopped meanwhile, the guest shuts down cleanly: its shutdown ends
+    // the command, which doesn't count as asking twice.
+    let mut vm = project.run(&["sleep", "600"]);
+    project.ok(&["stop"]);
+    let status = wait_timeout(&mut vm.child, STOP_TIMEOUT).unwrap();
+    let log = fs::read_to_string(&vm.log).unwrap();
+    assert!(!log.contains("Forcing"), "{log}");
+    // ssh's, for the connection the guest closed.
+    assert_eq!(status.code(), Some(255), "{log}");
 }
 
 #[test]
