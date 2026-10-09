@@ -49,6 +49,9 @@ pub struct Metadata {
     pub project_path: PathBuf,
     pub image: ImageName,
     pub base_revision: u32,
+    /// The project whose VM this one was made as a copy of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<PathBuf>,
 }
 
 impl Metadata {
@@ -408,7 +411,7 @@ fn create(
     let Some((source, note)) = source(paths, project, image, ask)? else {
         return Ok(Created::Declined);
     };
-    let (from, base_revision) = match &source {
+    let (from, base_revision, copy_of) = match &source {
         Source::Parent {
             dir: parent,
             metadata,
@@ -419,7 +422,11 @@ fn create(
                 paths.display(dir.path()),
                 metadata.project_path.display()
             );
-            (parent.path().to_path_buf(), metadata.base_revision)
+            (
+                parent.path().to_path_buf(),
+                metadata.base_revision,
+                Some(metadata.project_path.clone()),
+            )
         }
         Source::Base => {
             let state = provision::base_state(paths, image)?;
@@ -430,7 +437,7 @@ fn create(
                 "Creating {} from the {image} image",
                 paths.display(dir.path())
             );
-            (paths.image_dir(image), provision::BASE_REVISION)
+            (paths.image_dir(image), provision::BASE_REVISION, None)
         }
     };
     let from = VmDir::new(from);
@@ -443,6 +450,7 @@ fn create(
         project_path: project.root.clone(),
         image: image.clone(),
         base_revision,
+        copy_of,
     })?;
     fs::write(partial.metadata(), metadata)?;
 
@@ -554,6 +562,7 @@ mod tests {
             project_path: main.root.clone(),
             image: "rust".parse().unwrap(),
             base_revision: provision::BASE_REVISION,
+            copy_of: None,
         };
         fs::write(parent.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
         fs::write(parent.disk(), "disk").unwrap();
@@ -576,6 +585,7 @@ mod tests {
         let temp = crate::util::TempDir::new("vm-fork");
         let paths = Paths::new(temp.path().join("home"));
         let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        let parent_project = temp.path().join("main");
         let rust: ImageName = "rust".parse().unwrap();
         let vm = dir(&paths, &wt);
 
@@ -608,6 +618,7 @@ mod tests {
         let metadata = metadata(&vm).unwrap();
         assert_eq!(metadata.project_path, wt.root);
         assert_eq!(metadata.image, rust);
+        assert_eq!(metadata.copy_of.as_ref(), Some(&parent_project));
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
         assert_eq!(state(&parent).unwrap(), State::Stopped);

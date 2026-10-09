@@ -106,7 +106,7 @@ When `image` or `--image` picks a different image than the VM was made from, `se
 
 ### Git worktrees
 
-A linked worktree (`git worktree add`) gets its own VM, like any other directory. If the main worktree has a VM and it is stopped, the worktree's VM starts as a copy of it instead of the base image: with everything installed, logged into and cached there, e.g. `~/.cargo/registry`. The copy is instant and takes no space until either VM writes. A copy of a running VM's disk could miss what the VM hasn't written out yet, so while the main worktree's VM runs, `sendit run` asks whether to start from the base image instead; the default is no, to stop the main worktree's VM first. Both VMs keep the same SSH host keys and machine ID.
+A linked worktree (`git worktree add`) gets its own VM, like any other directory. If the main worktree has a VM and it is stopped, the worktree's VM starts as a copy of it instead of the base image: with everything installed, logged into and cached there, e.g. `~/.cargo/registry`. The copy is instant and takes no space until either VM writes. A copy of a running VM's disk could miss what the VM hasn't written out yet, so while the main worktree's VM runs, `sendit run` asks whether to start from the base image instead; the default is no, to stop the main worktree's VM first. Both VMs keep the same SSH host keys and machine ID. Without a `[projects."<path>"]` table of its own, a worktree uses its main worktree's. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
 
 ## Limits
 

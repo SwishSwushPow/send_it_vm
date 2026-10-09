@@ -4,7 +4,8 @@
 //! Layers, lowest to highest precedence: built-in defaults, top-level keys of
 //! the config file, the `[images.<name>]` table of the VM's image along with
 //! the mounts its custom scripts ask for, the matching `[projects."<path>"]`
-//! table, CLI flags. Scalars are overridden by higher layers; mounts
+//! table (for a linked git worktree without one, its main worktree's), CLI
+//! flags. Scalars are overridden by higher layers; mounts
 //! accumulate across layers.
 //! Provisioning a base image takes its CPUs and memory from the top-level
 //! keys, then the `[provision]` table, then the image's `[provision.<name>]`
@@ -20,7 +21,7 @@ use clap::Args;
 use serde::Deserialize;
 
 use crate::paths::{ImageName, Paths, Project};
-use crate::{project_vm, provision, util};
+use crate::{project_vm, provision, util, worktree};
 
 const DEFAULT_CPUS: u32 = 2;
 const DEFAULT_MEMORY: ByteSize = ByteSize::gib(4);
@@ -305,13 +306,26 @@ impl Config {
         Ok(util::read_toml(&paths.config_file())?.unwrap_or_default())
     }
 
-    /// The `[projects."<path>"]` table matching `project`, if any. It is an
-    /// error for several tables to match, e.g. `~/app` and `/Users/me/app`.
+    /// The `[projects."<path>"]` table matching `project`, else, for a
+    /// linked git worktree, the one matching its main worktree, if any.
     fn project_settings(&self, paths: &Paths, project: &Project) -> Result<Option<&Settings>> {
+        if let Some(settings) = self.table(paths, &project.root)? {
+            return Ok(Some(settings));
+        }
+        match worktree::main_worktree(&project.root) {
+            Some(main) => self.table(paths, &main),
+            None => Ok(None),
+        }
+    }
+
+    /// The `[projects."<path>"]` table for the directory `root`, if any. It
+    /// is an error for several tables to match, e.g. `~/app` and
+    /// `/Users/me/app`.
+    fn table(&self, paths: &Paths, root: &Path) -> Result<Option<&Settings>> {
         let mut matches = self.projects.iter().filter(|(key, _)| {
             let key = paths.expand_tilde(key);
             let key = key.canonicalize().unwrap_or(key);
-            key == project.root
+            key == root
         });
         let first = matches.next();
         if let (Some((a, _)), Some((b, _))) = (first, matches.next()) {
@@ -319,7 +333,7 @@ impl Config {
                 "[projects.\"{}\"] and [projects.\"{}\"] both configure {}",
                 a.display(),
                 b.display(),
-                project.root.display()
+                root.display()
             );
         }
         Ok(first.map(|(_, settings)| settings))
@@ -978,6 +992,23 @@ mod tests {
         assert!(resolve("", cli("missing:/data")).is_err());
         assert!(resolve("", cli("proj:/mnt/a\nhide /")).is_err());
         assert!(resolve("", cli("proj:/mnt/a ")).is_err());
+    }
+
+    #[test]
+    fn worktrees_fall_back_to_the_main_worktree_table() {
+        let fx = Fixture::new("worktree-table");
+        let (main, wt) = worktree::layout(&fx.dir);
+        let wt = Project::at(&wt).unwrap();
+        let resolve = |config: &str| {
+            Config::parse(config)
+                .unwrap()
+                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir)
+                .unwrap()
+        };
+        let main_table = format!("[projects.\"{}\"]\ncpus = 1\n", main.display());
+        assert_eq!(resolve(&main_table).cpus, 1);
+        let own_table = format!("[projects.\"{}\"]\ncpus = 2\n", wt.root.display());
+        assert_eq!(resolve(&(main_table + &own_table)).cpus, 2);
     }
 
     #[test]

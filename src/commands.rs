@@ -335,11 +335,18 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     let base_dir = paths.image_dir(image);
     let base_state = provision::base_state(paths, image)?.describe(image);
     let vm_dir = project_vm::dir(paths, project);
+    let metadata = project_vm::metadata(&vm_dir).ok();
     let state = if !vm_dir.path().exists() {
-        "not created".to_string()
+        let parent = project_vm::parent(paths, project).and_then(|p| project_vm::metadata(&p).ok());
+        match parent {
+            Some(m) if m.image == *image && !m.outdated() => format!(
+                "not created; `sendit run` copies the VM of {}",
+                paths.display(&m.project_path)
+            ),
+            _ => "not created".to_string(),
+        }
     } else {
-        let metadata = project_vm::metadata(&vm_dir).ok();
-        match (project_vm::state(&vm_dir)?, metadata) {
+        match (project_vm::state(&vm_dir)?, &metadata) {
             (State::Stopped, Some(m)) if m.image != *image => format!(
                 "stopped; made from the {} image, `sendit reset` recreates it from {image}",
                 m.image
@@ -360,6 +367,9 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     );
     println!("project  {}", project.root.display());
     println!("vm       {} ({state})", paths.display(vm_dir.path()));
+    if let Some(copy_of) = metadata.and_then(|m| m.copy_of) {
+        println!("copy of  the VM of {}", paths.display(&copy_of));
+    }
     println!("cpus     {}", settings.cpus);
     println!("memory   {}", settings.memory);
     println!("disk     {} max", settings.disk_size);
