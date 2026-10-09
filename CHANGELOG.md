@@ -20,6 +20,7 @@
 ### Fixed
 
 - Two `sendit provision` running at once no longer break each other's images: the second one waits until the first is done. Building the same image twice at once could leave a base image behind that a provisioning VM was still writing to.
+- `sendit stop` no longer signals whichever process now has the PID of the VM's last run while `sendit reset` or `prune` deletes the VM, or a git worktree's VM is copied from it.
 
 ## 0.6.0 - 2026-10-09
 

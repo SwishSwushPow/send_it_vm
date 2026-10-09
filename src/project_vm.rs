@@ -103,7 +103,8 @@ pub fn metadata(dir: &VmDir) -> Result<Metadata> {
 pub enum State {
     Stopped,
     /// Running under this `sendit run` process. The PID is missing for a
-    /// moment while the process starts up.
+    /// moment while the process starts up, and while another command holds
+    /// the lock to copy or delete the VM.
     Running(Option<u32>),
 }
 
@@ -248,7 +249,7 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
             eprintln!("The VM is not running.");
             return Ok(());
         }
-        State::Running(None) => bail!("the VM is just starting; try again in a moment"),
+        State::Running(None) => bail!("the VM is starting or busy; try again in a moment"),
         State::Running(Some(pid)) => pid,
     };
     // `run` treats SIGTERM like Ctrl-]: it asks the guest to shut down and
@@ -667,12 +668,13 @@ fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<File> {
         };
         bail!("this project's VM is already running; `{ssh}` {does}");
     };
-    file.set_len(0)?;
     write!(file, "{}", std::process::id())?;
     Ok(file)
 }
 
 /// Takes the VM's lock without recording a PID; `None` if the VM is running.
+/// The PID of its last run is cleared: once that process has ended, the PID
+/// may belong to another process, which `stop` would signal.
 fn try_lock(dir: &VmDir) -> Result<Option<File>> {
     let run = dir.run_dir();
     // Not `create_dir_all`: if the VM directory was deleted meanwhile, it
@@ -694,7 +696,11 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
     let mut retries = 0;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
+            Ok(()) => {
+                file.set_len(0)
+                    .with_context(|| format!("clearing {}", path.display()))?;
+                return Ok(Some(file));
+            }
             Err(fs::TryLockError::WouldBlock) if retries < LOCK_RETRIES => {
                 retries += 1;
                 std::thread::sleep(Duration::from_millis(20));
@@ -801,6 +807,28 @@ mod tests {
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
         assert_eq!(state(&parent).unwrap(), State::Stopped);
+    }
+
+    #[test]
+    fn records_the_pid_only_while_running() {
+        let temp = crate::util::TempDir::new("vm-pid");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        fs::create_dir_all(vm.path()).unwrap();
+
+        let running = lock(&vm, &project, &[]).unwrap();
+        assert_eq!(
+            state(&vm).unwrap(),
+            State::Running(Some(std::process::id()))
+        );
+        drop(running);
+        assert_eq!(state(&vm).unwrap(), State::Stopped);
+        // Held to copy or delete the VM, the lock doesn't point at the
+        // process of the last run.
+        let _busy = try_lock(&vm).unwrap().unwrap();
+        assert_eq!(state(&vm).unwrap(), State::Running(None));
+        assert!(stop(&paths, &project).is_err());
     }
 
     /// The words a POSIX shell makes of `line`.
