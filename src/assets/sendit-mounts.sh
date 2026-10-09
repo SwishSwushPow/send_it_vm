@@ -1,5 +1,6 @@
 #!/bin/sh
-# Applies sendit's mount manifest and installs the login message next to it.
+# Applies sendit's mount manifest and installs the login message next to it,
+# and removes the mount points that the manifest no longer has.
 # Runs as root on every boot, started by sendit-mounts.service from the
 # read-only sendit-meta share, so it always matches the sendit version that
 # booted the VM.
@@ -15,6 +16,9 @@ set -u
 user=dev
 status=0
 profile=/etc/profile.d/sendit-workdir.sh
+# The mount points of the last boot. On the VM's disk, so a copy of a VM,
+# e.g. for a git worktree, knows those of the VM it was copied from.
+points=/var/lib/sendit/mount-points
 
 fail() {
     echo "sendit-mounts: $*" >&2
@@ -65,6 +69,31 @@ mkpoint() {
 as_user() {
     setpriv --reuid="$user" --regid="$(id -g "$user")" --clear-groups "$@"
 }
+
+# Removes the mount points of the last boot that this one doesn't use, e.g.
+# of a mount dropped from the config, or in a copy of a worktree's main VM,
+# that VM's project. Only empty ones: rmdir leaves anything written there
+# while nothing was mounted. Runs before anything is mounted, so they are
+# on the VM's disk rather than in a share; and before the user's logins and
+# services, so nothing swaps a directory on the way for a symlink.
+remove_old_points() {
+    [ -f "$points" ] || return 0
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        printf '%s\n' "$current" | grep -qxF -- "$path" && continue
+        if has_symlink "$path" || [ "$(findmnt -n -o TARGET -T "$path")" != / ]; then
+            continue
+        fi
+        case $path in
+            "/home/$user"/*) as_user rmdir -- "$path" 2>/dev/null ;;
+            *) rmdir -- "$path" 2>/dev/null ;;
+        esac && echo "sendit-mounts: removed the unused mount point $path"
+    done < "$points"
+}
+
+# This boot's mount points.
+current=$(sed -n 's/^share [^ ]* [^ ]* //p' "$1")
+remove_old_points
 
 rm -f "$profile"
 cp "$(dirname "$1")/motd" /etc/motd || fail "could not write /etc/motd"
@@ -129,5 +158,11 @@ EOF
         *) fail "unknown manifest line: $kind $rest" ;;
     esac
 done < "$1"
+
+# Even those that failed to mount: they are still meant to be there.
+mkdir -p "$(dirname "$points")" &&
+    printf '%s\n' "$current" > "$points.new" &&
+    mv "$points.new" "$points" ||
+    fail "could not record the mount points in $points"
 
 exit $status

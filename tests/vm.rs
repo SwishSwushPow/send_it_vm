@@ -983,16 +983,17 @@ fn starts_worktree_vms_as_copies() {
         "feature/x",
         "sh",
         "-c",
-        "cat ~/tool; pwd; wc -c < .git",
+        "cat ~/tool; pwd; wc -c < .git; test -e ~/trunk || echo no trunk",
     ]);
     let output = output(run, BOOT_TIMEOUT + STOP_TIMEOUT).unwrap();
     let stderr = text(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     // Only the command's output, none of git's. The worktree's .git file
-    // is hidden like a .git directory.
+    // is hidden like a .git directory, and the main worktree's mount point
+    // is gone.
     assert_eq!(
         text(&output.stdout),
-        "installed\n/home/dev/feature-x\n0\n",
+        "installed\n/home/dev/feature-x\n0\nno trunk\n",
         "{stderr}"
     );
     let status = text(&in_worktree(&["status"]).stdout);
@@ -1050,6 +1051,8 @@ fn shares_the_project_and_mounts() {
 
     // With --expose-git, .git is part of the project share.
     let vm = project.run(&["--expose-git"]);
+    // The mount points of the dropped mounts are gone.
+    vm.fails("test -e /mnt/ro-data || test -e ~/rw");
     assert_eq!(vm.ok("cat ~/shares/.git/HEAD"), "ref: refs/heads/main");
     vm.ok("echo from the guest > ~/shares/.git/guest");
     assert_eq!(

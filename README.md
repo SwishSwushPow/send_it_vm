@@ -54,7 +54,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 
 - `--cpus N`
 - `--memory 8G`
-- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw` is given, mounted at `/mnt/<name>` without `GUEST`. Repeatable. Think twice before `:rw`: the VM can then change files that the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry` or a package in an npm cache.
+- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw` is given, mounted at `/mnt/<name>` without `GUEST`. Repeatable. When a mount is dropped, the next boot removes its mount point if it is empty. Think twice before `:rw`: the VM can then change files that the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry` or a package in an npm cache.
 - `--read-only`: shares the project directory read-only, e.g. to let an agent read code it shouldn't change. Builds that write into the project, such as `target/` or `node_modules/`, fail unless they are pointed elsewhere.
 - `--expose-git`: lets the VM see and change `.git`, including its hooks and config, which git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
