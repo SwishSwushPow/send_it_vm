@@ -24,6 +24,7 @@ use crate::cli::{Cli, Command};
 use crate::commands::{Declined, PruneScope};
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
+use crate::status::Status;
 
 fn main() -> ExitCode {
     match sendit() {
@@ -65,20 +66,27 @@ fn sendit() -> Result<ExitCode> {
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
-            let project = match &args.worktree {
-                Some(branch) => Project::at(&worktree::open(
-                    cli.project.as_deref().unwrap_or(&cwd),
-                    branch,
-                    args.from.as_deref(),
-                    args.worktree_path.as_deref(),
-                )?)?,
-                None => project()?,
-            };
-            let settings = resolve(&project, &args.settings())?;
-            commands::confirm_shares(&paths, &settings)?;
-            let code = project_vm::run(&paths, &project, &settings, &args.command)?;
+            let ran = (|| -> Result<i32> {
+                let project = match &args.worktree {
+                    Some(branch) => Project::at(&worktree::open(
+                        cli.project.as_deref().unwrap_or(&cwd),
+                        branch,
+                        args.from.as_deref(),
+                        args.worktree_path.as_deref(),
+                    )?)?,
+                    None => project()?,
+                };
+                let settings = resolve(&project, &args.settings())?;
+                commands::confirm_shares(&paths, &settings)?;
+                project_vm::run(&paths, &project, &settings, &args.command)
+            })();
+            if let Err(e) = &ran
+                && !e.is::<Declined>()
+            {
+                Status::Error(&format!("{e:#}")).report();
+            }
             // Exit codes and 128 plus a signal number fit.
-            return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
+            return ran.map(|code| ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }
         Command::Provision {
             image,

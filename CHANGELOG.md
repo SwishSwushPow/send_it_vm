@@ -23,6 +23,7 @@
 - Two `sendit provision` running at once no longer break each other's images: the second one waits until the first is done. Building the same image twice at once could leave a base image behind that a provisioning VM was still writing to.
 - `sendit stop` no longer signals whichever process now has the PID of the VM's last run while `sendit reset` or `prune` deletes the VM, or a git worktree's VM is copied from it.
 - A crash or power cut during a VM's first boot can no longer leave its MAC address or machine identifier file empty, which kept the VM from starting again.
+- `sendit run` reports that it failed to the terminal also when it fails before the VM starts, e.g. because the image isn't provisioned or the VM is already running.
 
 ## 0.6.0 - 2026-10-09
 

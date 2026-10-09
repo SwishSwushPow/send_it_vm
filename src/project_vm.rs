@@ -228,17 +228,13 @@ pub fn run(
             .unwrap_or_else(|_| Err(anyhow::anyhow!("running the command panicked"))),
         None => Ok(0),
     };
-    let result = match result {
+    match result {
         Err(e) => Err(e),
         // Stopped by `sendit stop`, Ctrl-C or the terminal going away before
         // the command ended: like a shell reports a command killed by it.
         Ok(Some(signal)) if !command.is_empty() => Ok(128 + signal),
         Ok(_) => code,
-    };
-    if let Err(e) = &result {
-        Status::Error(&format!("{e:#}")).report();
     }
-    result
 }
 
 /// Asks the project's running VM to shut down and waits until it has.
