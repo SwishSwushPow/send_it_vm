@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -198,32 +198,35 @@ pub fn run(
         eprintln!("{note}");
     }
     let shutdown = Arc::new(AtomicBool::new(false));
-    let stopped = Arc::new(AtomicBool::new(false));
-    let runner = (!command.is_empty()).then(|| {
-        let (paths, dir, command) = (paths.clone(), dir.clone(), command.to_vec());
-        let (stopped, shutdown) = (stopped.clone(), shutdown.clone());
-        std::thread::spawn(move || run_command(&paths, &dir, &command, &stopped, &shutdown))
-    });
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
         shares: mounts::prepare(settings, &dir.meta())?,
         seed: None,
-        console: if runner.is_some() {
-            ConsoleMode::Hidden
-        } else {
+        console: if command.is_empty() {
             ConsoleMode::Login
+        } else {
+            ConsoleMode::Hidden
         },
-        shutdown: Some(shutdown),
+        shutdown: Some(shutdown.clone()),
     };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let runner = (!command.is_empty()).then(|| {
+        let (paths, dir, command) = (paths.clone(), dir.clone(), command.to_vec());
+        let stopped = stopped.clone();
+        std::thread::spawn(move || run_command(&paths, &dir, &command, &stopped, &shutdown))
+    });
     let result = vm::run(&dir, &spec);
     stopped.store(true, Ordering::Relaxed);
-    let result = result.and_then(|()| match runner {
+    // Even after an error: ssh mustn't outlive sendit, e.g. keeping the
+    // terminal in raw mode.
+    let code = match runner {
         Some(runner) => runner
             .join()
             .unwrap_or_else(|_| Err(anyhow::anyhow!("running the command panicked"))),
         None => Ok(0),
-    });
+    };
+    let result = result.and(code);
     if let Err(e) = &result {
         Status::Error(&format!("{e:#}")).report();
     }
@@ -402,6 +405,10 @@ fn quote(arg: &str) -> String {
 /// running its command.
 const SSH_WAIT: Duration = Duration::from_secs(120);
 
+/// How long an ssh process may run on once the VM has stopped. One whose
+/// VM was forced off doesn't notice: it would wait for an answer forever.
+const SSH_GRACE: Duration = Duration::from_secs(2);
+
 /// Runs `command` in the VM in `dir` over SSH once it answers, as `sendit
 /// ssh` would, then sets `shutdown`. Gives up once `stopped` is set.
 /// Returns the command's exit code.
@@ -419,13 +426,19 @@ fn run_command(
                 !stopped.load(Ordering::Relaxed),
                 "the VM stopped before the command could run"
             );
-            let answers = ssh_command(paths, dir, false, Remote::Probe).is_ok_and(|mut ssh| {
-                ssh.stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .is_ok_and(|status| status.success())
-            });
+            let answers = match ssh_command(paths, dir, false, Remote::Probe) {
+                Ok(mut ssh) => {
+                    let probe = ssh
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .context("running ssh")?;
+                    wait_for_ssh(probe, stopped)?.is_some_and(|status| status.success())
+                }
+                // No IP address yet.
+                Err(_) => false,
+            };
             if answers {
                 break;
             }
@@ -436,9 +449,11 @@ fn run_command(
             );
             std::thread::sleep(Duration::from_millis(500));
         }
-        let status = ssh_command(paths, dir, false, Remote::Login(command))?
-            .status()
+        let ssh = ssh_command(paths, dir, false, Remote::Login(command))?
+            .spawn()
             .context("running ssh")?;
+        let status = wait_for_ssh(ssh, stopped)?
+            .context("the VM stopped while the command was still running")?;
         // Like a shell reports a command killed by a signal.
         Ok(status
             .code()
@@ -446,6 +461,29 @@ fn run_command(
     })();
     shutdown.store(true, Ordering::Relaxed);
     result
+}
+
+/// Waits until the ssh process `child` exits and returns its status. Once
+/// `stopped` is set, it gets `SSH_GRACE` to exit, then is terminated, and
+/// the result is `None`.
+fn wait_for_ssh(mut child: Child, stopped: &AtomicBool) -> Result<Option<ExitStatus>> {
+    let mut deadline = None;
+    loop {
+        if let Some(status) = child.try_wait().context("waiting for ssh")? {
+            return Ok(Some(status));
+        }
+        if stopped.load(Ordering::Relaxed)
+            && Instant::now() >= *deadline.get_or_insert_with(|| Instant::now() + SSH_GRACE)
+        {
+            // Not SIGKILL: ssh gives the terminal back on SIGTERM.
+            // SAFETY: plain syscall; the child hasn't been waited for, so
+            // its PID can't have been reused.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            child.wait().context("waiting for ssh")?;
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Deletes a stopped VM. It holds the VM's lock meanwhile, so the VM can't
@@ -774,6 +812,21 @@ mod tests {
             .collect();
         words.pop();
         words
+    }
+
+    #[test]
+    fn ends_ssh_once_the_vm_has_stopped() {
+        let stopped = AtomicBool::new(false);
+        let exits = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let status = wait_for_ssh(exits, &stopped).unwrap();
+        assert_eq!(status.and_then(|s| s.code()), Some(3));
+
+        // Like ssh to a VM that was forced off.
+        stopped.store(true, Ordering::Relaxed);
+        let stuck = Command::new("sleep").arg("60").spawn().unwrap();
+        let start = Instant::now();
+        assert_eq!(wait_for_ssh(stuck, &stopped).unwrap(), None);
+        assert!(start.elapsed() < SSH_GRACE + Duration::from_secs(5));
     }
 
     #[test]
