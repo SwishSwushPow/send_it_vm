@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-10-09
 
 ### Added
 
@@ -25,7 +25,7 @@
 
 ### Base image
 
-The base revision is now 10: rebuild images with `sendit provision --all --force`, then delete their VMs with `sendit prune --outdated`. Until then, sendit can't make VMs from the old images or run the VMs made from them.
+The base revision is now 10: rebuild images from 0.5.0 with `sendit provision --all --force`, then delete their VMs with `sendit prune --outdated`. Until then, sendit can't make VMs from the old images or run the VMs made from them.
 
 - Base images boot Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`) instead of the cloud kernel with 4 KiB pages. Under memory pressure on the Mac, VMs running the cloud kernel lost writes to their memory, which crashed programs and the kernel and showed up as I/O errors; so far, none running the 16 KiB kernel have.
 - Base images get a 16 GiB disk instead of 8 GiB, which leaves custom provisioning scripts more room.
