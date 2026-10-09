@@ -28,7 +28,7 @@ use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::status::Status;
 use crate::util;
-use crate::vm::{self, ProvisionLog, VmDir, VmSpec};
+use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
 
 /// Logical size of the base disk. Project VMs grow their clone further, but
 /// can't shrink it, so this is also the smallest disk size they can have.
@@ -412,10 +412,11 @@ fn provision(
         memory: settings.memory,
         shares: Vec::new(),
         seed: Some(seed),
-        provision_log: Some(ProvisionLog {
+        console: ConsoleMode::Provision(ProvisionLog {
             path: log.clone(),
             last_line: token.clone(),
         }),
+        shutdown: None,
     };
     report();
     vm::run(&partial, &spec)?;

@@ -16,10 +16,12 @@
 //! has written its PID there; that is how the other commands find it.
 
 use std::fs::{self, File};
-use std::io::Write;
-use std::os::unix::process::CommandExt;
+use std::io::{IsTerminal, Write};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -33,7 +35,7 @@ use crate::paths::{ImageName, Paths, Project, is_project_id};
 use crate::provision::{self, BaseState};
 use crate::status::Status;
 use crate::util;
-use crate::vm::{self, VmDir, VmSpec, net};
+use crate::vm::{self, ConsoleMode, VmDir, VmSpec, net};
 use crate::worktree;
 
 /// How long `stop` waits for the VM to go away. `run` forces the VM off if
@@ -140,16 +142,23 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
     Ok(dirs)
 }
 
-/// Boots the project's VM, creating it first if needed, and attaches the
-/// console until it stops.
-pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
+/// Boots the project's VM, creating it first if needed, and runs it until
+/// it stops. Without a `command`, the console is attached. With one, the
+/// command runs over SSH once the VM answers, as with `sendit ssh`, and the
+/// VM shuts down when it has ended. Returns its exit code, else 0.
+pub fn run(
+    paths: &Paths,
+    project: &Project,
+    settings: &VmSettings,
+    command: &[String],
+) -> Result<i32> {
     let dir = dir(paths, project);
     let mut note = None;
     if !dir.path().exists() {
         let image = image(paths, project, settings.image.as_ref());
         match create(paths, project, &dir, &image, &commands::confirm)? {
             Created::Made(made_note) => note = made_note,
-            Created::Declined => return Ok(()),
+            Created::Declined => return Ok(0),
         }
     }
     let metadata = metadata(&dir)?;
@@ -169,6 +178,10 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
          the current base image",
         paths.display(dir.path())
     );
+    if !command.is_empty() {
+        // Rather now than after booting.
+        login(paths, false)?;
+    }
     let _lock = lock(&dir)?;
     // The VM starts now: its boot and banner come first on the screen.
     vm::clear_screen();
@@ -184,14 +197,33 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
     if let Some(note) = note {
         eprintln!("{note}");
     }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let runner = (!command.is_empty()).then(|| {
+        let (paths, dir, command) = (paths.clone(), dir.clone(), command.to_vec());
+        let (stopped, shutdown) = (stopped.clone(), shutdown.clone());
+        std::thread::spawn(move || run_command(&paths, &dir, &command, &stopped, &shutdown))
+    });
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
         shares: mounts::prepare(settings, &dir.meta())?,
         seed: None,
-        provision_log: None,
+        console: if runner.is_some() {
+            ConsoleMode::Hidden
+        } else {
+            ConsoleMode::Login
+        },
+        shutdown: Some(shutdown),
     };
     let result = vm::run(&dir, &spec);
+    stopped.store(true, Ordering::Relaxed);
+    let result = result.and_then(|()| match runner {
+        Some(runner) => runner
+            .join()
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("running the command panicked"))),
+        None => Ok(0),
+    });
     if let Err(e) = &result {
         Status::Error(&format!("{e:#}")).report();
     }
@@ -251,13 +283,69 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
         state(&dir)? != State::Stopped,
         "the VM is not running; start it with `sendit run`"
     );
-    let ip = net::vm_ip(&dir)?.with_context(|| {
+    let error = ssh_command(paths, &dir, root, Remote::Login(command))?.exec();
+    Err(error).context("running ssh")
+}
+
+/// What an SSH connection to a VM is for.
+#[derive(Clone, Copy)]
+enum Remote<'a> {
+    /// A login shell, running the command if there is one. It gets a
+    /// terminal if it is interactive, or if ours is one.
+    Login(&'a [String]),
+    /// Only finding out whether the VM answers yet.
+    Probe,
+}
+
+/// The ssh command that connects to the VM in `dir`, as root if `root`.
+fn ssh_command(paths: &Paths, dir: &VmDir, root: bool, remote: Remote) -> Result<Command> {
+    let ip = net::vm_ip(dir)?.with_context(|| {
         format!(
             "the VM has no IP address in {} yet; it may still be booting",
             net::LEASES_FILE
         )
     })?;
+    let (user, key) = login(paths, root)?;
+    // Each VM gets its own known_hosts: IP addresses are reused across VMs,
+    // but a VM's host keys stay the same for its lifetime.
+    let known_hosts = dir.known_hosts();
+    // No config file: ~/.ssh/config may forward the SSH agent or ports to
+    // every host, and thereby hand them to the VM.
+    let mut ssh = Command::new("ssh");
+    ssh.args(["-F", "/dev/null"])
+        .arg("-i")
+        .arg(&key)
+        .args(["-o", "IdentitiesOnly=yes"])
+        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
+        .args(["-o", "LogLevel=ERROR"])
+        // The guest's sshd accepts it; ssh doesn't send it by default.
+        .args(["-o", "SendEnv=COLORTERM"]);
+    match remote {
+        Remote::Login(command) if !command.is_empty() && interactive() => {
+            ssh.arg("-t");
+        }
+        Remote::Login(_) => {}
+        Remote::Probe => {
+            ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=2"]);
+        }
+    }
+    ssh.arg(format!("{user}@{ip}"));
+    match remote {
+        Remote::Login([]) => {}
+        Remote::Login(command) => {
+            ssh.arg(login_shell_command(command));
+        }
+        Remote::Probe => {
+            ssh.arg("true");
+        }
+    }
+    Ok(ssh)
+}
 
+/// The user and SSH key to log in to a VM with, as root if `root`.
+fn login(paths: &Paths, root: bool) -> Result<(&'static str, PathBuf)> {
     let (user, key) = if root {
         ("root", paths.root_ssh_key())
     } else {
@@ -272,44 +360,92 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
          with it, then `sendit reset` makes this project's VM again",
         paths.display(&key)
     );
-    // Each VM gets its own known_hosts: IP addresses are reused across VMs,
-    // but a VM's host keys stay the same for its lifetime.
-    let known_hosts = dir.known_hosts();
-    // No config file: ~/.ssh/config may forward the SSH agent or ports to
-    // every host, and thereby hand them to the VM.
-    let error = Command::new("ssh")
-        .args(["-F", "/dev/null"])
-        .arg("-i")
-        .arg(&key)
-        .args(["-o", "IdentitiesOnly=yes"])
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
-        .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-        .args(["-o", "LogLevel=ERROR"])
-        // The guest's sshd accepts it; ssh doesn't send it by default.
-        .args(["-o", "SendEnv=COLORTERM"])
-        .arg(format!("{user}@{ip}"))
-        // ssh joins the command's arguments with spaces for the remote shell;
-        // quote them so they arrive as they were given.
-        .args((!command.is_empty()).then(|| shell_command(command)))
-        .exec();
-    Err(error).context("running ssh")
+    Ok((user, key))
+}
+
+/// Whether the user is at a terminal, so a command run over SSH gets one
+/// too, e.g. for an editor or `htop`.
+fn interactive() -> bool {
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// The remote shell's command line for running `command` in a login shell,
+/// as in an interactive session: with the PATH that ~/.profile sets up, and
+/// in the project directory. ssh joins a command's arguments with spaces,
+/// so they are quoted to arrive as they were given.
+fn login_shell_command(command: &[String]) -> String {
+    format!("exec bash -lc {}", quote(&shell_command(command)))
 }
 
 /// Joins `args` into a command line for a POSIX shell that runs them as given.
 fn shell_command(args: &[String]) -> String {
-    let quote = |arg: &String| {
-        let safe = !arg.is_empty()
-            && arg
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
-        if safe {
-            arg.clone()
-        } else {
-            format!("'{}'", arg.replace('\'', r"'\''"))
+    args.iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `arg` as one word for a POSIX shell.
+fn quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// How long `run` waits for the VM to answer over SSH before giving up on
+/// running its command.
+const SSH_WAIT: Duration = Duration::from_secs(120);
+
+/// Runs `command` in the VM in `dir` over SSH once it answers, as `sendit
+/// ssh` would, then sets `shutdown`. Gives up once `stopped` is set.
+/// Returns the command's exit code.
+fn run_command(
+    paths: &Paths,
+    dir: &VmDir,
+    command: &[String],
+    stopped: &AtomicBool,
+    shutdown: &AtomicBool,
+) -> Result<i32> {
+    let result = (|| {
+        let start = Instant::now();
+        loop {
+            ensure!(
+                !stopped.load(Ordering::Relaxed),
+                "the VM stopped before the command could run"
+            );
+            let answers = ssh_command(paths, dir, false, Remote::Probe).is_ok_and(|mut ssh| {
+                ssh.stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success())
+            });
+            if answers {
+                break;
+            }
+            ensure!(
+                start.elapsed() < SSH_WAIT,
+                "the VM didn't answer over SSH within {} seconds",
+                SSH_WAIT.as_secs()
+            );
+            std::thread::sleep(Duration::from_millis(500));
         }
-    };
-    args.iter().map(quote).collect::<Vec<_>>().join(" ")
+        let status = ssh_command(paths, dir, false, Remote::Login(command))?
+            .status()
+            .context("running ssh")?;
+        // Like a shell reports a command killed by a signal.
+        Ok(status
+            .code()
+            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+    })();
+    shutdown.store(true, Ordering::Relaxed);
+    result
 }
 
 /// Deletes a stopped VM. It holds the VM's lock meanwhile, so the VM can't
@@ -481,7 +617,7 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
 /// process dies.
 fn lock(dir: &VmDir) -> Result<File> {
     let Some(mut file) = try_lock(dir)? else {
-        bail!("this project's VM is already running");
+        bail!("this project's VM is already running; `sendit ssh` opens another shell in it");
     };
     file.set_len(0)?;
     write!(file, "{}", std::process::id())?;
@@ -622,6 +758,33 @@ mod tests {
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
         assert_eq!(state(&parent).unwrap(), State::Stopped);
+    }
+
+    /// The words a POSIX shell makes of `line`.
+    fn words(line: &str) -> Vec<String> {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\0' {line}"))
+            .output()
+            .unwrap();
+        let mut words: Vec<String> = String::from_utf8(output.stdout)
+            .unwrap()
+            .split('\0')
+            .map(String::from)
+            .collect();
+        words.pop();
+        words
+    }
+
+    #[test]
+    fn runs_commands_in_a_login_shell() {
+        let command: Vec<String> = ["echo", "it's", "$HOME", "a b", ""]
+            .map(String::from)
+            .to_vec();
+        let line = words(&login_shell_command(&command));
+        assert_eq!(line[..3], ["exec", "bash", "-lc"]);
+        assert_eq!(line.len(), 4);
+        assert_eq!(words(&line[3]), command);
     }
 
     #[test]

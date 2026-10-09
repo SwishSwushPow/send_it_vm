@@ -4,10 +4,16 @@
 
 ### Added
 
+- `sendit run <command>` boots the VM, runs the command over SSH once the VM answers, as `sendit ssh <command>` does, and shuts the VM down when it ends. sendit exits with the command's exit code. The console isn't shown then.
 - `sendit run --worktree <branch>` checks out a branch in a new git worktree next to the main checkout, in `<repo>.worktrees/`, and boots its VM. `--from` sets where a new branch starts and `--worktree-path` where the worktree goes. For a branch that has a worktree already, it boots that one's VM.
 - The VM of a linked git worktree starts as a copy of the main worktree's VM, if that has one and it is stopped, instead of the base image: with everything installed and cached there. While the main worktree's VM runs, `sendit run` asks whether to start from the base image instead.
 - A linked git worktree without a `[projects."<path>"]` table of its own uses its main worktree's.
 - `sendit status` shows which VM the project's VM is a copy of, or will be when `sendit run` creates it.
+
+### Changed
+
+- Commands given to `sendit ssh` run in a login shell, in the project directory, like an interactive session: they find what the provisioning scripts added to the PATH in `~/.profile`. In a terminal, they get one in the VM too, so interactive programs work.
+- When the VM is already running, `sendit run` points to `sendit ssh`.
 
 ## 0.6.0 - 2026-10-09
 

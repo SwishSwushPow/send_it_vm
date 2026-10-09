@@ -22,7 +22,9 @@ Virtualization.framework only works for binaries signed with the virtualization 
 sendit provision          # download Debian and build this project's base image (once)
 sendit run                # boot this project's VM and attach to its console
 sendit run --worktree x   # ... of a git worktree on branch x, made if needed
+sendit run cargo test     # boot the VM, run a command in it, then shut it down
 sendit ssh                # open another shell in the running VM
+sendit ssh cargo test     # ... or run a command there
 sendit ssh --root         # ... as root, e.g. to install packages
 sendit stop               # shut the running VM down
 sendit status             # show the VM and its effective settings
@@ -35,6 +37,8 @@ sendit prune --all        # delete every VM that isn't running
 ```
 
 Commands act on the project in the current directory, or on the one given with `-C DIR`.
+
+A command after `sendit run` or `sendit ssh` runs the same way: as the VM's user (or root, with `sendit ssh --root`), in a login shell, so with the PATH your provisioning scripts set up in `~/.profile`, and in the project directory. Its arguments arrive unchanged; for pipes and the like, run `sh -c '...'`. It gets a terminal if sendit runs in one, so interactive programs work, e.g. `sendit run claude`, and its output can be piped otherwise. sendit exits with the command's exit code. `sendit run` doesn't show the console then: it waits until the VM answers over SSH, runs the command, and shuts the VM down when it ends.
 
 `sendit ssh` ignores `~/.ssh/config`: settings meant for trusted hosts, like `ForwardAgent yes` under `Host *`, would hand your SSH agent to the VM.
 

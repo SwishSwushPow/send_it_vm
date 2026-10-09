@@ -34,7 +34,7 @@ use objc2::rc::Retained;
 use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachment};
 
-use super::ProvisionLog;
+use super::ConsoleMode;
 
 /// Ctrl-]
 const ESCAPE_KEY: u8 = 0x1d;
@@ -64,51 +64,72 @@ pub struct Console {
 }
 
 impl Console {
-    /// Connects stdin to the guest's login console. Without `log`, the login
-    /// console's output goes to stdout. With `log`, it is discarded instead,
-    /// and a second port's output is shown and appended to `log.path`:
-    /// nothing runs a getty on that port, so provisioning output can't be
-    /// cut off by one hanging up the terminal. Nothing in the guest reads
-    /// keystrokes then, so Ctrl-C keeps raising SIGINT instead of reaching
-    /// the guest.
-    pub fn attach(log: Option<&ProvisionLog>) -> Result<Self> {
+    /// Connects the terminal to the guest as `mode` says. For the login
+    /// console, stdin goes to it and its output to stdout. While
+    /// provisioning, its output is discarded instead, and a second port's
+    /// output is shown and appended to the log: nothing runs a getty on that
+    /// port, so provisioning output can't be cut off by one hanging up the
+    /// terminal. Nothing in the guest reads keystrokes then, so Ctrl-C keeps
+    /// raising SIGINT instead of reaching the guest. Hidden, the terminal is
+    /// left alone, apart from telling the guest its type and size.
+    pub fn attach(mode: &ConsoleMode) -> Result<Self> {
+        let log = match mode {
+            ConsoleMode::Provision(log) => Some(log),
+            ConsoleMode::Login | ConsoleMode::Hidden => None,
+        };
         let provisioning = log.is_some();
-        let (read_end, write_end) = pipe()?;
+        let hidden = matches!(mode, ConsoleMode::Hidden);
         let escapes = Arc::new(AtomicUsize::new(0));
-        let counter = escapes.clone();
         let (stop_read, stop) = pipe()?;
         let guest_stopping = Arc::new(AtomicBool::new(false));
         let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?)?;
-        std::thread::spawn(move || {
-            forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
-        });
-
-        let shown = ShownOutput::new(log.map(|log| log.last_line.as_bytes()));
-        let log = log
-            .map(|log| {
-                File::options()
-                    .create(true)
-                    .append(true)
-                    .open(&log.path)
-                    .with_context(|| format!("opening {}", log.path.display()))
-            })
-            .transpose()?;
-        let (output_read, output_write) = pipe()?;
-        let (main_output, log_output) = if provisioning {
-            (null_output()?, file_handle(output_write))
+        // Hidden, stdin belongs to the program that has the terminal.
+        let input = if hidden {
+            None
         } else {
-            (file_handle(output_write), null_output()?)
+            let (read_end, write_end) = pipe()?;
+            let counter = escapes.clone();
+            std::thread::spawn(move || {
+                forward_input(libc::STDIN_FILENO, write_end, &counter, stop_read)
+            });
+            Some(file_handle(read_end))
+        };
+
+        let (main_output, log_output, output) = if hidden {
+            (null_output()?, null_output()?, None)
+        } else {
+            let shown = ShownOutput::new(log.map(|log| log.last_line.as_bytes()));
+            let log = log
+                .map(|log| {
+                    File::options()
+                        .create(true)
+                        .append(true)
+                        .open(&log.path)
+                        .with_context(|| format!("opening {}", log.path.display()))
+                })
+                .transpose()?;
+            let (output_read, output_write) = pipe()?;
+            let output = OutputCopy::start(output_read, shown, log)?;
+            if provisioning {
+                (null_output()?, file_handle(output_write), Some(output))
+            } else {
+                (file_handle(output_write), null_output()?, Some(output))
+            }
         };
 
         Ok(Self {
-            main: serial_port(Some(&file_handle(read_end)), &main_output),
+            main: serial_port(input.as_deref(), &main_output),
             log: serial_port(None, &log_output),
             terminal,
             escapes,
             guest_stopping,
             stop: Some(stop),
-            output: Some(OutputCopy::start(output_read, shown, log)?),
-            raw_mode: RawMode::enable(provisioning)?,
+            output,
+            raw_mode: if hidden {
+                None
+            } else {
+                RawMode::enable(provisioning)?
+            },
         })
     }
 

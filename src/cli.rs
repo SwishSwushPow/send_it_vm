@@ -47,8 +47,10 @@ pub enum Command {
         #[arg(long)]
         root: bool,
 
-        /// Command to run instead of a login shell. Its arguments arrive
-        /// unchanged; for pipes and the like, run `sh -c '...'`
+        /// Command to run instead of an interactive shell: in a login shell
+        /// in the project directory, on a terminal if this is one. Its
+        /// arguments arrive unchanged; for pipes and the like, run
+        /// `sh -c '...'`
         #[arg(
             trailing_var_arg = true,
             allow_hyphen_values = true,
@@ -127,6 +129,17 @@ pub struct RunArgs {
     /// Where to put a new --worktree [default: <repo>.worktrees/<branch>]
     #[arg(long, value_name = "DIR", requires = "worktree")]
     pub worktree_path: Option<PathBuf>,
+
+    /// Command to run once the VM is up, instead of attaching its console:
+    /// over SSH as `sendit ssh <COMMAND>` does, and the VM shuts down when
+    /// it ends, with sendit exiting with its exit code. Its arguments
+    /// arrive unchanged; for pipes and the like, run `sh -c '...'`
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
 }
 
 impl RunArgs {
@@ -208,9 +221,30 @@ mod tests {
         assert_eq!(args.from.as_deref(), Some("main"));
         assert_eq!(args.worktree_path, Some(PathBuf::from("/w")));
         assert_eq!(args.settings().cpus, Some(2));
+        assert!(args.command.is_empty());
         // Only with --worktree.
         assert!(Cli::try_parse_from(["sendit", "run", "--from", "main"]).is_err());
         assert!(Cli::try_parse_from(["sendit", "run", "--worktree-path", "/w"]).is_err());
+    }
+
+    #[test]
+    fn passes_run_commands_through() {
+        let cli =
+            Cli::try_parse_from(["sendit", "run", "--cpus", "2", "cargo", "test", "--", "-q"])
+                .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.settings().cpus, Some(2));
+        assert_eq!(args.command, ["cargo", "test", "--", "-q"]);
+
+        // Flags after the command are the command's.
+        let cli = Cli::try_parse_from(["sendit", "run", "ls", "--cpus", "2"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.settings().cpus, None);
+        assert_eq!(args.command, ["ls", "--cpus", "2"]);
     }
 
     #[test]

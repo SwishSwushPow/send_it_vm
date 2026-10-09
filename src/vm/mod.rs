@@ -17,7 +17,8 @@ use std::io::{IsTerminal, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -165,9 +166,22 @@ pub struct VmSpec {
     pub shares: Vec<Share>,
     /// Extra read-only disk, e.g. a cloud-init seed ISO.
     pub seed: Option<PathBuf>,
-    /// Provisioning mode: show and log the guest's /dev/hvc1 instead of
-    /// showing the login console.
-    pub provision_log: Option<ProvisionLog>,
+    pub console: ConsoleMode,
+    /// Set from another thread to shut the VM down, as if Ctrl-] had been
+    /// pressed.
+    pub shutdown: Option<Arc<AtomicBool>>,
+}
+
+/// What the terminal is used for while the VM runs.
+#[derive(Clone, Debug)]
+pub enum ConsoleMode {
+    /// The guest's login console.
+    Login,
+    /// Nothing of the VM: another program has the terminal, e.g. `ssh`.
+    /// Signals still shut the VM down.
+    Hidden,
+    /// Provisioning: show and log the guest's /dev/hvc1.
+    Provision(ProvisionLog),
 }
 
 #[derive(Clone, Debug)]
@@ -247,7 +261,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     // Signals from before this VM, which ended an earlier one, don't count.
     let mut seen_escapes = SIGNALS.load(Ordering::Relaxed);
     let _signals = CatchSignals::new();
-    let console = Console::attach(spec.provision_log.as_ref())?;
+    let console = Console::attach(&spec.console)?;
     let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
     let state = Rc::new(VmState::default());
     let delegate = VmDelegate::new(state.clone());
@@ -267,13 +281,15 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
 
     // While provisioning, nobody is logged in on the console to log out,
     // and Ctrl-C isn't forwarded to the guest.
-    let (started, stopping_notice) = if spec.provision_log.is_some() {
-        (
+    let provisioning = matches!(spec.console, ConsoleMode::Provision(_));
+    let (started, stopping_notice) = match spec.console {
+        ConsoleMode::Provision(_) => (
             "VM starting. Press Ctrl-C to abort.",
             "Shutting down. Press Ctrl-C again to force.",
-        )
-    } else {
-        ("VM starting. Type exit to shut it down.", "Shutting down.")
+        ),
+        ConsoleMode::Login => ("VM starting. Type exit to shut it down.", "Shutting down."),
+        // Whatever has the terminal says what to do.
+        ConsoleMode::Hidden => ("VM starting.", "Shutting down."),
     };
     notice(started);
 
@@ -293,11 +309,13 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         }
 
         let escapes = console.escapes() + SIGNALS.load(Ordering::Relaxed);
-        let escaped = escapes > seen_escapes;
+        let shutdown =
+            (spec.shutdown.as_ref()).is_some_and(|flag| flag.swap(false, Ordering::Relaxed));
+        let escaped = escapes > seen_escapes || shutdown;
         seen_escapes = escapes;
         // Provisioning ends with the guest shutting down, which must not be
         // cut short.
-        let guest_stopping = spec.provision_log.is_none() && console.guest_stopping();
+        let guest_stopping = !provisioning && console.guest_stopping();
         stopping = match stopping {
             Stopping::No if escaped => {
                 let next = stop(&vm, &state, stopping_notice);

@@ -813,6 +813,8 @@ fn runs_commands_over_ssh() {
     assert_eq!(vm.ok("getconf PAGESIZE"), "16384");
     assert_eq!(vm.ok("id -un"), "dev");
     assert_eq!(vm.root_ok("id -u"), "0");
+    // Through a login shell, which starts in the project.
+    assert_eq!(vm.ok("pwd"), "/home/dev/lifecycle");
     vm.fails("sudo -n true");
     // The root filesystem grew from the base image's 16 GiB to the default
     // disk size of 64 GiB.
@@ -865,6 +867,28 @@ fn runs_commands_over_ssh() {
     assert!(!ssh.status.success());
     let stderr = text(&ssh.stderr);
     assert!(stderr.contains("not running"), "{stderr}");
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn runs_a_command_instead_of_the_console() {
+    let _slot = vm_slot();
+    let project = Project::new("command");
+    fs::write(project.dir.join("hello.txt"), "from the host\n").unwrap();
+    let run = project.command(&[
+        "run",
+        "sh",
+        "-c",
+        "cat hello.txt; echo to stderr >&2; exit 3",
+    ]);
+    let output = output(run, BOOT_TIMEOUT + STOP_TIMEOUT).unwrap();
+    let stderr = text(&output.stderr);
+    // Only the command's output: the console isn't shown.
+    assert_eq!(text(&output.stdout), "from the host\n", "{stderr}");
+    assert!(stderr.contains("to stderr"), "{stderr}");
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    // The VM shut down when the command ended.
+    assert!(project.ok(&["status"]).contains("stopped"));
 }
 
 #[test]

@@ -63,7 +63,11 @@ fn main() -> Result<()> {
             if !commands::confirm_shares(&paths, &settings)? {
                 return Ok(());
             }
-            project_vm::run(&paths, &project, &settings)
+            let code = project_vm::run(&paths, &project, &settings, &args.command)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
         }
         Command::Provision {
             image,
