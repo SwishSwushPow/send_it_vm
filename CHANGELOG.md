@@ -16,6 +16,7 @@
 - A boot removes the empty mount points of mounts the VM no longer has, e.g. after a mount was dropped from the config, or in a worktree's copy of its main worktree's VM, that VM's project directory.
 - Answering no to one of sendit's questions, e.g. whether to share the home directory or to delete a VM, makes it exit with 1, as nothing was done.
 - When the VM is already running, `sendit run` points to `sendit ssh`, or for `sendit run <command>`, to `sendit ssh <command>`, with `-C` if the project isn't the current directory.
+- `sendit provision` rebuilds an image made by an older version of sendit without `--force`: VMs can't be made from it anymore. For an image whose custom scripts changed, it says so instead of only that the image is provisioned already.
 
 ### Fixed
 

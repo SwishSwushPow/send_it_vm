@@ -151,12 +151,11 @@ pub enum BaseState {
 
 impl BaseState {
     /// The state of `image` and, unless it is current, the command that
-    /// builds it, e.g. "outdated; rebuild it with `sendit provision rust
-    /// --force`".
+    /// builds it, e.g. "outdated; rebuild it with `sendit provision rust`".
     pub fn describe(&self, image: &ImageName) -> String {
         match self {
             Self::Missing => format!("not provisioned yet; run `{}`", command(image, false)),
-            Self::Outdated => format!("outdated; rebuild it with `{}`", command(image, true)),
+            Self::Outdated => format!("outdated; rebuild it with `{}`", command(image, false)),
             Self::ScriptsChanged => format!(
                 "custom scripts changed; rebuild it with `{}`",
                 command(image, true)
@@ -357,8 +356,9 @@ pub fn provision_all(
 }
 
 /// Builds the `name` image unless it is already provisioned (or `force`);
-/// returns whether it did. Calls `report` when it starts building and again
-/// right before the VM starts, as preparing it may have reported otherwise.
+/// returns whether it did. An outdated image is rebuilt: nothing can use it
+/// anymore. Calls `report` when it starts building and again right before
+/// the VM starts, as preparing it may have reported otherwise.
 fn provision(
     paths: &Paths,
     name: &ImageName,
@@ -367,14 +367,11 @@ fn provision(
     report: impl Fn(),
 ) -> Result<bool> {
     let _lock = lock(paths)?;
-    let base = paths.image_dir(name);
-    if marker_file(&VmDir::new(base.clone())).exists() && !force {
-        eprintln!(
-            "The {name} image in {} is already provisioned. Use --force to rebuild it.",
-            paths.display(&base)
-        );
+    if !force && let Some(why) = already_provisioned(paths, name)? {
+        eprintln!("{why}");
         return Ok(false);
     }
+    let base = paths.image_dir(name);
     report();
 
     let image = image::debian_image(paths)?;
@@ -441,6 +438,20 @@ fn provision(
     fs::rename(partial.path(), &base)?;
     eprintln!("The {name} image is ready in {}.", paths.display(&base));
     Ok(true)
+}
+
+/// Why `provision` leaves the `name` image alone without `force`, if it
+/// does: it is provisioned and not outdated.
+fn already_provisioned(paths: &Paths, name: &ImageName) -> Result<Option<String>> {
+    let but = match base_state(paths, name)? {
+        BaseState::Missing | BaseState::Outdated => return Ok(None),
+        BaseState::ScriptsChanged => ", but its custom scripts have changed since",
+        BaseState::Current => "",
+    };
+    Ok(Some(format!(
+        "The {name} image in {} is already provisioned{but}. Use --force to rebuild it.",
+        paths.display(&paths.image_dir(name))
+    )))
 }
 
 /// Takes the lock that only one sendit process at a time builds images
@@ -564,6 +575,40 @@ mod tests {
         assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
         assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
+    }
+
+    #[test]
+    fn rebuilds_only_missing_or_outdated_images() {
+        let home = TempDir::new("provisioned");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        let why = || already_provisioned(&paths, &rust).unwrap();
+        assert_eq!(why(), None);
+
+        let base = VmDir::new(paths.image_dir(&rust));
+        fs::create_dir_all(base.path()).unwrap();
+        let mark = |revision: u32| {
+            let marker = Marker {
+                revision,
+                custom_scripts: Vec::new(),
+            };
+            fs::write(marker_file(&base), toml::to_string(&marker).unwrap()).unwrap();
+        };
+        mark(BASE_REVISION - 1);
+        assert_eq!(why(), None);
+        mark(BASE_REVISION);
+        assert_eq!(
+            why().unwrap(),
+            "The rust image in ~/.cache/sendit/images/rust is already provisioned. \
+             Use --force to rebuild it."
+        );
+        fs::create_dir_all(paths.provision_scripts_dir()).unwrap();
+        fs::write(paths.provision_scripts_dir().join("10-new.sh"), "true").unwrap();
+        assert!(
+            why()
+                .unwrap()
+                .contains("provisioned, but its custom scripts have changed")
+        );
     }
 
     #[test]

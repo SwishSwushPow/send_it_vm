@@ -1225,7 +1225,7 @@ fn creates_vms_from_the_chosen_image() {
 
     assert_fails_with(
         &project.sendit(&["run", "--image", "old"]),
-        "the old image is outdated; rebuild it with `sendit provision old --force`",
+        "the old image is outdated; rebuild it with `sendit provision old`",
     );
     assert!(project.image_line("old").contains("outdated"));
 
