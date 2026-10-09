@@ -372,19 +372,23 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             _ => "not created".to_string(),
         }
     } else {
-        match (project_vm::state(&vm_dir)?, &metadata) {
-            (State::Stopped, Some(m)) if m.image != *image => format!(
-                "stopped; made from the {} image, `sendit reset` recreates it from {image}",
-                m.image
-            ),
-            (State::Stopped, Some(m)) if m.outdated() => {
-                "stopped; made from an outdated base image, `sendit reset` recreates it".to_string()
-            }
-            (State::Stopped, _) => "stopped".to_string(),
-            (State::Running(_), _) => match vm::net::vm_ip(&vm_dir)? {
+        let state = match project_vm::state(&vm_dir)? {
+            State::Stopped => "stopped".to_string(),
+            State::Running(_) => match vm::net::vm_ip(&vm_dir)? {
                 Some(ip) => format!("running at {ip}"),
                 None => "running".to_string(),
             },
+        };
+        // Also while it runs: the config file may have changed since.
+        match &metadata {
+            Some(m) if m.image != *image => format!(
+                "{state}; made from the {} image, `sendit reset` recreates it from {image}",
+                m.image
+            ),
+            Some(m) if m.outdated() => {
+                format!("{state}; made from an outdated base image, `sendit reset` recreates it")
+            }
+            _ => state,
         }
     };
     println!(
