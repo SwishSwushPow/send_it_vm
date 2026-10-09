@@ -87,7 +87,13 @@ impl Drop for CatchSignals {
 /// Prints a status line between guest output. Errors are ignored: after a
 /// SIGHUP the terminal is gone, and the VM must still be shut down cleanly.
 fn notice(message: &str) {
-    let _ = write!(std::io::stderr(), "\r\n[sendit] {message}\r\n");
+    let mut stderr = std::io::stderr();
+    // On a terminal, it may be in raw mode and in the middle of a line.
+    let _ = if stderr.is_terminal() {
+        write!(stderr, "\r\n[sendit] {message}\r\n")
+    } else {
+        writeln!(stderr, "[sendit] {message}")
+    };
 }
 
 /// Clears the terminal's screen, if stdout is one, by scrolling everything on
@@ -371,7 +377,9 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
         };
     };
     drop(console);
-    let _ = writeln!(std::io::stderr());
+    if std::io::stderr().is_terminal() {
+        let _ = writeln!(std::io::stderr());
+    }
     result.map(|()| stopped_by)
 }
 
