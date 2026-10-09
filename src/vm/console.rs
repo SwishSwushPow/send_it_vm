@@ -13,6 +13,13 @@
 //! sends the size again whenever the terminal is resized (SIGWINCH). A
 //! service in the guest applies them to the console. The guest also says
 //! there when it starts shutting down.
+//!
+//! Guest output reaches the terminal unchanged, including Program Status
+//! Protocol reports (OSC 7501) from programs in the guest. The terminal's
+//! reply to their query comes back as input. The records they leave would
+//! outlive the VM, so sendit clears them all when the VM stops. While
+//! provisioning, nothing in the guest reads the console, so such queries
+//! go unanswered; reports still get through.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
@@ -128,9 +135,12 @@ impl Drop for Console {
     fn drop(&mut self) {
         drop(self.stop.take());
         if let Some(output) = self.output.take() {
-            let alternate_screen = output.finish();
+            let left = output.finish();
+            if left.status_records && io::stdout().is_terminal() {
+                let _ = write_all(libc::STDOUT_FILENO, CLEAR_STATUS);
+            }
             if let Some(raw_mode) = &mut self.raw_mode {
-                raw_mode.alternate_screen = alternate_screen;
+                raw_mode.alternate_screen = left.alternate_screen;
             }
         }
     }
@@ -169,7 +179,16 @@ fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
 struct OutputCopy {
     /// Closing it tells the thread to finish.
     finish: OwnedFd,
-    thread: JoinHandle<bool>,
+    thread: JoinHandle<LeftBehind>,
+}
+
+/// What guest output left in the terminal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LeftBehind {
+    /// The terminal is on the alternate screen.
+    alternate_screen: bool,
+    /// Program Status Protocol records.
+    status_records: bool,
 }
 
 impl OutputCopy {
@@ -181,40 +200,46 @@ impl OutputCopy {
         Ok(Self { finish, thread })
     }
 
-    /// Copies what is left, then waits for the thread to end. Returns
-    /// whether the guest left the terminal on the alternate screen.
-    fn finish(self) -> bool {
+    /// Copies what is left, then waits for the thread to end. Returns what
+    /// the guest left in the terminal.
+    fn finish(self) -> LeftBehind {
         drop(self.finish);
-        self.thread.join().unwrap_or(false)
+        self.thread.join().unwrap_or_default()
     }
 }
 
 /// Copies guest output to `to` (stdout) as far as `shown` allows, and all
 /// of it to `log` if given, until the guest side closes, or `finish` closes
-/// and no more output has come for `OUTPUT_GRACE_MS`. Returns whether the
-/// output left the terminal on the alternate screen.
+/// and no more output has come for `OUTPUT_GRACE_MS`. Returns what the shown
+/// output left in the terminal.
 fn copy_output(
     from_guest: OwnedFd,
     to: libc::c_int,
     mut shown: ShownOutput,
     mut log: Option<File>,
     finish: OwnedFd,
-) -> bool {
+) -> LeftBehind {
     let mut fds = [pollfd(from_guest.as_raw_fd()), pollfd(finish.as_raw_fd())];
     let mut timeout = -1;
     let mut buf = [0u8; 4096];
     let mut screen = ScreenTracker::default();
+    let mut status = StatusTracker::default();
+    let left = |screen: &ScreenTracker, status: &StatusTracker| LeftBehind {
+        alternate_screen: screen.alternate,
+        status_records: status.reported,
+    };
     loop {
         if matches!(poll(&mut fds, timeout), Ok(0) | Err(_)) {
-            return screen.alternate;
+            return left(&screen, &status);
         }
         // Output first: finishing waits until none is pending.
         if fds[0].revents != 0 {
             let Ok(n @ 1..) = read(from_guest.as_raw_fd(), &mut buf) else {
-                return screen.alternate;
+                return left(&screen, &status);
             };
             let show = &buf[..shown.len(&buf[..n])];
             screen.feed(show);
+            status.feed(show);
             let _ = write_all(to, show);
             if let Some(log) = &mut log {
                 let _ = log.write_all(&buf[..n]);
@@ -314,6 +339,41 @@ impl ScreenTracker {
                 self.alternate = false;
             }
         }
+        let keep = self.tail.len().min(Self::LONGEST - 1);
+        self.tail.drain(..self.tail.len() - keep);
+    }
+}
+
+/// The start of a Program Status Protocol sequence (OSC 7501).
+const STATUS_REPORT: &[u8] = b"\x1b]7501;";
+
+/// Removes all Program Status Protocol records.
+const CLEAR_STATUS: &[u8] = b"\x1b]7501;state=clear\x1b\\";
+
+/// Follows whether output has sent a Program Status Protocol report, which
+/// leaves a record in the terminal. Asking whether the terminal supports
+/// them (`ESC ] 7501 ; ?`) doesn't.
+#[derive(Default)]
+struct StatusTracker {
+    reported: bool,
+    /// The end of the output so far, for a report split across reads.
+    tail: Vec<u8>,
+}
+
+impl StatusTracker {
+    /// The start of a report and the first byte after it, which tells it
+    /// from a query.
+    const LONGEST: usize = STATUS_REPORT.len() + 1;
+
+    fn feed(&mut self, data: &[u8]) {
+        if self.reported {
+            return;
+        }
+        self.tail.extend_from_slice(data);
+        self.reported = self
+            .tail
+            .windows(Self::LONGEST)
+            .any(|window| window.starts_with(STATUS_REPORT) && window[Self::LONGEST - 1] != b'?');
         let keep = self.tail.len().min(Self::LONGEST - 1);
         self.tail.drain(..self.tail.len() - keep);
     }
@@ -700,6 +760,47 @@ mod tests {
     }
 
     #[test]
+    fn tracks_status_reports() {
+        let mut status = StatusTracker::default();
+        status.feed(b"\x1b]0;title\x07\x1b]7501;?\x1b\\ asking is not reporting");
+        assert!(!status.reported);
+
+        // Split across reads, right before the byte that tells a report
+        // from a query.
+        status.feed(b"build \x1b]75");
+        assert!(!status.reported);
+        status.feed(b"01;");
+        assert!(!status.reported);
+        status.feed(b"state=working\x1b\\");
+        assert!(status.reported);
+    }
+
+    #[test]
+    fn reports_status_records_left_behind() {
+        let copy = |output: &[u8]| {
+            let (from_guest, guest_writes) = pipe().unwrap();
+            let (shown, to) = pipe().unwrap();
+            let (finish_read, _finish) = pipe().unwrap();
+            write_all(guest_writes.as_raw_fd(), output).unwrap();
+            drop(guest_writes);
+            let left = copy_output(
+                from_guest,
+                to.as_raw_fd(),
+                ShownOutput::new(None),
+                None,
+                finish_read,
+            );
+            drop(to);
+            let mut out = Vec::new();
+            File::from(shown).read_to_end(&mut out).unwrap();
+            assert_eq!(out, output, "shown unchanged");
+            left
+        };
+        assert!(copy(b"\x1b]7501;state=idle:app=test\x1b\\").status_records);
+        assert!(!copy(b"\x1b]7501;?\x1b\\").status_records);
+    }
+
+    #[test]
     fn finishing_copies_pending_output() {
         let (from_guest, guest_writes) = pipe().unwrap();
         let (shown, to) = pipe().unwrap();
@@ -710,7 +811,7 @@ mod tests {
         let (finish_read, finish) = pipe().unwrap();
         let to_fd = to.as_raw_fd();
         let thread = std::thread::spawn(move || {
-            let alternate = copy_output(
+            let left = copy_output(
                 from_guest,
                 to_fd,
                 ShownOutput::new(None),
@@ -718,7 +819,7 @@ mod tests {
                 finish_read,
             );
             drop(to);
-            alternate
+            left
         });
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();

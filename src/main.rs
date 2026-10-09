@@ -10,6 +10,7 @@ mod paths;
 mod project_vm;
 mod provision;
 mod sign;
+mod status;
 mod util;
 mod vm;
 
@@ -71,11 +72,7 @@ fn main() -> Result<()> {
                     vec![project_vm::image(&paths, &project, chosen.as_ref())]
                 }
             };
-            for image in &images {
-                let settings = config.resolve_provision(image, resources)?;
-                provision::provision(&paths, image, &settings, *force)?;
-            }
-            Ok(())
+            provision::provision_all(&paths, &config, &images, resources, *force)
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),

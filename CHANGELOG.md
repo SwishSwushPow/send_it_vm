@@ -6,6 +6,8 @@
 
 - `sendit run --read-only`, or `read-only = true` in the config file, shares the project directory read-only. With `--expose-git`, `.git` is read-only too.
 - `SENDIT_VM_DIR` keeps the project VMs in another directory instead of `~/.sendit`, e.g. on an external drive. See the README for its limits.
+- Programs in the VM can report their status to the terminal with the Program Status Protocol (OSC 7501). The console already passed the reports through; sendit now clears the records they left when the VM stops.
+- sendit reports its own status with the Program Status Protocol too: building base images (and whether they are ready or failed), waiting for an answer, waiting for `sendit stop`, and `sendit run` ending with an error. Terminals that support it can show this e.g. in a tab that isn't in front.
 
 ### Changed
 

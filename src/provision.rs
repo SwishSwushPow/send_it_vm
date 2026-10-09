@@ -23,9 +23,10 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{ByteSize, Config, MountSpec, ProvisionSettings};
+use crate::config::{ByteSize, Config, MountSpec, ProvisionSettings, Resources};
 use crate::image;
 use crate::paths::{ImageName, Paths};
+use crate::status::Status;
 use crate::util;
 use crate::vm::{self, ProvisionLog, VmDir, VmSpec};
 
@@ -317,20 +318,63 @@ fn command(image: &ImageName, force: bool) -> String {
     command
 }
 
-pub fn provision(
+/// Builds `images` in turn, with `cli` resources, unless they are already
+/// provisioned (or `force`), and reports on the terminal how far it got.
+pub fn provision_all(
+    paths: &Paths,
+    config: &Config,
+    images: &[ImageName],
+    cli: &Resources,
+    force: bool,
+) -> Result<()> {
+    let mut built = Vec::new();
+    for (index, image) in images.iter().enumerate() {
+        let settings = config.resolve_provision(image, cli)?;
+        let report = || {
+            let mut msg = format!("Provisioning the {image} image");
+            let mut progress = None;
+            if images.len() > 1 {
+                let _ = write!(msg, " ({}/{})", index + 1, images.len());
+                progress = Some((index * 100 / images.len()) as u8);
+            }
+            Status::Working(&msg, progress).report();
+        };
+        match provision(paths, image, &settings, force, report) {
+            Ok(true) => built.push(image),
+            Ok(false) => {}
+            Err(e) => {
+                Status::Error(&format!("The {image} image: {e:#}")).report();
+                return Err(e);
+            }
+        }
+    }
+    match built.as_slice() {
+        [] => {}
+        [image] => Status::Done(&format!("The {image} image is ready")).report(),
+        built => Status::Done(&format!("{} images are ready", built.len())).report(),
+    }
+    Ok(())
+}
+
+/// Builds the `name` image unless it is already provisioned (or `force`);
+/// returns whether it did. Calls `report` when it starts building and again
+/// right before the VM starts, as preparing it may have reported otherwise.
+fn provision(
     paths: &Paths,
     name: &ImageName,
     settings: &ProvisionSettings,
     force: bool,
-) -> Result<()> {
+    report: impl Fn(),
+) -> Result<bool> {
     let base = paths.image_dir(name);
     if marker_file(&VmDir::new(base.clone())).exists() && !force {
         eprintln!(
             "The {name} image in {} is already provisioned. Use --force to rebuild it.",
             paths.display(&base)
         );
-        return Ok(());
+        return Ok(false);
     }
+    report();
 
     let image = image::debian_image(paths)?;
     fs::create_dir_all(paths.ssh_dir())?;
@@ -373,6 +417,7 @@ pub fn provision(
             last_line: token.clone(),
         }),
     };
+    report();
     vm::run(&partial, &spec)?;
 
     let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
@@ -393,7 +438,7 @@ pub fn provision(
     }
     fs::rename(partial.path(), &base)?;
     eprintln!("The {name} image is ready in {}.", paths.display(&base));
-    Ok(())
+    Ok(true)
 }
 
 /// Returns the public key of the SSH keypair `key`, generating it first if

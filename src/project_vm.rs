@@ -24,6 +24,7 @@ use crate::image;
 use crate::mounts;
 use crate::paths::{ImageName, Paths, Project, is_project_id};
 use crate::provision::{self, BaseState};
+use crate::status::Status;
 use crate::util;
 use crate::vm::{self, VmDir, VmSpec, net};
 
@@ -158,7 +159,11 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
         seed: None,
         provision_log: None,
     };
-    vm::run(&dir, &spec)
+    let result = vm::run(&dir, &spec);
+    if let Err(e) = &result {
+        Status::Error(&format!("{e:#}")).report();
+    }
+    result
 }
 
 /// Asks the project's running VM to shut down and waits until it has.
@@ -180,8 +185,22 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
             .with_context(|| format!("signalling sendit process {pid}"));
     }
     eprintln!("Shutting down the VM…");
+    Status::Working("Shutting down the VM", None).report();
+    let stopped = wait_until_stopped(&dir);
+    match &stopped {
+        Ok(()) => {
+            Status::Clear.report();
+            eprintln!("Stopped.");
+        }
+        Err(e) => Status::Error(&format!("{e:#}")).report(),
+    }
+    stopped
+}
+
+/// Waits until the VM in `dir` has stopped, for up to `STOP_WAIT`.
+fn wait_until_stopped(dir: &VmDir) -> Result<()> {
     let start = Instant::now();
-    while state(&dir)? != State::Stopped {
+    while state(dir)? != State::Stopped {
         ensure!(
             start.elapsed() < STOP_WAIT,
             "the VM did not stop within {} seconds",
@@ -189,7 +208,6 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
         );
         std::thread::sleep(Duration::from_millis(250));
     }
-    eprintln!("Stopped.");
     Ok(())
 }
 

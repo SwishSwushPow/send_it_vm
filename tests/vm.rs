@@ -496,6 +496,7 @@ impl Drop for Vm<'_> {
 const TERMINAL_RESET: &[u8] =
     b"\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
 const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+const CLEAR_STATUS: &[u8] = b"\x1b]7501;state=clear\x1b\\";
 
 /// The time to wait for the console's response to a line typed into it.
 const CONSOLE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -991,6 +992,15 @@ fn console_follows_the_terminal() {
     term.wait_for_exit();
     assert_eq!(term.local_modes() & raw, raw, "the terminal is still raw");
     term.expect_end(TERMINAL_RESET);
+    // Nothing in the guest reported a status, so there is none to clear.
+    let output = term.output.lock().unwrap();
+    assert!(
+        !output
+            .windows(CLEAR_STATUS.len())
+            .any(|w| w == CLEAR_STATUS),
+        "status records were cleared; see {}",
+        term.log.display()
+    );
 }
 
 #[test]
@@ -1003,13 +1013,15 @@ fn escape_key_shuts_the_vm_down() {
     term.type_until(r#"echo "TERM-$TERM-END""#, "TERM-xterm-256color-END");
 
     // The VM goes away while the guest has the terminal on the alternate
-    // screen, as a full-screen program would.
-    term.type_line(r#"printf '\033[?1049h'; echo "ALT-$((4 + 4))""#);
+    // screen and has reported a status, as a busy full-screen program would.
+    term.type_line(
+        r#"printf '\033[?1049h\033]7501;state=working:app=test\033\\'; echo "ALT-$((4 + 4))""#,
+    );
     term.expect("ALT-8", CONSOLE_TIMEOUT);
     term.send(b"\x1d");
     term.expect("[sendit] Shutting down.", CONSOLE_TIMEOUT);
     term.wait_for_exit();
-    term.expect_end(&[LEAVE_ALTERNATE_SCREEN, TERMINAL_RESET].concat());
+    term.expect_end(&[CLEAR_STATUS, LEAVE_ALTERNATE_SCREEN, TERMINAL_RESET].concat());
 }
 
 impl Project {

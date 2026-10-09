@@ -41,6 +41,10 @@ Inside the VM, the host is reachable as `host.sendit.internal`, whatever subnet 
 
 In the console, `exit` (or Ctrl-D) shuts the VM down. Ctrl-] asks the guest to shut down; pressing it again forces the VM off. A shutdown that takes longer than 30 seconds is forced too.
 
+Programs in the VM can report their status to your terminal with the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status) (OSC 7501), as they would on the Mac: the console passes the reports through, and the terminal's answer to their query comes back. When the VM stops, sendit clears the records they left, so a terminal doesn't keep showing a program in the VM as busy or waiting. While provisioning, nothing in the VM reads the console, so a script's query goes unanswered; its reports still get through.
+
+sendit reports its own status the same way, under its own `id`: while it downloads Debian and builds base images, and whether that ended ready or failed; while it waits for an answer to a question; while `sendit stop` waits for the VM; and when `sendit run` ends with an error.
+
 The project is mounted at `/home/dev/<name>`, where login shells start. `run` also takes these flags:
 
 - `--cpus N`

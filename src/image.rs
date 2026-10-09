@@ -14,6 +14,7 @@ use sha2::{Digest, Sha512};
 
 use crate::config::ByteSize;
 use crate::paths::Paths;
+use crate::status::Status;
 use crate::util::{fresh_dir, run, run_output};
 
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
@@ -58,6 +59,7 @@ pub fn debian_image(paths: &Paths) -> Result<PathBuf> {
         }
     }
 
+    Status::Working("Unpacking the Debian image", None).report();
     eprintln!("Unpacking {IMAGE_NAME}.tar.xz");
     let unpack_dir = dir.join("unpack");
     fresh_dir(&unpack_dir)?;
@@ -102,6 +104,7 @@ fn fetch_checksum() -> Result<String> {
 }
 
 fn download(url: &str, dest: &Path) -> Result<()> {
+    Status::Working("Downloading the Debian image", None).report();
     eprintln!("Downloading {url}");
     let part = dest.with_extension("part");
     run(Command::new("curl")
