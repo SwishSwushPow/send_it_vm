@@ -26,10 +26,17 @@ use crate::util;
 /// The most of a link file that is read; a VM could make `.git` huge.
 const MAX_LINK_FILE: u64 = 4096;
 
-/// The main worktree of `root`, a canonical path, if `root` is a linked
-/// worktree of a non-bare repository and not the main worktree's ancestor.
+/// The counterpart of `root`, a canonical path, in its main worktree, if
+/// `root` is in a linked worktree of a non-bare repository that isn't
+/// inside the main worktree: the main worktree itself for the linked one,
+/// and the same subdirectory for one of its subdirectories, as in a
+/// monorepo. That subdirectory needn't exist in the main worktree.
 pub fn main_worktree(root: &Path) -> Option<PathBuf> {
-    let dot_git = root.join(".git");
+    // The innermost `.git` is the repository's, as for git.
+    let top = root
+        .ancestors()
+        .find(|dir| fs::symlink_metadata(dir.join(".git")).is_ok())?;
+    let dot_git = top.join(".git");
     let gitdir = read_link(&dot_git, "gitdir: ")?;
     let worktrees = gitdir.parent()?;
     let common = worktrees.parent()?;
@@ -37,11 +44,38 @@ pub fn main_worktree(root: &Path) -> Option<PathBuf> {
         return None;
     }
     let main = common.parent()?;
-    // A main worktree inside `root` would be the VM's own doing.
-    if main.starts_with(root) || read_link(&gitdir.join("gitdir"), "")? != dot_git {
+    // A main worktree inside the linked one would be the VM's own doing.
+    if main.starts_with(top) || read_link(&gitdir.join("gitdir"), "")? != dot_git {
         return None;
     }
-    Some(main.to_path_buf())
+    let sub = root.strip_prefix(top).ok()?;
+    Some(if sub.as_os_str().is_empty() {
+        main.to_path_buf()
+    } else {
+        main.join(sub)
+    })
+}
+
+/// The counterpart of `dir` in the worktree of `branch` in the git
+/// repository at `dir`: the worktree itself, or for a subdirectory of the
+/// repository, as in a monorepo, the same one in the worktree. The
+/// worktree is made if needed: see `open_worktree`.
+pub fn open(dir: &Path, branch: &str, from: Option<&str>, path: Option<&Path>) -> Result<PathBuf> {
+    let sub = git(dir, &["rev-parse", "--show-prefix"])
+        .with_context(|| format!("finding the git repository of {}", dir.display()))?;
+    let worktree = open_worktree(dir, branch, from, path)?;
+    if sub.is_empty() {
+        return Ok(worktree);
+    }
+    let sub = PathBuf::from(OsString::from_vec(sub));
+    let project = worktree.join(&sub);
+    ensure!(
+        project.is_dir(),
+        "{} is not in the worktree of {branch}, {}",
+        sub.display(),
+        worktree.display()
+    );
+    Ok(project.canonicalize()?)
 }
 
 /// The worktree of `branch` in the git repository at `dir`, made if
@@ -50,9 +84,13 @@ pub fn main_worktree(root: &Path) -> Option<PathBuf> {
 /// branch starts at `from`, else HEAD; one that only a single remote has
 /// tracks it, as with `git checkout`, and one that several remotes have
 /// needs `from` to pick one.
-pub fn open(dir: &Path, branch: &str, from: Option<&str>, path: Option<&Path>) -> Result<PathBuf> {
-    let top = git(dir, &["rev-parse", "--show-toplevel"])
-        .with_context(|| format!("finding the git repository of {}", dir.display()))?;
+fn open_worktree(
+    dir: &Path,
+    branch: &str,
+    from: Option<&str>,
+    path: Option<&Path>,
+) -> Result<PathBuf> {
+    let top = git(dir, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(OsString::from_vec(top)).canonicalize()?;
     let main = if top.join(".git").is_dir() {
         top
@@ -221,6 +259,25 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_same_subdirectory_of_the_main_worktree() {
+        let temp = TempDir::new("worktree-main-sub");
+        let (main, wt) = layout(temp.path());
+        let sub = wt.join("apps/web");
+        fs::create_dir_all(&sub).unwrap();
+        // Whether or not the main worktree has it.
+        assert_eq!(main_worktree(&sub), Some(main.join("apps/web")));
+        fs::create_dir_all(main.join("apps/web")).unwrap();
+        assert_eq!(main_worktree(&main.join("apps/web")), None);
+
+        // A repository of its own inside the worktree.
+        let vendored = wt.join("vendor/lib");
+        fs::create_dir_all(vendored.join(".git")).unwrap();
+        assert_eq!(main_worktree(&vendored), None);
+        fs::create_dir(vendored.join("src")).unwrap();
+        assert_eq!(main_worktree(&vendored.join("src")), None);
+    }
+
+    #[test]
     fn follows_relative_links() {
         let temp = TempDir::new("worktree-relative");
         let (main, wt) = layout(temp.path());
@@ -341,6 +398,39 @@ mod tests {
 
         assert!(open(&repo, "a..b", None, None).is_err());
         assert!(open(temp.path(), "x", None, None).is_err());
+    }
+
+    #[test]
+    fn opens_the_same_subdirectory_of_worktrees() {
+        let temp = TempDir::new("worktree-open-sub");
+        let repo = repo(temp.path());
+        fs::create_dir_all(repo.join("apps/web")).unwrap();
+        fs::write(repo.join("apps/web/file"), "").unwrap();
+        git_in(&repo, &["add", "."]);
+        let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit"];
+        git_in(&repo, &[&commit[..], &["-q", "-m", "web"]].concat());
+
+        let web = open(&repo.join("apps/web"), "x", None, None).unwrap();
+        let wt = temp.path().join("repo.worktrees/x");
+        assert_eq!(web, wt.join("apps/web"));
+        assert_eq!(main_worktree(&web), Some(repo.join("apps/web")));
+        // And back, from the worktree's subdirectory or its root.
+        assert_eq!(open(&web, "x", None, None).unwrap(), web);
+        assert_eq!(
+            open(&wt.join("apps"), "x", None, None).unwrap(),
+            wt.join("apps")
+        );
+        assert_eq!(open(&repo, "x", None, None).unwrap(), wt);
+
+        // A directory the branch doesn't have.
+        fs::create_dir(repo.join("new")).unwrap();
+        let error = open(&repo.join("new"), "x", None, None).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new/ is not in the worktree of x"),
+            "{error:#}"
+        );
     }
 
     #[test]

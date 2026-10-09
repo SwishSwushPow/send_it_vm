@@ -307,7 +307,8 @@ impl Config {
     }
 
     /// The `[projects."<path>"]` table matching `project`, else, for a
-    /// linked git worktree, the one matching its main worktree, if any.
+    /// linked git worktree or a subdirectory of one, the one matching its
+    /// counterpart in the main worktree, if any.
     fn project_settings(&self, paths: &Paths, project: &Project) -> Result<Option<&Settings>> {
         if let Some(settings) = self.table(paths, &project.root)? {
             return Ok(Some(settings));
@@ -1009,6 +1010,27 @@ mod tests {
         assert_eq!(resolve(&main_table).cpus, 1);
         let own_table = format!("[projects.\"{}\"]\ncpus = 2\n", wt.root.display());
         assert_eq!(resolve(&(main_table + &own_table)).cpus, 2);
+    }
+
+    #[test]
+    fn worktree_subdirectories_fall_back_to_the_main_worktree_table() {
+        let fx = Fixture::new("worktree-sub-table");
+        let (main, wt) = worktree::layout(&fx.dir);
+        let wt = wt.join("proj");
+        fs::create_dir(&wt).unwrap();
+        let wt = Project::at(&wt).unwrap();
+        let resolve = |config: &str| {
+            Config::parse(config)
+                .unwrap()
+                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir)
+                .unwrap()
+        };
+        // Even without the subdirectory in the main worktree.
+        let table = format!("[projects.\"{}\"]\ncpus = 1\n", main.join("proj").display());
+        assert_eq!(resolve(&table).cpus, 1);
+        // Not the table of the repository's root.
+        let root_table = format!("[projects.\"{}\"]\ncpus = 3\n", main.display());
+        assert_eq!(resolve(&root_table).cpus, DEFAULT_CPUS);
     }
 
     #[test]

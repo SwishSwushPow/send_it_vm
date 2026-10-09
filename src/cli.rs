@@ -118,7 +118,8 @@ pub struct RunArgs {
     /// worktree's VM instead. The worktree goes next to the main one, into
     /// <repo>.worktrees/<branch> with each / replaced by -, and the branch
     /// is created if it doesn't exist; if it has a worktree already, that
-    /// one is used
+    /// one is used. For a project in a subdirectory of the repository, the
+    /// same subdirectory of the worktree is booted
     #[arg(long, value_name = "BRANCH")]
     pub worktree: Option<String>,
 

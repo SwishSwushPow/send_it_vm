@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `sendit run --worktree` in a subdirectory of a repository, as in a monorepo, boots the VM of the same subdirectory of the worktree instead of the worktree's root. That VM starts as a copy of the VM of the subdirectory in the main checkout, with its image, and uses its `[projects."<path>"]` table. A subdirectory of a linked worktree is recognized as one also without `--worktree`.
+
 ## 0.7.0 - 2026-10-09
 
 ### Added

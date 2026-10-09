@@ -749,7 +749,16 @@ mod tests {
     /// A worktree `wt` of `main` in `temp`, and the VM of `main`, made from
     /// the `rust` image.
     fn worktree_with_parent(temp: &Path, paths: &Paths) -> (Project, VmDir) {
+        subdirectory_with_parent(temp, paths, "")
+    }
+
+    /// The subdirectory `sub` of a worktree `wt` of `main` in `temp`, and
+    /// the VM of the same subdirectory of `main`, made from the `rust` image.
+    fn subdirectory_with_parent(temp: &Path, paths: &Paths, sub: &str) -> (Project, VmDir) {
         let (main, wt) = worktree::layout(temp);
+        let (main, wt) = (main.join(sub), wt.join(sub));
+        fs::create_dir_all(&main).unwrap();
+        fs::create_dir_all(&wt).unwrap();
         let main = Project::at(&main).unwrap();
         let parent = dir(paths, &main);
         fs::create_dir_all(parent.path()).unwrap();
@@ -773,6 +782,22 @@ mod tests {
         let go: ImageName = "go".parse().unwrap();
         assert_eq!(image(&paths, &wt, None), "rust".parse().unwrap());
         assert_eq!(image(&paths, &wt, Some(&go)), go);
+    }
+
+    #[test]
+    fn subdirectories_of_worktrees_take_the_image_of_their_parent() {
+        let temp = crate::util::TempDir::new("vm-parent-image-sub");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, vm) = subdirectory_with_parent(temp.path(), &paths, "apps/web");
+        assert_eq!(
+            parent(&paths, &wt).map(|dir| dir.path().to_path_buf()),
+            Some(vm.path().to_path_buf())
+        );
+        assert_eq!(image(&paths, &wt, None), "rust".parse().unwrap());
+        // Not for the directory above it, whose counterpart has no VM.
+        let apps = Project::at(wt.root.parent().unwrap()).unwrap();
+        assert!(parent(&paths, &apps).is_none());
+        assert_eq!(image(&paths, &apps, None), ImageName::default());
     }
 
     #[test]
