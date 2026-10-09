@@ -15,7 +15,7 @@ use objc2_virtualization::*;
 
 use super::{VmDir, VmSpec, ns_message};
 use crate::mounts::Share;
-use crate::util::{file_url, if_exists};
+use crate::util::{file_url, if_exists, write_atomic};
 
 pub fn build(
     dir: &VmDir,
@@ -206,7 +206,8 @@ fn load_or_create<T>(
         return parse(&bytes).with_context(|| format!("invalid {what} in {}", path.display()));
     }
     let (value, bytes) = create();
-    fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))?;
+    // A half-written file would keep the VM from starting again.
+    write_atomic(path, &bytes)?;
     Ok(value)
 }
 

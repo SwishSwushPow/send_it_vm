@@ -2,7 +2,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,6 +44,24 @@ pub fn read_dir(dir: &Path) -> Result<impl Iterator<Item = io::Result<fs::DirEnt
 pub fn fresh_dir(dir: &Path) -> Result<()> {
     let _ = fs::remove_dir_all(dir);
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
+/// Writes `contents` to `path` all at once: it is written to a temporary
+/// file next to it first, which then replaces `path`. A crash leaves the
+/// old file or the new one, never part of it.
+pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+    let name = path.file_name().context("no file name")?;
+    let temp = path.with_file_name(format!(".{}.tmp", name.display()));
+    let written = (|| {
+        let mut file = fs::File::create(&temp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 /// Creates `dir` if needed and keeps it and everything in it out of Time
@@ -127,5 +145,22 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_files_atomically() {
+        let temp = TempDir::new("write-atomic");
+        let path = temp.path().join("mac");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        // No temporary file is left over.
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+        assert!(write_atomic(&temp.path().join("missing/mac"), b"x").is_err());
     }
 }
