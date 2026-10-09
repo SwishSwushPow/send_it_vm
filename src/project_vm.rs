@@ -6,6 +6,12 @@
 //! new ones on first boot and saves them, so every VM has its own. The VM is
 //! built in `.<id>.partial/` and only renamed into place once complete.
 //!
+//! The VM of a linked git worktree is instead a copy of its main worktree's
+//! VM, if that is stopped: it starts with everything installed and cached
+//! there. A running VM's disk changes under the copy and the guest's page
+//! cache isn't on it yet, so a copy then would only be as good as after a
+//! power cut; `run` offers to start from the base image instead.
+//!
 //! While a VM runs, its `sendit run` process holds a lock on `run/lock` and
 //! has written its PID there; that is how the other commands find it.
 
@@ -19,6 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::commands;
 use crate::config::{ByteSize, GUEST_USER, VmSettings};
 use crate::image;
 use crate::mounts;
@@ -27,6 +34,7 @@ use crate::provision::{self, BaseState};
 use crate::status::Status;
 use crate::util;
 use crate::vm::{self, VmDir, VmSpec, net};
+use crate::worktree;
 
 /// How long `stop` waits for the VM to go away. `run` forces the VM off if
 /// the guest hasn't shut down after `vm::STOP_TIMEOUT`.
@@ -52,19 +60,33 @@ impl Metadata {
 }
 
 /// The image `project` uses: the `chosen` one, else the one its VM was
-/// created from, else `default`.
+/// created from, else, before it has a VM, the one its parent VM was, else
+/// `default`.
 pub fn image(paths: &Paths, project: &Project, chosen: Option<&ImageName>) -> ImageName {
-    match chosen {
-        Some(image) => image.clone(),
-        None => metadata(&dir(paths, project))
-            .map(|metadata| metadata.image)
-            .unwrap_or_default(),
+    if let Some(image) = chosen {
+        return image.clone();
     }
+    let dir = dir(paths, project);
+    let dir = match parent(paths, project) {
+        Some(parent) if !dir.path().exists() => parent,
+        _ => dir,
+    };
+    metadata(&dir)
+        .map(|metadata| metadata.image)
+        .unwrap_or_default()
 }
 
 /// The directory of the project's VM.
 pub fn dir(paths: &Paths, project: &Project) -> VmDir {
     VmDir::new(paths.vm_dir(project))
+}
+
+/// The VM that the project's VM is made as a copy of: its main worktree's,
+/// if the project is a linked git worktree and the main worktree has one.
+pub fn parent(paths: &Paths, project: &Project) -> Option<VmDir> {
+    let main = Project::at(&worktree::main_worktree(&project.root)?).ok()?;
+    let dir = dir(paths, &main);
+    dir.path().exists().then_some(dir)
 }
 
 pub fn metadata(dir: &VmDir) -> Result<Metadata> {
@@ -119,9 +141,13 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 /// console until it stops.
 pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
     let dir = dir(paths, project);
+    let mut note = None;
     if !dir.path().exists() {
-        let image = settings.image.clone().unwrap_or_default();
-        create(paths, project, &dir, &image)?;
+        let image = image(paths, project, settings.image.as_ref());
+        match create(paths, project, &dir, &image, &commands::confirm)? {
+            Created::Made(made_note) => note = made_note,
+            Created::Declined => return Ok(()),
+        }
     }
     let metadata = metadata(&dir)?;
     if let Some(image) = &settings.image {
@@ -152,6 +178,9 @@ pub fn run(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()
         settings.memory,
         settings.disk_size
     );
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
@@ -289,30 +318,137 @@ pub fn delete(dir: &VmDir) -> Result<()> {
     fs::remove_dir_all(dir.path()).with_context(|| format!("deleting {}", dir.path().display()))
 }
 
-fn create(paths: &Paths, project: &Project, dir: &VmDir, image: &ImageName) -> Result<()> {
-    let state = provision::base_state(paths, image)?;
-    if matches!(state, BaseState::Missing | BaseState::Outdated) {
-        bail!("the {image} image is {}", state.describe(image));
-    }
-    let base = VmDir::new(paths.image_dir(image));
+/// What a new VM is a copy of.
+enum Source {
+    Base,
+    Parent {
+        dir: VmDir,
+        metadata: Metadata,
+        /// Keeps the parent from starting while it is copied.
+        _lock: File,
+    },
+}
+
+/// Asks a yes/no question, like `commands::confirm`.
+type Ask<'a> = &'a dyn Fn(&str, &str) -> Result<bool>;
+
+/// The parent VM, locked, if the project has one and it can be copied for
+/// `image`; else the base image, with a note why if there is a parent.
+/// While the parent runs, the base image only if the user agrees, else
+/// `None`.
+fn source(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    ask: Ask,
+) -> Result<Option<(Source, Option<String>)>> {
+    let Some(parent) = parent(paths, project) else {
+        return Ok(Some((Source::Base, None)));
+    };
+    let why_not = match metadata(&parent) {
+        Err(e) => format!("{e:#}"),
+        Ok(m) if m.image != *image => format!("it was made from the {} image", m.image),
+        Ok(m) if m.outdated() => "it was made from an outdated base image".to_string(),
+        Ok(metadata) => match try_lock(&parent)? {
+            Some(lock) => {
+                let source = Source::Parent {
+                    dir: parent,
+                    metadata,
+                    _lock: lock,
+                };
+                return Ok(Some((source, None)));
+            }
+            None => {
+                let main = paths.display(&metadata.project_path);
+                let question = format!(
+                    "The VM of {main} is running, and a copy of it would miss what it hasn't \
+                     written to its disk yet. Start this worktree's VM from the {image} image \
+                     instead?"
+                );
+                let no_terminal = format!(
+                    "the VM of {main} is running; stop it to start this worktree's VM as a \
+                     copy of it, or confirm in a terminal to start from the {image} image"
+                );
+                if ask(&question, &no_terminal)? {
+                    return Ok(Some((Source::Base, None)));
+                }
+                eprintln!(
+                    "Stop it (`sendit stop` in {main}), then run again to start from a copy."
+                );
+                return Ok(None);
+            }
+        },
+    };
+    let note = format!(
+        "This VM started from the {image} image, not as a copy of {}: {why_not}.",
+        paths.display(parent.path())
+    );
+    Ok(Some((Source::Base, Some(note))))
+}
+
+/// What `create` did.
+#[derive(Debug, PartialEq)]
+enum Created {
+    /// Made the VM, with a note on why it isn't a copy of its parent VM if
+    /// it has one.
+    Made(Option<String>),
+    /// Left it: the parent VM runs and the user would rather wait for it.
+    Declined,
+}
+
+/// Creates the project's VM as a copy of its parent VM, or else of the base
+/// image, asking with `ask` first if the parent is running.
+fn create(
+    paths: &Paths,
+    project: &Project,
+    dir: &VmDir,
+    image: &ImageName,
+    ask: Ask,
+) -> Result<Created> {
+    let Some((source, note)) = source(paths, project, image, ask)? else {
+        return Ok(Created::Declined);
+    };
+    let (from, base_revision) = match &source {
+        Source::Parent {
+            dir: parent,
+            metadata,
+            ..
+        } => {
+            eprintln!(
+                "Creating {} as a copy of the VM of {}",
+                paths.display(dir.path()),
+                metadata.project_path.display()
+            );
+            (parent.path().to_path_buf(), metadata.base_revision)
+        }
+        Source::Base => {
+            let state = provision::base_state(paths, image)?;
+            if matches!(state, BaseState::Missing | BaseState::Outdated) {
+                bail!("the {image} image is {}", state.describe(image));
+            }
+            eprintln!(
+                "Creating {} from the {image} image",
+                paths.display(dir.path())
+            );
+            (paths.image_dir(image), provision::BASE_REVISION)
+        }
+    };
+    let from = VmDir::new(from);
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     util::fresh_dir(partial.path())?;
 
-    eprintln!(
-        "Creating {} from the {image} image",
-        paths.display(dir.path())
-    );
-    image::clone_file(&base.disk(), &partial.disk())?;
-    image::clone_file(&base.efi_vars(), &partial.efi_vars())?;
+    image::clone_file(&from.disk(), &partial.disk())?;
+    image::clone_file(&from.efi_vars(), &partial.efi_vars())?;
     let metadata = toml::to_string(&Metadata {
         project_path: project.root.clone(),
         image: image.clone(),
-        base_revision: provision::BASE_REVISION,
+        base_revision,
     })?;
     fs::write(partial.metadata(), metadata)?;
 
     fs::rename(partial.path(), dir.path())
-        .with_context(|| format!("moving the new VM to {}", dir.path().display()))
+        .with_context(|| format!("moving the new VM to {}", dir.path().display()))?;
+    Ok(Created::Made(note))
 }
 
 /// Grows the disk to the configured size; the guest grows its root
@@ -382,6 +518,7 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn keeps_the_image_a_vm_was_made_from() {
@@ -404,6 +541,76 @@ mod tests {
         .unwrap();
         assert_eq!(image(&paths, &project, None), rust);
         assert_eq!(image(&paths, &project, Some(&go)), go);
+    }
+
+    /// A worktree `wt` of `main` in `temp`, and the VM of `main`, made from
+    /// the `rust` image.
+    fn worktree_with_parent(temp: &Path, paths: &Paths) -> (Project, VmDir) {
+        let (main, wt) = worktree::layout(temp);
+        let main = Project::at(&main).unwrap();
+        let parent = dir(paths, &main);
+        fs::create_dir_all(parent.path()).unwrap();
+        let metadata = Metadata {
+            project_path: main.root.clone(),
+            image: "rust".parse().unwrap(),
+            base_revision: provision::BASE_REVISION,
+        };
+        fs::write(parent.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
+        fs::write(parent.disk(), "disk").unwrap();
+        fs::write(parent.efi_vars(), "efi").unwrap();
+        (Project::at(&wt).unwrap(), parent)
+    }
+
+    #[test]
+    fn worktrees_take_the_image_of_their_parent() {
+        let temp = crate::util::TempDir::new("vm-parent-image");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, _) = worktree_with_parent(temp.path(), &paths);
+        let go: ImageName = "go".parse().unwrap();
+        assert_eq!(image(&paths, &wt, None), "rust".parse().unwrap());
+        assert_eq!(image(&paths, &wt, Some(&go)), go);
+    }
+
+    #[test]
+    fn copies_the_parent_while_it_is_stopped() {
+        let temp = crate::util::TempDir::new("vm-fork");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        let rust: ImageName = "rust".parse().unwrap();
+        let vm = dir(&paths, &wt);
+
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        let no = |_: &str, _: &str| Ok(false);
+        let yes = |_: &str, _: &str| Ok(true);
+
+        // Running: nothing unless the user agrees to the base image, which
+        // isn't there.
+        let running = lock(&parent).unwrap();
+        assert_eq!(
+            create(&paths, &wt, &vm, &rust, &no).unwrap(),
+            Created::Declined
+        );
+        assert!(!vm.path().exists());
+        let error = create(&paths, &wt, &vm, &rust, &yes).unwrap_err();
+        assert!(error.to_string().contains("rust image"), "{error:#}");
+        drop(running);
+
+        // Made from another image: from the base image without asking.
+        let go: ImageName = "go".parse().unwrap();
+        assert!(create(&paths, &wt, &vm, &go, &never).is_err());
+
+        assert_eq!(
+            create(&paths, &wt, &vm, &rust, &never).unwrap(),
+            Created::Made(None)
+        );
+        assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "disk");
+        assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "efi");
+        let metadata = metadata(&vm).unwrap();
+        assert_eq!(metadata.project_path, wt.root);
+        assert_eq!(metadata.image, rust);
+        assert!(!vm.machine_id().exists() && !vm.mac().exists());
+        // The parent can start again.
+        assert_eq!(state(&parent).unwrap(), State::Stopped);
     }
 
     #[test]

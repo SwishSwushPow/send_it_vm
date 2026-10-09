@@ -104,6 +104,10 @@ These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` 
 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
+### Git worktrees
+
+A linked worktree (`git worktree add`) gets its own VM, like any other directory. If the main worktree has a VM and it is stopped, the worktree's VM starts as a copy of it instead of the base image: with everything installed, logged into and cached there, e.g. `~/.cargo/registry`. The copy is instant and takes no space until either VM writes. A copy of a running VM's disk could miss what the VM hasn't written out yet, so while the main worktree's VM runs, `sendit run` asks whether to start from the base image instead; the default is no, to stop the main worktree's VM first. Both VMs keep the same SSH host keys and machine ID.
+
 ## Limits
 
 The VM is a boundary, but not one that makes it safe to run anything in it and then trust the project folder:

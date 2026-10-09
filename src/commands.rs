@@ -93,8 +93,15 @@ pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
     if project_vm::state(&dir)? != State::Stopped {
         bail!("the VM is running; stop it first with `sendit stop`");
     }
+    let next = match project_vm::parent(paths, project) {
+        Some(parent) => format!(
+            "of {} if it is stopped then, else of the base image",
+            paths.display(parent.path())
+        ),
+        None => "of the base image".to_string(),
+    };
     let question = format!(
-        "Delete {} and everything stored in it? The next `run` starts from a fresh copy of the base image.",
+        "Delete {} and everything stored in it? The next `run` starts from a fresh copy {next}.",
         paths.display(dir.path())
     );
     if yes || confirm(&question, PASS_YES)? {
@@ -311,7 +318,7 @@ const PASS_YES: &str = "not asking for confirmation without a terminal; pass --y
 
 /// Asks a yes/no question on the terminal; "no" unless the answer is yes.
 /// Fails with `no_terminal` if stdin isn't a terminal.
-fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
+pub fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
     ensure!(std::io::stdin().is_terminal(), "{no_terminal}");
     Status::Question(question).report();
     eprint!("{question} [y/N] ");

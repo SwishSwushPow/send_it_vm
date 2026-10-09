@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The VM of a linked git worktree starts as a copy of the main worktree's VM, if that has one and it is stopped, instead of the base image: with everything installed and cached there. While the main worktree's VM runs, `sendit run` asks whether to start from the base image instead.
+
 ## 0.6.0 - 2026-10-09
 
 ### Added

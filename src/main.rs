@@ -13,6 +13,7 @@ mod sign;
 mod status;
 mod util;
 mod vm;
+mod worktree;
 
 use anyhow::Result;
 use clap::Parser;
