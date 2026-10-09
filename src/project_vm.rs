@@ -615,20 +615,24 @@ fn create(
     let from = VmDir::new(from);
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     util::fresh_dir(partial.path())?;
-
-    image::clone_file(&from.disk(), &partial.disk())?;
-    image::clone_file(&from.efi_vars(), &partial.efi_vars())?;
-    let metadata = toml::to_string(&Metadata {
-        project_path: project.root.clone(),
-        image: image.clone(),
-        base_revision,
-        copy_of,
-    })?;
-    fs::write(partial.metadata(), metadata)?;
-
-    fs::rename(partial.path(), dir.path())
-        .with_context(|| format!("moving the new VM to {}", dir.path().display()))?;
-    Ok(note)
+    let made = (|| {
+        image::clone_file(&from.disk(), &partial.disk())?;
+        image::clone_file(&from.efi_vars(), &partial.efi_vars())?;
+        let metadata = toml::to_string(&Metadata {
+            project_path: project.root.clone(),
+            image: image.clone(),
+            base_revision,
+            copy_of,
+        })?;
+        fs::write(partial.metadata(), metadata)?;
+        fs::rename(partial.path(), dir.path())
+            .with_context(|| format!("moving the new VM to {}", dir.path().display()))
+    })();
+    if made.is_err() {
+        // Nothing lists it; on another volume, its disk is a full copy.
+        let _ = fs::remove_dir_all(partial.path());
+    }
+    made.map(|()| note)
 }
 
 /// Grows the disk to the configured size; the guest grows its root
@@ -830,6 +834,22 @@ mod tests {
         let _busy = try_lock(&vm).unwrap().unwrap();
         assert_eq!(state(&vm).unwrap(), State::Running(None));
         assert!(stop(&paths, &project).is_err());
+    }
+
+    #[test]
+    fn leaves_nothing_behind_when_creating_fails() {
+        let temp = crate::util::TempDir::new("vm-create-fails");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        fs::remove_file(parent.efi_vars()).unwrap();
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        let vm = dir(&paths, &wt);
+        assert!(create(&paths, &wt, &vm, &"rust".parse().unwrap(), &never).is_err());
+        let left: Vec<_> = fs::read_dir(paths.vms_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [parent.path().file_name().unwrap()]);
     }
 
     /// The words a POSIX shell makes of `line`.
