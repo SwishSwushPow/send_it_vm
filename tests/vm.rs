@@ -892,7 +892,20 @@ fn runs_a_command_instead_of_the_console() {
 
     // Stopped meanwhile, the guest shuts down cleanly: its shutdown ends
     // the command, which doesn't count as asking twice.
-    let mut vm = project.run(&["sleep", "600"]);
+    let mut vm = project.run(&["sh", "-c", "touch ~/started; sleep 600"]);
+    // `sendit ssh` may answer before `run` has started the command.
+    let start = Instant::now();
+    while !project
+        .sendit(&["ssh", "test", "-e", "/home/dev/started"])
+        .status
+        .success()
+    {
+        assert!(
+            start.elapsed() < COMMAND_TIMEOUT,
+            "the command didn't start"
+        );
+        sleep(Duration::from_secs(1));
+    }
     project.ok(&["stop"]);
     let status = wait_timeout(&mut vm.child, STOP_TIMEOUT).unwrap();
     let log = fs::read_to_string(&vm.log).unwrap();
