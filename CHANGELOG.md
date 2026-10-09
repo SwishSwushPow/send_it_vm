@@ -17,6 +17,10 @@
 - Answering no to one of sendit's questions, e.g. whether to share the home directory or to delete a VM, makes it exit with 1, as nothing was done.
 - When the VM is already running, `sendit run` points to `sendit ssh`, or for `sendit run <command>`, to `sendit ssh <command>`, with `-C` if the project isn't the current directory.
 
+### Fixed
+
+- Two `sendit provision` running at once no longer break each other's images: the second one waits until the first is done. Building the same image twice at once could leave a base image behind that a provisioning VM was still writing to.
+
 ## 0.6.0 - 2026-10-09
 
 ### Added

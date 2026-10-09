@@ -3,7 +3,7 @@
 //! The Debian cloud image boots with a cloud-init seed ISO attached, runs
 //! `assets/provision.sh` and powers itself off. An image is built in
 //! `images/.<name>.partial/` and only replaces `images/<name>/` once it
-//! succeeded.
+//! succeeded. One sendit process at a time builds images; others wait.
 //!
 //! Custom scripts travel on the seed ISO too and run after the built-in
 //! provisioning, e.g. to install more tools: those in
@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
-use std::fs;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -366,6 +366,7 @@ fn provision(
     force: bool,
     report: impl Fn(),
 ) -> Result<bool> {
+    let _lock = lock(paths)?;
     let base = paths.image_dir(name);
     if marker_file(&VmDir::new(base.clone())).exists() && !force {
         eprintln!(
@@ -440,6 +441,36 @@ fn provision(
     fs::rename(partial.path(), &base)?;
     eprintln!("The {name} image is ready in {}.", paths.display(&base));
     Ok(true)
+}
+
+/// Takes the lock that only one sendit process at a time builds images
+/// under, waiting for it if another one has it. Two builds of the same
+/// image would share its partial directory, and any two would download and
+/// unpack Debian into the same files. Released when the file is closed.
+fn lock(paths: &Paths) -> Result<File> {
+    let path = paths.provision_lock();
+    fs::create_dir_all(paths.cache_dir())?;
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            let waiting = "Waiting for another sendit process to finish provisioning";
+            eprintln!("{waiting}…");
+            Status::Working(waiting, None).report();
+            let locked = file.lock();
+            Status::Clear.report();
+            locked.with_context(|| format!("locking {}", path.display()))?;
+        }
+        Err(fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("locking {}", path.display()));
+        }
+    }
+    Ok(file)
 }
 
 /// Returns the public key of the SSH keypair `key`, generating it first if
@@ -533,6 +564,27 @@ mod tests {
         assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
         assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
+    }
+
+    #[test]
+    fn builds_one_image_at_a_time() {
+        let home = TempDir::new("provision-lock");
+        let paths = Paths::new(home.path().to_path_buf());
+        let first = lock(&paths).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiting = std::thread::spawn({
+            let paths = paths.clone();
+            move || {
+                let second = lock(&paths);
+                tx.send(()).unwrap();
+                second.map(drop)
+            }
+        });
+        let wait = std::time::Duration::from_millis(200);
+        assert!(rx.recv_timeout(wait).is_err(), "didn't wait");
+        drop(first);
+        assert!(rx.recv_timeout(wait * 10).is_ok(), "still waiting");
+        waiting.join().unwrap().unwrap();
     }
 
     #[test]

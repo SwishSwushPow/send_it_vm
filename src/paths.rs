@@ -127,6 +127,11 @@ impl Paths {
         self.cache_dir().join("provision").join(image.as_str())
     }
 
+    /// Held while a base image is built.
+    pub fn provision_lock(&self) -> PathBuf {
+        self.cache_dir().join("provision.lock")
+    }
+
     /// The keypairs whose public keys are baked into the base image.
     pub fn ssh_dir(&self) -> PathBuf {
         self.cache_dir().join("ssh")
