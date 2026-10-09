@@ -183,8 +183,11 @@ pub fn run(
         login(paths, false)?;
     }
     let _lock = lock(&dir)?;
-    // The VM starts now: its boot and banner come first on the screen.
-    vm::clear_screen();
+    // The VM starts now: its boot and banner come first on the screen. A
+    // command's output follows on from what is there, like any command's.
+    if command.is_empty() {
+        vm::clear_screen();
+    }
     resize_disk(paths, &dir, settings)?;
 
     eprintln!(
