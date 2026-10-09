@@ -903,6 +903,78 @@ fn runs_a_command_instead_of_the_console() {
 
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn starts_worktree_vms_as_copies() {
+    let _slot = vm_slot();
+    let project = Project::new("trunk");
+    let worktrees = project.dir.with_extension("worktrees");
+    let worktree = worktrees.join("feature-x");
+    let in_worktree = |args: &[&str]| {
+        let mut cmd = project.env.sendit();
+        cmd.arg("-C").arg(&worktree).args(args);
+        output(cmd, COMMAND_TIMEOUT).unwrap()
+    };
+    // The worktree of an earlier run, and its VM.
+    fs::create_dir_all(&worktree).unwrap();
+    in_worktree(&["stop"]);
+    in_worktree(&["reset", "--yes"]);
+    fs::remove_dir_all(&worktrees).unwrap();
+
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&project.dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+
+    // Something installed in the main worktree's VM.
+    let install = project.command(&["run", "sh", "-c", "echo installed > ~/tool"]);
+    let installed = output(install, BOOT_TIMEOUT + STOP_TIMEOUT).unwrap();
+    assert!(installed.status.success(), "{}", text(&installed.stderr));
+
+    // Not copied while the main worktree's VM runs, unless confirmed.
+    let vm = project.run(&[]);
+    let refused = output(
+        project.command(&["run", "--worktree", "feature/x", "true"]),
+        COMMAND_TIMEOUT,
+    )
+    .unwrap();
+    assert_fails_with(&refused, "is running");
+    vm.stop();
+    let status = text(&in_worktree(&["status"]).stdout);
+    assert!(status.contains("`sendit run` copies the VM of"), "{status}");
+
+    let run = project.command(&[
+        "run",
+        "--worktree",
+        "feature/x",
+        "sh",
+        "-c",
+        "cat ~/tool; pwd; wc -c < .git",
+    ]);
+    let output = output(run, BOOT_TIMEOUT + STOP_TIMEOUT).unwrap();
+    let stderr = text(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    // Only the command's output, none of git's. The worktree's .git file
+    // is hidden like a .git directory.
+    assert_eq!(
+        text(&output.stdout),
+        "installed\n/home/dev/feature-x\n0\n",
+        "{stderr}"
+    );
+    let status = text(&in_worktree(&["status"]).stdout);
+    assert!(status.contains("copy of  the VM of"), "{status}");
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn shares_the_project_and_mounts() {
     let _slot = vm_slot();
     let project = Project::new("shares");
