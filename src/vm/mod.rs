@@ -18,7 +18,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -47,9 +47,13 @@ const STOP_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
 /// the escape key.
 static SIGNALS: AtomicUsize = AtomicUsize::new(0);
 
+/// The last of those signals.
+static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
 const CAUGHT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
 
-extern "C" fn on_signal(_: libc::c_int) {
+extern "C" fn on_signal(signal: libc::c_int) {
+    LAST_SIGNAL.store(signal, Ordering::Relaxed);
     SIGNALS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -251,15 +255,18 @@ impl VmDelegate {
 /// its console user logs out. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
 /// or SIGINT) asks the guest to shut down; doing it again, or the guest not
 /// reacting in time, stops the VM forcibly. So does a shutdown the guest
-/// started on its own that takes too long.
-pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
+/// started on its own that takes too long. Returns the signal that asked
+/// the VM to shut down, if one did before anything else.
+pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
     ensure!(
         unsafe { VZVirtualMachine::isSupported() },
         "virtualization is not supported on this Mac"
     );
 
     // Signals from before this VM, which ended an earlier one, don't count.
-    let mut seen_escapes = SIGNALS.load(Ordering::Relaxed);
+    let first_signal = SIGNALS.load(Ordering::Relaxed);
+    let mut seen_escapes = first_signal;
+    let mut stopped_by = None;
     let _signals = CatchSignals::new();
     let console = Console::attach(&spec.console)?;
     let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
@@ -321,6 +328,11 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
         let guest_stopping = !provisioning && console.guest_stopping();
         stopping = match stopping {
             Stopping::No if escaped || shutdown => {
+                // A signal by now came first: a command that ends because
+                // of it, e.g. ssh on Ctrl-C, sets `shutdown` only after.
+                if SIGNALS.load(Ordering::Relaxed) > first_signal {
+                    stopped_by = Some(LAST_SIGNAL.load(Ordering::Relaxed));
+                }
                 let next = stop(&vm, &state, stopping_notice);
                 if matches!(next, Stopping::Pending) {
                     notice("The VM is still starting; it shuts down once it can.");
@@ -360,7 +372,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<()> {
     };
     drop(console);
     let _ = writeln!(std::io::stderr());
-    result
+    result.map(|()| stopped_by)
 }
 
 fn ns_message(error: &NSError) -> String {

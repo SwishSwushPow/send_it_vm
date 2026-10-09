@@ -38,7 +38,7 @@ sendit prune --all        # delete every VM that isn't running
 
 Commands act on the project in the current directory, or on the one given with `-C DIR`.
 
-A command after `sendit run` or `sendit ssh` runs the same way: as the VM's user (or root, with `sendit ssh --root`), in a login shell, so with the PATH your provisioning scripts set up in `~/.profile`, and in the project directory. Its arguments arrive unchanged; for pipes and the like, run `sh -c '...'`. It gets a terminal if sendit runs in one, so interactive programs work, e.g. `sendit run claude`, and its output can be piped otherwise. sendit exits with the command's exit code. `sendit run` doesn't show the console then: it waits until the VM answers over SSH, runs the command, and shuts the VM down when it ends.
+A command after `sendit run` or `sendit ssh` runs the same way: as the VM's user (or root, with `sendit ssh --root`), in a login shell, so with the PATH your provisioning scripts set up in `~/.profile`, and in the project directory. Its arguments arrive unchanged; for pipes and the like, run `sh -c '...'`. It gets a terminal if sendit runs in one, so interactive programs work, e.g. `sendit run claude`, and its output can be piped otherwise. sendit exits with the command's exit code, or if the VM is stopped before the command ends, e.g. by `sendit stop` or Ctrl-C, with 128 plus the signal's number, as a shell would for a command killed by it. `sendit run` doesn't show the console then: it waits until the VM answers over SSH, runs the command, and shuts the VM down when it ends.
 
 `sendit ssh` ignores `~/.ssh/config`: settings meant for trusted hosts, like `ForwardAgent yes` under `Host *`, would hand your SSH agent to the VM.
 

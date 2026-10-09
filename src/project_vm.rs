@@ -145,7 +145,8 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 /// Boots the project's VM, creating it first if needed, and runs it until
 /// it stops. Without a `command`, the console is attached. With one, the
 /// command runs over SSH once the VM answers, as with `sendit ssh`, and the
-/// VM shuts down when it has ended. Returns its exit code, else 0.
+/// VM shuts down when it has ended. Returns its exit code, or if a signal
+/// stopped the VM first, 128 plus its number; else 0.
 pub fn run(
     paths: &Paths,
     project: &Project,
@@ -226,7 +227,13 @@ pub fn run(
             .unwrap_or_else(|_| Err(anyhow::anyhow!("running the command panicked"))),
         None => Ok(0),
     };
-    let result = result.and(code);
+    let result = match result {
+        Err(e) => Err(e),
+        // Stopped by `sendit stop`, Ctrl-C or the terminal going away before
+        // the command ended: like a shell reports a command killed by it.
+        Ok(Some(signal)) if !command.is_empty() => Ok(128 + signal),
+        Ok(_) => code,
+    };
     if let Err(e) = &result {
         Status::Error(&format!("{e:#}")).report();
     }

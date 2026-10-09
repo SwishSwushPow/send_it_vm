@@ -893,28 +893,38 @@ fn runs_a_command_instead_of_the_console() {
     // The VM shut down when the command ended.
     assert!(project.ok(&["status"]).contains("stopped"));
 
-    // Stopped meanwhile, the guest shuts down cleanly: its shutdown ends
-    // the command, which doesn't count as asking twice.
-    let mut vm = project.run(&["sh", "-c", "touch ~/started; sleep 600"]);
-    // `sendit ssh` may answer before `run` has started the command.
-    let start = Instant::now();
-    while !project
-        .sendit(&["ssh", "test", "-e", "/home/dev/started"])
-        .status
-        .success()
-    {
-        assert!(
-            start.elapsed() < COMMAND_TIMEOUT,
-            "the command didn't start"
-        );
-        sleep(Duration::from_secs(1));
+    // Stopped meanwhile with `sendit stop` (SIGTERM) or Ctrl-C (SIGINT),
+    // the guest shuts down cleanly: its shutdown ends the command, which
+    // doesn't count as asking twice. sendit exits as a shell does for a
+    // command killed by the signal.
+    for (signal, code) in [(libc::SIGTERM, 143), (libc::SIGINT, 130)] {
+        let started = format!("/home/dev/started-{signal}");
+        let mut vm = project.run(&["sh", "-c", &format!("touch {started}; sleep 600")]);
+        // `sendit ssh` may answer before `run` has started the command.
+        let start = Instant::now();
+        while !project
+            .sendit(&["ssh", "test", "-e", &started])
+            .status
+            .success()
+        {
+            assert!(
+                start.elapsed() < COMMAND_TIMEOUT,
+                "the command didn't start"
+            );
+            sleep(Duration::from_secs(1));
+        }
+        if signal == libc::SIGTERM {
+            project.ok(&["stop"]);
+        } else {
+            // SAFETY: plain syscall; the child hasn't been waited for, so
+            // its PID is still its own.
+            unsafe { libc::kill(vm.child.id() as libc::pid_t, signal) };
+        }
+        let status = wait_timeout(&mut vm.child, STOP_TIMEOUT).unwrap();
+        let log = fs::read_to_string(&vm.log).unwrap();
+        assert!(!log.contains("Forcing") && !log.contains("Error"), "{log}");
+        assert_eq!(status.code(), Some(code), "{log}");
     }
-    project.ok(&["stop"]);
-    let status = wait_timeout(&mut vm.child, STOP_TIMEOUT).unwrap();
-    let log = fs::read_to_string(&vm.log).unwrap();
-    assert!(!log.contains("Forcing"), "{log}");
-    // ssh's, for the connection the guest closed.
-    assert_eq!(status.code(), Some(255), "{log}");
 }
 
 #[test]
