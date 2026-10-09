@@ -94,7 +94,7 @@ pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
     if project_vm::state(&dir)? != State::Stopped {
         bail!("the VM is running; stop it first with `sendit stop`");
     }
-    let parent = project_vm::parent(paths, project).and_then(|p| project_vm::metadata(&p).ok());
+    let parent = project_vm::parent_metadata(paths, project);
     let next = match parent {
         Some(parent) => format!(
             "of the VM of {}, or of the base image if that is running then",
@@ -363,7 +363,7 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
     let state = if !vm_dir.path().exists() {
-        let parent = project_vm::parent(paths, project).and_then(|p| project_vm::metadata(&p).ok());
+        let parent = project_vm::parent_metadata(paths, project);
         match parent {
             Some(m) if m.image == *image && !m.outdated() => format!(
                 "not created; `sendit run` copies the VM of {}",

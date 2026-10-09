@@ -94,6 +94,11 @@ pub fn parent(paths: &Paths, project: &Project) -> Option<VmDir> {
     dir.path().exists().then_some(dir)
 }
 
+/// The metadata of the project's parent VM, if it has one that can be read.
+pub fn parent_metadata(paths: &Paths, project: &Project) -> Option<Metadata> {
+    metadata(&parent(paths, project)?).ok()
+}
+
 pub fn metadata(dir: &VmDir) -> Result<Metadata> {
     let path = dir.metadata();
     util::read_toml(&path)?.with_context(|| format!("{} is missing", path.display()))
