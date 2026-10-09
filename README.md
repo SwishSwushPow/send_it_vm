@@ -21,6 +21,7 @@ Virtualization.framework only works for binaries signed with the virtualization 
 ```sh
 sendit provision          # download Debian and build this project's base image (once)
 sendit run                # boot this project's VM and attach to its console
+sendit run --worktree x   # ... of a git worktree on branch x, made if needed
 sendit ssh                # open another shell in the running VM
 sendit ssh --root         # ... as root, e.g. to install packages
 sendit stop               # shut the running VM down
@@ -105,6 +106,8 @@ These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
 ### Git worktrees
+
+`sendit run --worktree <branch>` checks out a branch in a worktree of the project's repository and boots the worktree's VM instead of the project's. The worktree goes next to the main checkout, into `<repo>.worktrees/<branch>`, with each `/` of the branch name replaced by `-`, e.g. `~/dev/repo.worktrees/feature-x` for `feature/x` in `~/dev/repo`; `--worktree-path` puts it elsewhere. A branch that doesn't exist yet starts at `HEAD`, or at `--from`; one that only a remote has tracks it, as with `git checkout`. If the branch has a worktree already, `sendit run --worktree` boots that one's VM, so it also takes you back to the branch later. sendit can't change your shell's directory, but the VM's console starts in the worktree.
 
 A linked worktree (`git worktree add`) gets its own VM, like any other directory. If the main worktree has a VM and it is stopped, the worktree's VM starts as a copy of it instead of the base image: with everything installed, logged into and cached there, e.g. `~/.cargo/registry`. The copy is instant and takes no space until either VM writes. A copy of a running VM's disk could miss what the VM hasn't written out yet, so while the main worktree's VM runs, `sendit run` asks whether to start from the base image instead; the default is no, to stop the main worktree's VM first. Both VMs keep the same SSH host keys and machine ID. Without a `[projects."<path>"]` table of its own, a worktree uses its main worktree's. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
 

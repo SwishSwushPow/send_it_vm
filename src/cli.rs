@@ -60,7 +60,8 @@ pub enum Command {
     Status,
     /// Shut down the project's running VM
     Stop,
-    /// Delete the project's VM; the next `run` starts from a fresh copy of the base image
+    /// Delete the project's VM; the next `run` starts from a fresh copy of the base image,
+    /// or for a git worktree, of its main worktree's VM
     Reset {
         /// Don't ask for confirmation
         #[arg(short, long)]
@@ -110,6 +111,22 @@ pub struct RunArgs {
     /// the VM was made from, else default]
     #[arg(long, value_name = "IMAGE")]
     pub image: Option<ImageName>,
+
+    /// Check out BRANCH in a git worktree of the project and boot that
+    /// worktree's VM instead. The worktree goes next to the main one, into
+    /// <repo>.worktrees/<branch> with each / replaced by -, and the branch
+    /// is created if it doesn't exist; if it has a worktree already, that
+    /// one is used
+    #[arg(long, value_name = "BRANCH")]
+    pub worktree: Option<String>,
+
+    /// Commit to start a new --worktree branch from [default: HEAD]
+    #[arg(long, value_name = "COMMIT", requires = "worktree")]
+    pub from: Option<String>,
+
+    /// Where to put a new --worktree [default: <repo>.worktrees/<branch>]
+    #[arg(long, value_name = "DIR", requires = "worktree")]
+    pub worktree_path: Option<PathBuf>,
 }
 
 impl RunArgs {
@@ -167,6 +184,33 @@ mod tests {
         assert_eq!(settings.read_only, Some(true));
         assert_eq!(settings.expose_git, Some(true));
         assert_eq!(settings.image, Some("rust".parse().unwrap()));
+    }
+
+    #[test]
+    fn parses_worktree_flags() {
+        let cli = Cli::try_parse_from([
+            "sendit",
+            "run",
+            "--worktree",
+            "feature/x",
+            "--from",
+            "main",
+            "--worktree-path",
+            "/w",
+            "--cpus",
+            "2",
+        ])
+        .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.worktree.as_deref(), Some("feature/x"));
+        assert_eq!(args.from.as_deref(), Some("main"));
+        assert_eq!(args.worktree_path, Some(PathBuf::from("/w")));
+        assert_eq!(args.settings().cpus, Some(2));
+        // Only with --worktree.
+        assert!(Cli::try_parse_from(["sendit", "run", "--from", "main"]).is_err());
+        assert!(Cli::try_parse_from(["sendit", "run", "--worktree-path", "/w"]).is_err());
     }
 
     #[test]

@@ -50,7 +50,15 @@ fn main() -> Result<()> {
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
-            let project = project()?;
+            let project = match &args.worktree {
+                Some(branch) => Project::at(&worktree::open(
+                    cli.project.as_deref().unwrap_or(&cwd),
+                    branch,
+                    args.from.as_deref(),
+                    args.worktree_path.as_deref(),
+                )?)?,
+                None => project()?,
+            };
             let settings = resolve(&project, &args.settings())?;
             if !commands::confirm_shares(&paths, &settings)? {
                 return Ok(());
