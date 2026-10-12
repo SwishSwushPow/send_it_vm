@@ -149,7 +149,9 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
 }
 
 /// Boots the project's VM, creating it first if needed, and runs it until
-/// it stops. Without a `command`, the console is attached. With one, the
+/// it stops. A `fresh` VM is created from the base image even for a git
+/// worktree, whose VM is otherwise a copy of its parent VM. Without a
+/// `command`, the console is attached. With one, the
 /// command runs over SSH once the VM answers, as with `sendit ssh`, and the
 /// VM shuts down when it has ended. Returns its exit code, or if a signal
 /// stopped the VM first, 128 plus its number; else 0.
@@ -157,15 +159,25 @@ pub fn run(
     paths: &Paths,
     project: &Project,
     settings: &VmSettings,
+    fresh: bool,
     command: &[String],
 ) -> Result<i32> {
     let dir = dir(paths, project);
     let mut note = None;
     if !dir.path().exists() {
         let image = image(paths, project, settings.image.as_ref());
-        note = create(paths, project, &dir, &image, &commands::confirm)?;
+        note = create(paths, project, &dir, &image, fresh, &commands::confirm)?;
     }
     let metadata = metadata(&dir)?;
+    if fresh && let Some(copy_of) = &metadata.copy_of {
+        bail!(
+            "{} is a copy of the VM of {} already; `sendit reset` deletes it so \
+             that `run --fresh` starts it over from the {} image",
+            paths.display(dir.path()),
+            paths.display(copy_of),
+            metadata.image,
+        );
+    }
     if let Some(image) = &settings.image {
         ensure!(
             metadata.image == *image,
@@ -518,17 +530,19 @@ enum Source {
 /// Asks a yes/no question, like `commands::confirm`.
 type Ask<'a> = &'a dyn Fn(&str, &str) -> Result<bool>;
 
-/// The parent VM, locked, if the project has one and it can be copied for
-/// `image`; else the base image, with a note why if there is a parent.
+/// The parent VM, locked, if the project has one, it can be copied for
+/// `image` and the VM isn't to be `fresh`; else the base image, with a note
+/// why if there is a parent and the VM needn't be fresh.
 /// While the parent runs, the base image only if the user agrees, else
 /// `commands::Declined`.
 fn source(
     paths: &Paths,
     project: &Project,
     image: &ImageName,
+    fresh: bool,
     ask: Ask,
 ) -> Result<(Source, Option<String>)> {
-    let Some(parent) = parent(paths, project) else {
+    let Some(parent) = parent(paths, project).filter(|_| !fresh) else {
         return Ok((Source::Base, None));
     };
     let why_not = match metadata(&parent) {
@@ -572,17 +586,19 @@ fn source(
     Ok((Source::Base, Some(note)))
 }
 
-/// Creates the project's VM as a copy of its parent VM, or else of the base
-/// image, asking with `ask` first if the parent is running. Returns a note
-/// on why it isn't a copy of its parent VM if it has one.
+/// Creates the project's VM as a copy of its parent VM, or else, or if it
+/// is to be `fresh`, of the base image, asking with `ask` first if the
+/// parent is running. Returns a note on why it isn't a copy of its parent
+/// VM if it has one and the VM needn't be fresh.
 fn create(
     paths: &Paths,
     project: &Project,
     dir: &VmDir,
     image: &ImageName,
+    fresh: bool,
     ask: Ask,
 ) -> Result<Option<String>> {
-    let (source, note) = source(paths, project, image, ask)?;
+    let (source, note) = source(paths, project, image, fresh, ask)?;
     let (from, base_revision, copy_of) = match &source {
         Source::Parent {
             dir: parent,
@@ -816,18 +832,21 @@ mod tests {
         // Running: nothing unless the user agrees to the base image, which
         // isn't there.
         let running = lock(&parent, &wt, &[]).unwrap();
-        let declined = create(&paths, &wt, &vm, &rust, &no).unwrap_err();
+        let declined = create(&paths, &wt, &vm, &rust, false, &no).unwrap_err();
         assert!(declined.is::<commands::Declined>(), "{declined:#}");
         assert!(!vm.path().exists());
-        let error = create(&paths, &wt, &vm, &rust, &yes).unwrap_err();
+        let error = create(&paths, &wt, &vm, &rust, false, &yes).unwrap_err();
         assert!(error.to_string().contains("rust image"), "{error:#}");
         drop(running);
 
         // Made from another image: from the base image without asking.
         let go: ImageName = "go".parse().unwrap();
-        assert!(create(&paths, &wt, &vm, &go, &never).is_err());
+        assert!(create(&paths, &wt, &vm, &go, false, &never).is_err());
 
-        assert_eq!(create(&paths, &wt, &vm, &rust, &never).unwrap(), None);
+        assert_eq!(
+            create(&paths, &wt, &vm, &rust, false, &never).unwrap(),
+            None
+        );
         assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "disk");
         assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "efi");
         let metadata = metadata(&vm).unwrap();
@@ -837,6 +856,37 @@ mod tests {
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
         assert_eq!(state(&parent).unwrap(), State::Stopped);
+    }
+
+    #[test]
+    fn fresh_vms_of_worktrees_start_from_the_base_image() {
+        let temp = crate::util::TempDir::new("vm-fresh");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        let rust: ImageName = "rust".parse().unwrap();
+        let base = VmDir::new(paths.image_dir(&rust));
+        fs::create_dir_all(base.path()).unwrap();
+        fs::write(
+            base.path().join("provisioned.toml"),
+            format!(
+                "revision = {}\ncustom_scripts = []\n",
+                provision::BASE_REVISION
+            ),
+        )
+        .unwrap();
+        fs::write(base.disk(), "base disk").unwrap();
+        fs::write(base.efi_vars(), "base efi").unwrap();
+        let vm = dir(&paths, &wt);
+
+        // Without asking, even while the parent runs.
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        let _running = lock(&parent, &wt, &[]).unwrap();
+        assert_eq!(create(&paths, &wt, &vm, &rust, true, &never).unwrap(), None);
+        assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
+        assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "base efi");
+        let metadata = metadata(&vm).unwrap();
+        assert_eq!(metadata.image, rust);
+        assert_eq!(metadata.copy_of, None);
     }
 
     #[test]
@@ -869,7 +919,7 @@ mod tests {
         fs::remove_file(parent.efi_vars()).unwrap();
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
         let vm = dir(&paths, &wt);
-        assert!(create(&paths, &wt, &vm, &"rust".parse().unwrap(), &never).is_err());
+        assert!(create(&paths, &wt, &vm, &"rust".parse().unwrap(), false, &never).is_err());
         let left: Vec<_> = fs::read_dir(paths.vms_dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

@@ -78,7 +78,7 @@ fn sendit() -> Result<ExitCode> {
                 };
                 let settings = resolve(&project, &args.settings())?;
                 commands::confirm_shares(&paths, &settings)?;
-                project_vm::run(&paths, &project, &settings, &args.command)
+                project_vm::run(&paths, &project, &settings, args.fresh, &args.command)
             })();
             if let Err(e) = &ran
                 && !e.is::<Declined>()

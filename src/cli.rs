@@ -131,6 +131,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR", requires = "worktree")]
     pub worktree_path: Option<PathBuf>,
 
+    /// Create a git worktree's VM from the base image instead of as a copy
+    /// of its main worktree's VM. A VM that is such a copy already must be
+    /// deleted first with `sendit reset`
+    #[arg(long)]
+    pub fresh: bool,
+
     /// Command to run once the VM is up, instead of attaching its console:
     /// over SSH as `sendit ssh <COMMAND>` does, and the VM shuts down when
     /// it ends, with sendit exiting with its exit code. Its arguments
