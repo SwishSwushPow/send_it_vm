@@ -59,7 +59,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 
 ## Configuration
 
-`~/.config/sendit/config.toml`. Top-level keys apply to all projects, an `[images.<name>]` table overrides CPUs and memory for the VMs made from that image, and a `[projects."<path>"]` table overrides both for one project. Command-line flags override all of them. Mounts from all layers are combined.
+`~/.config/sendit/config.toml`. Top-level keys apply to all projects, an `[images.<name>]` table overrides CPUs and memory for building that image and for the VMs made from it, and a `[projects."<path>"]` table overrides both for one project's VM. Command-line flags override all of them. Mounts from all layers are combined.
 
 ```toml
 cpus = 4                  # default 2
@@ -70,14 +70,8 @@ banner = false            # leave the "Send It" banner out of the login message
 
 image = "rust"            # the base image new VMs are made from; default "default"
 
-[images.rust]             # CPUs and memory for VMs made from one image
+[images.rust]             # CPUs and memory for building one image and its VMs
 cpus = 6
-
-[provision]               # CPUs and memory for building base images
-memory = "8G"
-
-[provision.rust]          # ... and for building one of them
-memory = "12G"
 
 [projects."~/Code/app"]
 expose-git = true

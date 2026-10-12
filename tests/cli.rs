@@ -285,7 +285,7 @@ fn reports_bad_configuration() {
         "mounts = [\"/tmp:relative\"]\n",
         "guest path relative must be an absolute path below /",
     );
-    status_fails_with("[provision.Bad]\n", "invalid image name \"Bad\"");
+    status_fails_with("[images.Bad]\n", "invalid image name \"Bad\"");
     status_fails_with(
         &format!(
             "[projects.\"{}\"]\ncpus = 1\n[projects.\"{}/../project\"]\ncpus = 1\n",

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- **Breaking:** building an image takes its CPUs and memory from the same places as the VMs made from it: the top-level keys, then its `[images.<name>]` table, then the flags of `sendit provision`. The `[provision]` and `[provision.<name>]` tables are gone; configs that have them must move their settings to `[images.<name>]`, or pass `--cpus` and `--memory` to `sendit provision` for a build that needs more.
+
 ### Removed
 
 - sendit no longer reports its own status with the Program Status Protocol (OSC 7501), and no longer clears the records that programs in the VM left when it stops. The console still passes their reports through unchanged.
