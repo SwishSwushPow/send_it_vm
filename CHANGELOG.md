@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Removed
+
+- sendit no longer reports its own status with the Program Status Protocol (OSC 7501), and no longer clears the records that programs in the VM left when it stops. The console still passes their reports through unchanged.
+
 ### Fixed
 
 - `sendit run --worktree` in a subdirectory of a repository, as in a monorepo, boots the VM of the same subdirectory of the worktree instead of the worktree's root. That VM starts as a copy of the VM of the subdirectory in the main checkout, with its image, and uses its `[projects."<path>"]` table. A subdirectory of a linked worktree is recognized as one also without `--worktree`.

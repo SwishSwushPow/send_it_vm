@@ -10,7 +10,6 @@ mod paths;
 mod project_vm;
 mod provision;
 mod sign;
-mod status;
 mod util;
 mod vm;
 mod worktree;
@@ -24,7 +23,6 @@ use crate::cli::{Cli, Command};
 use crate::commands::{Declined, PruneScope};
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
-use crate::status::Status;
 
 fn main() -> ExitCode {
     match sendit() {
@@ -66,27 +64,20 @@ fn sendit() -> Result<ExitCode> {
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
-            let ran = (|| -> Result<i32> {
-                let project = match &args.worktree {
-                    Some(branch) => Project::at(&worktree::open(
-                        cli.project.as_deref().unwrap_or(&cwd),
-                        branch,
-                        args.from.as_deref(),
-                        args.worktree_path.as_deref(),
-                    )?)?,
-                    None => project()?,
-                };
-                let settings = resolve(&project, &args.settings())?;
-                commands::confirm_shares(&paths, &settings)?;
-                project_vm::run(&paths, &project, &settings, args.fresh, &args.command)
-            })();
-            if let Err(e) = &ran
-                && !e.is::<Declined>()
-            {
-                Status::Error(&format!("{e:#}")).report();
-            }
+            let project = match &args.worktree {
+                Some(branch) => Project::at(&worktree::open(
+                    cli.project.as_deref().unwrap_or(&cwd),
+                    branch,
+                    args.from.as_deref(),
+                    args.worktree_path.as_deref(),
+                )?)?,
+                None => project()?,
+            };
+            let settings = resolve(&project, &args.settings())?;
+            commands::confirm_shares(&paths, &settings)?;
+            let code = project_vm::run(&paths, &project, &settings, args.fresh, &args.command)?;
             // Exit codes and 128 plus a signal number fit.
-            return ran.map(|code| ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
+            return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }
         Command::Provision {
             image,
@@ -104,7 +95,11 @@ fn sendit() -> Result<ExitCode> {
                     vec![project_vm::image(&paths, &project, chosen.as_ref())]
                 }
             };
-            provision::provision_all(&paths, &config, &images, resources, *force)
+            for image in &images {
+                let settings = config.resolve_provision(image, resources)?;
+                provision::provision(&paths, image, &settings, *force)?;
+            }
+            Ok(())
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),

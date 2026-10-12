@@ -13,7 +13,6 @@ use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState};
-use crate::status::Status;
 use crate::util::canonical;
 use crate::vm::{self, VmDir};
 
@@ -346,13 +345,10 @@ fn confirmed(question: &str, no_terminal: &str) -> Result<()> {
 /// Fails with `no_terminal` if stdin isn't a terminal.
 pub fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
     ensure!(std::io::stdin().is_terminal(), "{no_terminal}");
-    Status::Question(question).report();
     eprint!("{question} [y/N] ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
-    let read = std::io::stdin().lock().read_line(&mut answer);
-    Status::Clear.report();
-    read?;
+    std::io::stdin().lock().read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 

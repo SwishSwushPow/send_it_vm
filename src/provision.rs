@@ -23,10 +23,9 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{ByteSize, Config, MountSpec, ProvisionSettings, Resources};
+use crate::config::{ByteSize, Config, MountSpec, ProvisionSettings};
 use crate::image;
 use crate::paths::{ImageName, Paths};
-use crate::status::Status;
 use crate::util;
 use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
 
@@ -317,62 +316,20 @@ fn command(image: &ImageName, force: bool) -> String {
     command
 }
 
-/// Builds `images` in turn, with `cli` resources, unless they are already
-/// provisioned (or `force`), and reports on the terminal how far it got.
-pub fn provision_all(
-    paths: &Paths,
-    config: &Config,
-    images: &[ImageName],
-    cli: &Resources,
-    force: bool,
-) -> Result<()> {
-    let mut built = Vec::new();
-    for (index, image) in images.iter().enumerate() {
-        let settings = config.resolve_provision(image, cli)?;
-        let report = || {
-            let mut msg = format!("Provisioning the {image} image");
-            let mut progress = None;
-            if images.len() > 1 {
-                let _ = write!(msg, " ({}/{})", index + 1, images.len());
-                progress = Some((index * 100 / images.len()) as u8);
-            }
-            Status::Working(&msg, progress).report();
-        };
-        match provision(paths, image, &settings, force, report) {
-            Ok(true) => built.push(image),
-            Ok(false) => {}
-            Err(e) => {
-                Status::Error(&format!("The {image} image: {e:#}")).report();
-                return Err(e);
-            }
-        }
-    }
-    match built.as_slice() {
-        [] => {}
-        [image] => Status::Done(&format!("The {image} image is ready")).report(),
-        built => Status::Done(&format!("{} images are ready", built.len())).report(),
-    }
-    Ok(())
-}
-
-/// Builds the `name` image unless it is already provisioned (or `force`);
-/// returns whether it did. An outdated image is rebuilt: nothing can use it
-/// anymore. Calls `report` when it starts building and again right before
-/// the VM starts, as preparing it may have reported otherwise.
-fn provision(
+/// Builds the `name` image unless it is already provisioned (or `force`).
+/// An outdated image is rebuilt: nothing can use it anymore.
+pub fn provision(
     paths: &Paths,
     name: &ImageName,
     settings: &ProvisionSettings,
     force: bool,
-    report: impl Fn(),
-) -> Result<bool> {
+) -> Result<()> {
     let _lock = lock(paths)?;
     if !force && let Some(why) = already_provisioned(paths, name)? {
         eprintln!("{why}");
-        return Ok(false);
+        return Ok(());
     }
     let base = paths.image_dir(name);
-    report();
 
     let image = image::debian_image(paths)?;
     fs::create_dir_all(paths.ssh_dir())?;
@@ -417,7 +374,6 @@ fn provision(
     let built = (|| {
         image::clone_file(&image, &partial.disk())?;
         image::grow_disk(&partial.disk(), BASE_DISK_SIZE)?;
-        report();
         vm::run(&partial, &spec)?;
         let output = fs::read(&log).with_context(|| format!("reading {}", log.display()))?;
         ensure!(
@@ -445,7 +401,7 @@ fn provision(
     }
     fs::rename(partial.path(), &base)?;
     eprintln!("The {name} image is ready in {}.", paths.display(&base));
-    Ok(true)
+    Ok(())
 }
 
 /// Why `provision` leaves the `name` image alone without `force`, if it
@@ -478,12 +434,9 @@ fn lock(paths: &Paths) -> Result<File> {
     match file.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => {
-            let waiting = "Waiting for another sendit process to finish provisioning";
-            eprintln!("{waiting}…");
-            Status::Working(waiting, None).report();
-            let locked = file.lock();
-            Status::Clear.report();
-            locked.with_context(|| format!("locking {}", path.display()))?;
+            eprintln!("Waiting for another sendit process to finish provisioning…");
+            file.lock()
+                .with_context(|| format!("locking {}", path.display()))?;
         }
         Err(fs::TryLockError::Error(e)) => {
             return Err(e).with_context(|| format!("locking {}", path.display()));
