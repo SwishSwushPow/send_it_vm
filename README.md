@@ -95,7 +95,7 @@ A script can ask for host directories to be shared with the VMs made from its im
 
 These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` is given, and host paths must be absolute or start with `~`. They join the mounts of the config file and the command line, after the top-level ones and before the project's. A directory that doesn't exist on the Mac is left out with a notice instead of failing the run. `sendit provision` lists them, and `sendit status` shows them with the other mounts. Read the mount lines of a script you copy: they give the VM access to files on the Mac, and with `:rw` it can change them.
 
-[`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code and the Pi coding agent. Copy the ones you want with a number in front to set the order, e.g. `00-rust.sh` before `01-helix.sh`, which builds Helix with Rust.
+[`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code, a `CLAUDE.md` that tells Claude Code about the VM (installed as its managed memory file, `/etc/claude-code/CLAUDE.md`, which a `~/.claude` shared from the Mac doesn't hide), and the Pi coding agent. Copy the ones you want with a number in front to set the order, e.g. `00-rust.sh` before `01-helix.sh`, which builds Helix with Rust.
 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
