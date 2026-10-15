@@ -216,8 +216,9 @@ fn fixture(
 }
 
 /// Sets up the scratch home `name` with the image files and custom
-/// provisioning `scripts` (by path below `~/.config/sendit`) and runs `build` in it to make `images`, unless an earlier run already
-/// did so from the same inputs.
+/// provisioning `scripts` (by path below `~/.config/sendit`) and runs
+/// `build` in it to make `images`, unless an earlier run already did so from
+/// the same inputs.
 fn setup(
     name: &str,
     scripts: &[(&str, &str)],

@@ -55,7 +55,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--expose-git`: lets the VM see and change `.git`, including its hooks and config, which git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
-`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), including what the symlinks among them point to and the symlinks on the way, e.g. a provisioning script linked from a dotfiles repository. Through those the VM could become root or run commands on the Mac.
+`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), including what the symlinks among them point to and the symlinks on the way, e.g. a provisioning script linked from a dotfiles repository. Through those the VM could become root or run commands on the Mac. sendit can't tell where else a hard-linked file lives, so link scripts and image files with symlinks, not hard links.
 
 ## Configuration
 

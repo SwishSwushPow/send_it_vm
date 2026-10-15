@@ -466,14 +466,15 @@ fn describe_mounts(mounts: &[(String, MountSpec)]) -> String {
     text
 }
 
-/// Names the image file of `image`, and lists the shared scripts it calls
-/// (`scripts` after the image file) one per line.
+/// Names the image file of `image`, and lists the shared scripts it runs,
+/// directly or through other scripts (`scripts` after the image file), one
+/// per line.
 fn describe_scripts(paths: &Paths, image: &ImageName, scripts: &[CustomScript]) -> String {
     let mut text = format!("Image file: {}", paths.display(&paths.image_file(image)));
     if scripts.len() > 1 {
         let _ = write!(
             text,
-            "\nScripts it calls, from {}:",
+            "\nScripts it runs, from {}:",
             paths.display(&paths.provision_scripts_dir())
         );
         for script in &scripts[1..] {
@@ -1098,7 +1099,7 @@ mod tests {
         assert_eq!(
             describe(),
             "Image file: ~/.config/sendit/images/rust.sh\n\
-             Scripts it calls, from ~/.config/sendit/provision-scripts:\n  \
+             Scripts it runs, from ~/.config/sendit/provision-scripts:\n  \
              rust.sh\n  \
              helix.sh\n  \
              grammars.sh"
