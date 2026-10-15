@@ -43,7 +43,7 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
     // ~/.config/sendit is caught through a share of its target. The files
     // most worth protecting come last, for when they are symlinks of their
     // own, e.g. into a dotfiles repo.
-    let state = [
+    let mut state: Vec<_> = [
         (paths.config_dir(), "sendit's configuration"),
         (paths.cache_dir(), "sendit's images and SSH keys"),
         (paths.vms_dir(), "sendit's VMs"),
@@ -55,7 +55,25 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
         (paths.image_files_dir(), "sendit's image files"),
         (paths.ssh_dir(), "sendit's SSH keys"),
     ]
-    .map(|(path, what)| (canonical(&path), what));
+    .into_iter()
+    .map(|(path, what)| (canonical(&path), what))
+    .collect();
+    // So can each script and image file, which runs with sudo in the next
+    // build. Its target counts even if it doesn't exist (yet), or the VM
+    // could create it.
+    for (dir, what) in [
+        (
+            paths.provision_scripts_dir(),
+            "sendit's provisioning scripts",
+        ),
+        (paths.image_files_dir(), "sendit's image files"),
+    ] {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if let Ok(target) = fs::read_link(entry.path()) {
+                state.push((canonical(&dir.join(target)), what));
+            }
+        }
+    }
     let home = canonical(paths.home());
 
     mounts
@@ -563,5 +581,26 @@ mod tests {
                 )]
             );
         }
+
+        // A single script or image file that is a symlink, relative or not,
+        // even when its target doesn't exist yet.
+        for dir in ["elsewhere", "planned"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        fs::write(home.join("elsewhere/rust.sh"), "").unwrap();
+        let scripts = home.join(".config/sendit/provision-scripts");
+        std::os::unix::fs::symlink("../../elsewhere/rust.sh", scripts.join("rust.sh")).unwrap();
+        let images = home.join(".config/sendit/images");
+        std::os::unix::fs::symlink(home.join("planned/go.sh"), images.join("go.sh")).unwrap();
+        assert_eq!(
+            risky(&[mount(&home.join("elsewhere"), false)]),
+            [
+                "~/elsewhere (read-write) contains sendit's provisioning scripts (~/elsewhere/rust.sh)"
+            ]
+        );
+        assert_eq!(
+            risky(&[mount(&home.join("planned"), true)]),
+            ["~/planned (read-only) contains sendit's image files (~/planned/go.sh)"]
+        );
     }
 }
