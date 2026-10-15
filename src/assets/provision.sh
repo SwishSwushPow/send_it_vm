@@ -388,19 +388,62 @@ fi
 EOF
 
 # --- Custom scripts ---------------------------------------------------------
-# The user's scripts from ~/.config/sendit/provision-scripts, in name order.
-# They run as the login user in a login shell from its home directory, so
-# they see the same environment as the console (e.g. PATH changes earlier
-# scripts made in ~/.profile), and use sudo for anything that needs root.
-# sudo keeps DEBIAN_FRONTEND meanwhile, so apt-get doesn't stop at
-# configuration prompts.
+# The image's image file from ~/.config/sendit/images (custom/main.sh), which
+# runs the shared scripts from ~/.config/sendit/provision-scripts with
+# `sendit-provision NAME`; they can do so too. Each script runs as the login
+# user in a login shell of its own from its home directory, so it sees the
+# same environment as the console (e.g. PATH changes earlier scripts made in
+# ~/.profile), and uses sudo for anything that needs root. sudo keeps
+# DEBIAN_FRONTEND meanwhile, so apt-get doesn't stop at configuration
+# prompts.
 echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
-while read -r file name; do
-    echo "sendit: running custom script $name"
-    (cd "/home/$user" && sudo -u "$user" -H bash -l "$seed/custom/$file") < /dev/null ||
-        { echo "sendit: custom script $name failed"; exit 1; }
-done < "$seed/custom/list"
-rm /etc/sudoers.d/sendit-provision
+# sendit-provision runs a script at most once per build, since most install
+# scripts can't run twice; it notes those that ran in $ran. It only runs
+# scripts that custom/list names, and finds their files there.
+ran=$(mktemp -d)
+chown "$user" "$ran"
+{
+    echo '#!/bin/bash'
+    printf 'list=%q\nran=%q\n' "$seed/custom/list" "$ran"
+    cat <<'EOF'
+# Runs a custom script from the seed ISO: sendit-provision NAME
+set -u
+if [ $# -ne 1 ]; then
+    echo 'usage: sendit-provision SCRIPT' >&2
+    exit 2
+fi
+file=
+while read -r number name; do
+    if [ "$name" = "$1" ]; then
+        file=$number
+        break
+    fi
+done < "$list"
+if [ -z "$file" ]; then
+    echo "sendit: no custom script $1 on the seed ISO" >&2
+    exit 1
+fi
+if [ -e "$ran/$file" ]; then
+    echo "sendit: custom script $1 already ran"
+    exit 0
+fi
+touch "$ran/$file"
+echo "sendit: running custom script $1"
+cd "$HOME" && bash -l "${list%/*}/$file" < /dev/null
+status=$?
+[ "$status" -eq 0 ] || echo "sendit: custom script $1 failed with exit status $status"
+exit "$status"
+EOF
+} > /usr/local/bin/sendit-provision
+chmod 755 /usr/local/bin/sendit-provision
+# With -e, a failing sendit-provision (or any other command) stops the image
+# file.
+if [ -e "$seed/custom/main.sh" ]; then
+    echo "sendit: running the image file"
+    (cd "/home/$user" && sudo -u "$user" -H bash -e -l "$seed/custom/main.sh") < /dev/null ||
+        { echo "sendit: the image file failed"; exit 1; }
+fi
+rm -r /etc/sudoers.d/sendit-provision /usr/local/bin/sendit-provision "$ran"
 apt-get clean
 
 # --- No more sudo -----------------------------------------------------------

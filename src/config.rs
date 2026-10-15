@@ -853,10 +853,10 @@ mod tests {
     #[test]
     fn adds_mounts_from_custom_scripts() {
         let fx = Fixture::new("resolve-script-mounts");
-        let scripts = fx.paths.provision_scripts_dir();
-        fs::create_dir_all(scripts.join("rust")).unwrap();
+        let image_file = fx.paths.image_file(&"rust".parse().unwrap());
+        fs::create_dir_all(image_file.parent().unwrap()).unwrap();
         fs::write(
-            scripts.join("rust/10-cargo.sh"),
+            image_file,
             "# sendit-mount: ~/extra:/home/dev/.cargo/registry\n\
              # sendit-mount: ~/not-here\n",
         )

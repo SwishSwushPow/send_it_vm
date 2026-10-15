@@ -174,6 +174,14 @@ fn lists_vms_and_images() {
     )
     .unwrap();
     fs::write(images.join("rust/disk.img"), vec![1; 8192]).unwrap();
+    // An image that only has an image file.
+    let image_files = env.home.join(".config/sendit/images");
+    fs::create_dir_all(&image_files).unwrap();
+    fs::write(
+        image_files.join("go.sh"),
+        "sudo apt-get install -y golang\n",
+    )
+    .unwrap();
     let vm = |name: &str, uuid: &str, metadata: Option<(&Path, &str, u32)>| {
         let dir = vms.join(format!("{name}_6ba7b811-9dad-11d1-80b4-00c04fd430{uuid}"));
         fs::create_dir_all(&dir).unwrap();
@@ -231,6 +239,7 @@ fn lists_vms_and_images() {
         [
             vec!["IMAGE", "STATE", "DISK", "VMS"],
             vec!["default", "missing", "-", "1"],
+            vec!["go", "missing", "-", "0"],
             vec!["rust", "provisioned", "8.0", "KiB", "2"],
         ],
         "{images}"
@@ -337,6 +346,44 @@ fn rejects_bad_arguments() {
         .output()
         .unwrap();
     assert_fails_with(&output, "project directory /does/not/exist");
+}
+
+#[test]
+fn reports_bad_image_files() {
+    let env = Env::new("image-files");
+    let config = env.home.join(".config/sendit");
+    let write = |path: &str, content: &str| {
+        let path = config.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    };
+    env.config("image = \"rust\"\n");
+
+    // Scripts in the old layout aren't silently ignored.
+    write("provision-scripts/rust/10-cargo.sh", "cargo\n");
+    for args in [&["status"][..], &["images"], &["provision", "--all"]] {
+        assert_fails_with(
+            &env.sendit(args),
+            "~/.config/sendit/provision-scripts/rust/: subfolders are no longer supported; \
+             images are defined by ~/.config/sendit/images/NAME.sh",
+        );
+    }
+    fs::remove_dir_all(config.join("provision-scripts/rust")).unwrap();
+
+    // A call that can't be resolved stops sendit, also before `provision`
+    // downloads Debian.
+    write("images/rust.sh", "sendit-provision rustup.sh\n");
+    let missing = "the custom script images/rust.sh calls `sendit-provision rustup.sh`, \
+                   but there is no ~/.config/sendit/provision-scripts/rustup.sh";
+    assert_fails_with(&env.sendit(&["status"]), missing);
+    assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
+    assert!(!env.home.join(".cache/sendit/downloads").exists());
+
+    write(
+        "provision-scripts/rustup.sh",
+        "curl https://sh.rustup.rs | sh\n",
+    );
+    env.ok(&["status"]);
 }
 
 #[test]

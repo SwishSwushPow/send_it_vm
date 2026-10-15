@@ -52,6 +52,7 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
             paths.provision_scripts_dir(),
             "sendit's provisioning scripts",
         ),
+        (paths.image_files_dir(), "sendit's image files"),
         (paths.ssh_dir(), "sendit's SSH keys"),
     ]
     .map(|(path, what)| (canonical(&path), what));
@@ -533,5 +534,34 @@ mod tests {
             risky(&[mount(&dotfiles, false)]),
             ["~/dotfiles (read-write) contains sendit's configuration (~/dotfiles/config.toml)"]
         );
+
+        // Image files, which run with sudo in every build of their image,
+        // and the shared scripts they call, also through symlinks.
+        assert_eq!(
+            risky(&[mount(&home.join(".config/sendit/images"), true)]),
+            [
+                "~/.config/sendit/images (read-only) is inside sendit's configuration (~/.config/sendit)"
+            ]
+        );
+        for (dir, what) in [
+            ("images", "sendit's image files"),
+            ("provision-scripts", "sendit's provisioning scripts"),
+        ] {
+            let target = dotfiles.join(format!("sendit-{dir}"));
+            fs::create_dir_all(target.join("sub")).unwrap();
+            std::os::unix::fs::symlink(&target, home.join(".config/sendit").join(dir)).unwrap();
+            assert_eq!(
+                risky(&[mount(&target, false)]),
+                [format!(
+                    "~/dotfiles/sendit-{dir} (read-write) contains {what} (~/dotfiles/sendit-{dir})"
+                )]
+            );
+            assert_eq!(
+                risky(&[mount(&target.join("sub"), true)]),
+                [format!(
+                    "~/dotfiles/sendit-{dir}/sub (read-only) is inside {what} (~/dotfiles/sendit-{dir})"
+                )]
+            );
+        }
     }
 }

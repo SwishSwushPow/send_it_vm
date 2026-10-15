@@ -8,6 +8,17 @@
 
 ### Changed
 
+- **Breaking:** each image with custom provisioning is defined by an image file, `~/.config/sendit/images/NAME.sh`. It is a bash script that calls the shared scripts in `~/.config/sendit/provision-scripts/` with `sendit-provision SCRIPT.sh`, in the order it needs them, and can run commands of its own in between. Shared scripts can call `sendit-provision` too, and each script runs at most once per build. The image file runs with `bash -e`, so a failing script or command stops the build. [`images/example.sh`](images/example.sh) is an example.
+
+  Scripts at the top level of `provision-scripts/` no longer run for every image, only when an image file calls them, and subfolders of `provision-scripts/` are no longer supported: sendit stops with an error while there is one. Without `images/default.sh`, the `default` image is the plain base image. To get the old behaviour back, move the scripts of each `provision-scripts/NAME/` to `provision-scripts/`, renaming those whose name a shared script has, and write `images/NAME.sh` to call them together with the shared scripts they didn't replace, in the order they ran before: by file name. For the `default` image, call the shared scripts from `images/default.sh`, e.g.:
+
+  ```bash
+  sendit-provision 00-rust.sh
+  sendit-provision 01-helix.sh
+  sendit-provision 10-claude-code.sh
+  ```
+
+  Images built with custom scripts show "custom scripts changed" once.
 - **Breaking:** building an image takes its CPUs and memory from the same places as the VMs made from it: the top-level keys, then its `[images.<name>]` table, then the flags of `sendit provision`. The `[provision]` and `[provision.<name>]` tables are gone; configs that have them must move their settings to `[images.<name>]`, or pass `--cpus` and `--memory` to `sendit provision` for a build that needs more.
 
 ### Removed

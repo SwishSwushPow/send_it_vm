@@ -26,7 +26,7 @@ pub enum Command {
         image: Option<ImageName>,
 
         /// Build every image: `default`, those named in the config file or
-        /// with their own directory of provisioning scripts, and those built
+        /// with an image file in ~/.config/sendit/images, and those built
         /// before
         #[arg(long)]
         all: bool,

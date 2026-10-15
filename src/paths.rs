@@ -5,8 +5,10 @@
 //! - `~/.sendit/<project>_<uuid>/`: one directory per project VM, or in
 //!   `$SENDIT_VM_DIR` instead, e.g. on an external drive
 //! - `~/.config/sendit/config.toml`: user configuration
-//! - `~/.config/sendit/provision-scripts/`: custom provisioning scripts for
-//!   all base images, and in `<image>/` for one of them
+//! - `~/.config/sendit/images/<image>.sh`: the image files, one for each
+//!   base image with custom provisioning
+//! - `~/.config/sendit/provision-scripts/`: the shared provisioning scripts
+//!   that image files call
 
 use std::fmt;
 use std::fs;
@@ -148,7 +150,8 @@ impl Paths {
         self.ssh_dir().join("id_ed25519_root")
     }
 
-    /// The user's configuration: `config.toml` and the provisioning scripts.
+    /// The user's configuration: `config.toml`, the image files and the
+    /// provisioning scripts they call.
     pub fn config_dir(&self) -> PathBuf {
         self.home.join(".config/sendit")
     }
@@ -157,15 +160,22 @@ impl Paths {
         self.config_dir().join("config.toml")
     }
 
-    /// Custom provisioning scripts (`*.sh`) for all images, run in name order
-    /// after the built-in provisioning of a base image.
-    pub fn provision_scripts_dir(&self) -> PathBuf {
-        self.config_dir().join("provision-scripts")
+    /// The image files, `<image>.sh` for each image with custom
+    /// provisioning.
+    pub fn image_files_dir(&self) -> PathBuf {
+        self.config_dir().join("images")
     }
 
-    /// Custom provisioning scripts for `image` only.
-    pub fn image_scripts_dir(&self, image: &ImageName) -> PathBuf {
-        self.provision_scripts_dir().join(image.as_str())
+    /// The main custom provisioning script of `image`, run after the built-in
+    /// provisioning of the base image. It calls the shared scripts with
+    /// `sendit-provision`.
+    pub fn image_file(&self, image: &ImageName) -> PathBuf {
+        self.image_files_dir().join(format!("{image}.sh"))
+    }
+
+    /// The shared custom provisioning scripts (`*.sh`) that image files call.
+    pub fn provision_scripts_dir(&self) -> PathBuf {
+        self.config_dir().join("provision-scripts")
     }
 
     /// Parent of all project VM directories.
@@ -370,8 +380,8 @@ mod tests {
             Path::new("/home/me/.cache/sendit/images/.rust.partial")
         );
         assert_eq!(
-            paths.image_scripts_dir(&rust),
-            Path::new("/home/me/.config/sendit/provision-scripts/rust")
+            paths.image_file(&rust),
+            Path::new("/home/me/.config/sendit/images/rust.sh")
         );
         assert_eq!(
             paths.config_file(),

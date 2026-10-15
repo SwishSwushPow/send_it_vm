@@ -12,8 +12,9 @@
 //! real `~/.cache/sendit` and `~/.sendit` stay untouched. The first run
 //! provisions the `default` image there, which is kept until the files it is
 //! built from change. The custom provisioning scripts test has a scratch
-//! home of its own, `custom-home`, where it builds an image with its
-//! scripts, and one whose script fails. Provisioning reuses the Debian
+//! home of its own, `custom-home`, where it builds an image from an image
+//! file and the scripts it calls, and one whose image file calls a script
+//! that fails. Provisioning reuses the Debian
 //! image in the real `~/.cache/sendit/downloads` if there is one, and
 //! downloads it otherwise.
 //!
@@ -58,23 +59,39 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 /// For each attempt to reach a booting VM.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Custom provisioning scripts for the `custom` and `broken` images, by path
-/// below `~/.config/sendit/provision-scripts`. Both images run the shared
-/// ones; `custom/20-replaced.sh` replaces the shared one of the same name
-/// and asks for two mounts, one of which doesn't exist.
-const CUSTOM_SCRIPTS: [(&str, &str); 4] = [
+/// The image files of the `custom` and `broken` images and the shared
+/// scripts they call, by path below `~/.config/sendit`. The `custom` image
+/// file runs a command of its own between calls, and both it and `tool.sh`
+/// call `shared.sh`, which runs once. It asks for a mount, `tool.sh` for one
+/// that doesn't exist. Nothing calls `unused.sh`.
+const CUSTOM_SCRIPTS: [(&str, &str); 6] = [
     (
-        "10-shared.sh",
-        "echo \"10-shared as $(id -un) in $PWD\" >> ~/provisioned\n",
-    ),
-    ("20-replaced.sh", "echo 20-shared >> ~/provisioned\n"),
-    (
-        "custom/20-replaced.sh",
+        "images/custom.sh",
         "# sendit-mount: ~/script-share:/home/dev/script-share\n\
-         # sendit-mount: ~/script-missing\n\
-         echo 20-own >> ~/provisioned\nsudo sh -c 'echo made by root > /etc/sendit-test'\n",
+         sendit-provision shared.sh\n\
+         echo \"inline as $(id -un) in $PWD\" >> ~/provisioned\n\
+         sendit-provision tool.sh\n\
+         sudo sh -c 'echo made by root > /etc/sendit-test'\n",
     ),
-    ("broken/30-fail.sh", "exit 3\n"),
+    (
+        "provision-scripts/shared.sh",
+        "echo \"shared as $(id -un) in $PWD\" >> ~/provisioned\n",
+    ),
+    (
+        "provision-scripts/tool.sh",
+        "# sendit-mount: ~/script-missing\n\
+         sendit-provision shared.sh\n\
+         echo tool >> ~/provisioned\n",
+    ),
+    (
+        "provision-scripts/unused.sh",
+        "echo unused >> ~/provisioned\n",
+    ),
+    (
+        "images/broken.sh",
+        "sendit-provision fail.sh\necho after the failure >> ~/provisioned\n",
+    ),
+    ("provision-scripts/fail.sh", "exit 3\n"),
 ];
 
 /// Where the tests keep their files.
@@ -133,10 +150,9 @@ fn env() -> &'static Env {
     })
 }
 
-/// A scratch home of its own with `CUSTOM_SCRIPTS`, whose shared scripts
-/// would otherwise change the state of the `default` image, and the
-/// `custom` image built with them. Building it also checks that a failing
-/// script fails the build of the `broken` image.
+/// A scratch home of its own with `CUSTOM_SCRIPTS`, and the `custom` image
+/// built with them. Building it also checks that a failing `sendit-provision`
+/// fails the build of the `broken` image.
 fn custom_env() -> &'static Env {
     static ENV: OnceLock<Result<Env, String>> = OnceLock::new();
     fixture(&ENV, || {
@@ -155,10 +171,19 @@ fn custom_env() -> &'static Env {
             let log =
                 fs::read_to_string(&log).with_context(|| format!("reading {}", log.display()))?;
             ensure!(
-                log.contains("sendit: custom script broken/30-fail.sh failed"),
+                log.contains("sendit: custom script fail.sh failed with exit status 3")
+                    && log.contains("sendit: the image file failed"),
                 "the console log doesn't say which custom script failed"
             );
-            env.provision_ok("custom")
+            env.provision_ok("custom")?;
+            let log = env.cache().join("provision/custom/console.log");
+            let log =
+                fs::read_to_string(&log).with_context(|| format!("reading {}", log.display()))?;
+            ensure!(
+                log.contains("sendit: custom script shared.sh already ran"),
+                "the console log doesn't say that a script ran already"
+            );
+            Ok(())
         })
     })
 }
@@ -175,8 +200,8 @@ fn fixture(
     }
 }
 
-/// Sets up the scratch home `name` with the custom provisioning `scripts`
-/// and runs `build` in it to make `images`, unless an earlier run already
+/// Sets up the scratch home `name` with the image files and custom
+/// provisioning `scripts` (by path below `~/.config/sendit`) and runs `build` in it to make `images`, unless an earlier run already
 /// did so from the same inputs.
 fn setup(
     name: &str,
@@ -190,10 +215,12 @@ fn setup(
     fs::create_dir_all(&env.home)?;
     // Written every time, in case a test changed them and failed before
     // changing them back.
-    let scripts_dir = env.home.join(".config/sendit/provision-scripts");
-    let _ = fs::remove_dir_all(&scripts_dir);
+    let config_dir = env.home.join(".config/sendit");
+    for dir in ["images", "provision-scripts"] {
+        let _ = fs::remove_dir_all(config_dir.join(dir));
+    }
     for (path, content) in scripts {
-        let path = scripts_dir.join(path);
+        let path = config_dir.join(path);
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, content)?;
     }
@@ -1257,17 +1284,20 @@ fn runs_custom_provisioning_scripts() {
     fs::write(share.join("shared.txt"), "asked for by a script\n").unwrap();
 
     let vm = project.run(&["--image", "custom"]);
-    // As the guest user from its home, in name order, with the image's own
-    // script in place of the shared one of the same name.
+    // As the guest user from its home, in the order the image file calls
+    // them, each script once, and only those it calls.
     assert_eq!(
         vm.ok("cat ~/provisioned"),
-        "10-shared as dev in /home/dev\n20-own"
+        "shared as dev in /home/dev\ninline as dev in /home/dev\ntool"
     );
+    // The helper is gone with the sudo rights.
+    vm.fails("command -v sendit-provision");
     // They could use sudo, which is gone afterwards.
     assert_eq!(vm.ok("cat /etc/sendit-test"), "made by root");
     vm.fails("sudo -n true");
-    // The mount the script asks for, read-only without :rw; the one whose
-    // host directory doesn't exist is left out.
+    // The mount the image file asks for, read-only without :rw; the one
+    // whose host directory doesn't exist, from a script it calls, is left
+    // out.
     assert_eq!(
         vm.ok("cat ~/script-share/shared.txt"),
         "asked for by a script"
@@ -1277,21 +1307,23 @@ fn runs_custom_provisioning_scripts() {
     vm.stop();
     let status = project.sendit(&["status"]);
     assert!(text(&status.stdout).contains("~/script-share -> /home/dev/script-share (ro)"));
-    assert!(text(&status.stderr).contains(
-        "Not sharing ~/script-missing, which the custom script custom/20-replaced.sh asks for"
-    ));
+    assert!(
+        text(&status.stderr)
+            .contains("Not sharing ~/script-missing, which the custom script tool.sh asks for")
+    );
 
     // The build that failed left nothing behind.
     assert!(project.image_line("broken").contains("missing"));
 
-    // Changing a script marks the image until the script is changed back,
-    // unless the change is in the comments at its top.
-    let script = env
-        .home
-        .join(".config/sendit/provision-scripts/10-shared.sh");
+    // Changing a script that runs marks the image until the script is
+    // changed back, unless the change is in the comments at its top.
+    let scripts = env.home.join(".config/sendit/provision-scripts");
+    let script = scripts.join("shared.sh");
     let original = fs::read_to_string(&script).unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
     fs::write(&script, format!("# sendit-mount: /tmp\n{original}")).unwrap();
+    assert!(project.image_line("custom").contains("provisioned"));
+    fs::write(scripts.join("unused.sh"), "echo changed\n").unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
     fs::write(&script, format!("{original}# changed\n")).unwrap();
     assert!(project.image_line("custom").contains("scripts changed"));

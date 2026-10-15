@@ -84,18 +84,29 @@ read-only = true          # share the project directory read-only
 
 A new VM is made from the `default` image unless `image` or `--image` picks another, and keeps using the image it was made from. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
 
-Scripts in `~/.config/sendit/provision-scripts/*.sh` run for every image at the end of provisioning, and scripts in `provision-scripts/NAME/*.sh` only for image `NAME`. They run together in file name order; an image's own script replaces a shared one with the same file name. They run as the VM's user, with sudo available only while they run. Trust them, and whatever installers they download, as you would root in every VM made from the image: sendit takes the sudo rights away afterwards, but not a setuid binary or root service they may have left behind. `sendit status` and `sendit images` tell you when they have changed since an image was built, apart from the comments at their top; `sendit provision NAME --force` rebuilds it.
+An image file, `~/.config/sendit/images/NAME.sh`, adds custom provisioning to image `NAME`: it runs at the end of provisioning. Without `images/default.sh`, the `default` image is the plain base image. The image file is a bash script that calls the shared scripts in `~/.config/sendit/provision-scripts/` with `sendit-provision`:
 
-A script can ask for host directories to be shared with the VMs made from its image, in comment lines at its top, before its first command:
+```bash
+sendit-provision rust.sh
+sendit-provision helix.sh    # built with Rust, so it runs after it
+sudo apt-get install -y postgresql-client
+sendit-provision claude-code.sh
+```
+
+So it sets the order they run in, and can run commands of its own between them or call a script only `if` something holds. Shared scripts can call `sendit-provision` too. Each script runs at most once per build, the first time it's called, so several can call one they all need. The image file runs with `bash -e`: a command that fails, a script it calls included, stops the build. To know which scripts an image needs before it builds it, sendit looks for `sendit-provision NAME` in the image file and, in turn, in the scripts it calls, outside of comments. So `NAME` must be a plain file name in `provision-scripts/`, written out rather than in a variable, and sendit refuses names it can't find and scripts that call each other in a cycle.
+
+Every script, the image file included, runs as the VM's user in a login shell of its own from the home directory, so it sees what the scripts before it added to `~/.profile`, e.g. to the `PATH`. sudo is available only while provisioning runs. Trust the scripts, and whatever installers they download, as you would root in every VM made from the image: sendit takes the sudo rights away afterwards, but not a setuid binary or root service they may have left behind. `sendit status` and `sendit images` tell you when the image file or a script it calls has changed since an image was built, apart from the comments at their top; `sendit provision NAME --force` rebuilds it.
+
+A script, the image file or one it calls, can ask for host directories to be shared with the VMs made from the image, in comment lines at its top, before its first command:
 
 ```sh
 #!/bin/sh
 # sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry
 ```
 
-These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` is given, and host paths must be absolute or start with `~`. They join the mounts of the config file and the command line, after the top-level ones and before the project's. A directory that doesn't exist on the Mac is left out with a notice instead of failing the run. `sendit provision` lists them, and `sendit status` shows them with the other mounts. Read the mount lines of a script you copy: they give the VM access to files on the Mac, and with `:rw` it can change them.
+These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` is given, and host paths must be absolute or start with `~`. They join the mounts of the config file and the command line, after the top-level ones and before the project's. A directory that doesn't exist on the Mac is left out with a notice instead of failing the run. `sendit provision` lists them, and `sendit status` shows them with the other mounts. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. Read the mount lines of a script you copy: they give the VM access to files on the Mac, and with `:rw` it can change them.
 
-[`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code, a `CLAUDE.md` that tells Claude Code about the VM (installed as its managed memory file, `/etc/claude-code/CLAUDE.md`, which a `~/.claude` shared from the Mac doesn't hide), and the Pi coding agent. Copy the ones you want with a number in front to set the order, e.g. `00-rust.sh` before `01-helix.sh`, which builds Helix with Rust.
+[`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code, a `CLAUDE.md` that tells Claude Code about the VM (installed as its managed memory file, `/etc/claude-code/CLAUDE.md`, which a `~/.claude` shared from the Mac doesn't hide), and the Pi coding agent. [`images/example.sh`](images/example.sh) is an image file that calls most of them. Copy the scripts you want to `~/.config/sendit/provision-scripts/`, and an image file that calls them to `~/.config/sendit/images/`.
 
 When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
 
@@ -121,7 +132,7 @@ Nothing is written into project directories.
 
 - `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
-- `~/.config/sendit/`: configuration and custom provisioning scripts
+- `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 
 To keep the VMs somewhere else, e.g. on an external drive, set `SENDIT_VM_DIR` to an existing directory, such as `export SENDIT_VM_DIR=/Volumes/External/sendit`. sendit then uses it in place of `~/.sendit` and won't create it, so a drive that isn't connected is an error. It can't be the root of a volume, the home directory or a folder that contains it, and it can't contain or sit inside `~/.cache/sendit` or `~/.config/sendit`, since every start keeps it out of Time Machine backups. Folders in it that aren't VMs are left alone, by `sendit prune --all` too. On another volume, a new VM's disk is a copy of the base image instead of an instant clone, so each VM takes the base image's space on top of its own changes. Format the drive as APFS: HFS+ (Mac OS Extended) and exFAT have no sparse files, so there every VM takes its full disk size, 64 GiB by default. If the drive ignores ownership, which external drives often do, other users of the Mac can change the VMs' files and so run commands as root in them.
 

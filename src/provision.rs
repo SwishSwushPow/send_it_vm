@@ -6,11 +6,13 @@
 //! succeeded. One sendit process at a time builds images; others wait.
 //!
 //! Custom scripts travel on the seed ISO too and run after the built-in
-//! provisioning, e.g. to install more tools: those in
-//! `~/.config/sendit/provision-scripts/` for every image, and those in its
-//! `<name>/` subdirectory for that image only. A script can ask for host
-//! directories to be shared with the VMs made from the image, in comment
-//! lines at its top: `# sendit-mount: HOST[:GUEST][:ro|rw]`.
+//! provisioning, e.g. to install more tools. An image with custom scripts
+//! has an image file, `~/.config/sendit/images/<name>.sh`, which provision.sh
+//! runs. It calls the shared scripts in `~/.config/sendit/provision-scripts/`
+//! with `sendit-provision NAME`, and they can call each other the same way;
+//! each runs at most once per build. A script can ask for host directories to
+//! be shared with the VMs made from the image, in comment lines at its top:
+//! `# sendit-mount: HOST[:GUEST][:ro|rw]`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -19,7 +21,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -51,6 +53,9 @@ pub const BASE_REVISION: u32 = 10;
 /// Starts a comment line in which a custom script asks for a mount.
 const MOUNT_COMMENT: &str = "# sendit-mount:";
 
+/// The command with which custom scripts run a shared script.
+const RUN_COMMAND: &str = "sendit-provision";
+
 /// Printed by provision.sh as its last line when it succeeded, followed by
 /// the build's token.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
@@ -71,16 +76,15 @@ struct ScriptStamp {
     sha256: String,
 }
 
-/// A custom provisioning script from `Paths::provision_scripts_dir`, or
-/// from `Paths::image_scripts_dir` of the image being built.
+/// A custom provisioning script: the image file of the image being built,
+/// or a shared script from `Paths::provision_scripts_dir` that it calls.
 struct CustomScript {
-    /// Relative to `Paths::provision_scripts_dir`, e.g. `10-apt.sh` or
-    /// `rust/20-cargo.sh`.
+    /// For messages and the marker: `images/rust.sh` for an image file, the
+    /// file name for a shared script.
     name: String,
-    /// The file name, e.g. `20-cargo.sh`.
+    /// The file name, e.g. `cargo.sh`, which `sendit-provision` takes for a
+    /// shared script.
     file: String,
-    /// Whether it's from `Paths::image_scripts_dir` rather than shared.
-    own: bool,
     content: Vec<u8>,
 }
 
@@ -93,8 +97,9 @@ impl CustomScript {
     }
 
     /// The header, the blank and comment lines at the top of the script
-    /// before its first command, and the rest. provision.sh runs scripts with
-    /// `bash FILE`, so the header, shebang included, does nothing. Comments
+    /// before its first command, and the rest. provision.sh and
+    /// `sendit-provision` run scripts with `bash FILE`, so the header, shebang
+    /// included, does nothing. Comments
     /// further down may not be comments, e.g. in a heredoc.
     fn split_header(&self) -> (&[u8], &[u8]) {
         let mut end = 0;
@@ -131,6 +136,91 @@ impl CustomScript {
         }
         Ok(mounts)
     }
+
+    /// The names of the shared scripts that this one calls with
+    /// `sendit-provision`, in the order they appear. Every `sendit-provision`
+    /// word outside of comments counts, wherever it is, e.g. in an `if`. The
+    /// name after it must be a literal file name, which can be resolved
+    /// without running anything.
+    fn calls(&self) -> Result<Vec<String>> {
+        let text = String::from_utf8_lossy(&self.content);
+        let mut calls = Vec::new();
+        for line in text.lines() {
+            let mut words = shell_words(line).into_iter();
+            while let Some(word) = words.next() {
+                if word != RUN_COMMAND {
+                    continue;
+                }
+                let name = words
+                    .next()
+                    .filter(|name| !is_operator(name))
+                    .unwrap_or_default();
+                check_script_name(name).with_context(|| {
+                    format!("in the custom script {}: `{}`", self.name, line.trim())
+                })?;
+                calls.push(name.to_string());
+            }
+        }
+        Ok(calls)
+    }
+}
+
+/// The words of a line of shell, roughly: split at whitespace, with each of
+/// the characters that end a command or redirect (`;&|()<>`) a word of its
+/// own, and without a comment at the end. Quotes aren't understood.
+fn shell_words(line: &str) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut start = None;
+    for (i, c) in line.char_indices() {
+        let ends = c.is_whitespace() || is_operator(&line[i..i + c.len_utf8()]);
+        match start {
+            Some(begin) if ends => {
+                words.push(&line[begin..i]);
+                start = None;
+            }
+            None if c == '#' => break,
+            None if !ends => start = Some(i),
+            _ => {}
+        }
+        if !c.is_whitespace() && ends {
+            words.push(&line[i..i + c.len_utf8()]);
+        }
+    }
+    if let Some(begin) = start {
+        words.push(&line[begin..]);
+    }
+    words
+}
+
+fn is_operator(word: &str) -> bool {
+    matches!(word, ";" | "&" | "|" | "(" | ")" | "<" | ">")
+}
+
+/// Fails unless `name`, which a script passes to `sendit-provision`, is a plain
+/// file name. It is only ever looked up in the listing of
+/// `Paths::provision_scripts_dir`, never joined onto a path.
+fn check_script_name(name: &str) -> Result<()> {
+    ensure!(!name.is_empty(), "{RUN_COMMAND} names no script");
+    ensure!(
+        !name.contains('/'),
+        "{RUN_COMMAND} {name}: the script must be named without a directory, \
+         as a file in the provision-scripts directory"
+    );
+    ensure!(
+        !name.starts_with('.'),
+        "{RUN_COMMAND} {name}: script names can't start with a dot"
+    );
+    ensure!(
+        !name.contains(|c: char| c.is_control()),
+        "{RUN_COMMAND} {name:?}: script names can't have control characters"
+    );
+    ensure!(
+        name.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c)),
+        "{RUN_COMMAND} {name}: expected a literal file name, without quotes, \
+         variables or other shell syntax"
+    );
+    Ok(())
 }
 
 fn marker_file(dir: &VmDir) -> PathBuf {
@@ -142,8 +232,8 @@ pub enum BaseState {
     Missing,
     /// Older than `BASE_REVISION`; project VMs can't be created from it.
     Outdated,
-    /// Usable, but the custom provisioning scripts were added, removed or
-    /// edited since it was provisioned.
+    /// Usable, but its image file or the scripts it calls were added,
+    /// removed or edited since it was provisioned.
     ScriptsChanged,
     Current,
 }
@@ -184,55 +274,129 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
 }
 
 /// All images: `default`, and every image that the config file names, has
-/// custom scripts of its own or has been provisioned, in name order.
+/// an image file or has been provisioned, in name order.
 pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
+    check_no_subfolders(paths)?;
     let mut images = BTreeSet::from([ImageName::default()]);
     images.extend(config.images().cloned());
-    for dir in [paths.provision_scripts_dir(), paths.images_dir()] {
-        for entry in util::read_dir(&dir)? {
-            let entry = entry?;
-            // Partial images start with a dot, which names can't.
-            let name = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse().ok());
-            if let Some(name) = name
-                && entry.path().is_dir()
-            {
-                images.insert(name);
-            }
+    for entry in util::read_dir(&paths.image_files_dir())? {
+        let path = entry?.path();
+        let Some(file) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(name) = file.strip_suffix(".sh") else {
+            continue;
+        };
+        if file.starts_with('.') || !path.is_file() {
+            continue;
+        }
+        let name = name
+            .parse()
+            .with_context(|| format!("image file {}", paths.display(&path)))?;
+        images.insert(name);
+    }
+    for entry in util::read_dir(&paths.images_dir())? {
+        let entry = entry?;
+        // Partial images start with a dot, which names can't.
+        let name = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok());
+        if let Some(name) = name
+            && entry.path().is_dir()
+        {
+            images.insert(name);
         }
     }
     Ok(images.into_iter().collect())
 }
 
-/// The custom scripts for `image`, in file name order: the shared ones and
-/// the image's own, which replace shared ones of the same file name.
-fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
-    let mut scripts = BTreeMap::new();
-    for (file, content) in script_files(&paths.provision_scripts_dir())? {
-        let script = CustomScript {
-            name: file.clone(),
-            file: file.clone(),
-            own: false,
-            content,
-        };
-        scripts.insert(file, script);
+/// Fails if `Paths::provision_scripts_dir` has subfolders: the scripts in
+/// them, the old way to give an image scripts of its own, would be left out
+/// without a word.
+fn check_no_subfolders(paths: &Paths) -> Result<()> {
+    for entry in util::read_dir(&paths.provision_scripts_dir())? {
+        let path = entry?.path();
+        let hidden = path
+            .file_name()
+            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
+        ensure!(
+            hidden || !path.is_dir(),
+            "{}/: subfolders are no longer supported; images are defined by {} \
+             (see the CHANGELOG)",
+            paths.display(&path),
+            paths.display(&paths.image_files_dir().join("NAME.sh"))
+        );
     }
-    for (file, content) in script_files(&paths.image_scripts_dir(image))? {
-        let script = CustomScript {
-            name: format!("{image}/{file}"),
-            file: file.clone(),
-            own: true,
-            content,
-        };
-        scripts.insert(file, script);
-    }
-    Ok(scripts.into_values().collect())
+    Ok(())
 }
 
-/// The mounts that the custom scripts for `image` ask for, in run order,
-/// each with the name of its script.
+/// The custom scripts for `image`: its image file first, then the shared
+/// scripts that it calls, directly or through other scripts, in the order
+/// they are first found. None without an image file.
+fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
+    let dir = paths.provision_scripts_dir();
+    check_no_subfolders(paths)?;
+    let image_file = paths.image_file(image);
+    let content = match fs::read(&image_file) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", image_file.display())),
+    };
+    let main = CustomScript {
+        name: format!("images/{image}.sh"),
+        file: format!("{image}.sh"),
+        content,
+    };
+
+    let mut shared: BTreeMap<_, _> = script_files(&dir)?.into_iter().collect();
+    let mut scripts = vec![main];
+    add_calls(paths, 0, &mut shared, &mut scripts, &mut Vec::new())?;
+    Ok(scripts)
+}
+
+/// Appends the scripts that `scripts[caller]` calls to `scripts`, each
+/// followed by those it calls in turn, taking them out of `shared`. Those
+/// already in `scripts` are left out. `chain` names the shared scripts that
+/// led to the caller: calling one of them again would never end.
+fn add_calls(
+    paths: &Paths,
+    caller: usize,
+    shared: &mut BTreeMap<String, Vec<u8>>,
+    scripts: &mut Vec<CustomScript>,
+    chain: &mut Vec<String>,
+) -> Result<()> {
+    for name in scripts[caller].calls()? {
+        if let Some(start) = chain.iter().position(|n| *n == name) {
+            bail!(
+                "custom scripts call each other in a cycle: {} -> {name}",
+                chain[start..].join(" -> ")
+            );
+        }
+        if scripts[1..].iter().any(|s| s.file == name) {
+            continue;
+        }
+        let Some(content) = shared.remove(&name) else {
+            bail!(
+                "the custom script {} calls `{RUN_COMMAND} {name}`, but there is no {}",
+                scripts[caller].name,
+                paths.display(&paths.provision_scripts_dir().join(&name))
+            );
+        };
+        scripts.push(CustomScript {
+            name: name.clone(),
+            file: name.clone(),
+            content,
+        });
+        chain.push(name);
+        add_calls(paths, scripts.len() - 1, shared, scripts, chain)?;
+        chain.pop();
+    }
+    Ok(())
+}
+
+/// The mounts that the custom scripts for `image` ask for, in the order
+/// the scripts are first called, each with the name of its script.
 pub fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<(String, MountSpec)>> {
     mounts_of(&custom_scripts(paths, image)?)
 }
@@ -256,26 +420,17 @@ fn describe_mounts(mounts: &[(String, MountSpec)]) -> String {
     text
 }
 
-/// Lists `scripts` one per line in run order, under the directory they come
-/// from. When they come from both, the image's own are tagged with its name.
+/// Names the image file of `image`, and lists the shared scripts it calls
+/// (`scripts` after the image file) one per line.
 fn describe_scripts(paths: &Paths, image: &ImageName, scripts: &[CustomScript]) -> String {
-    let mixed = scripts.iter().any(|s| s.own) && scripts.iter().any(|s| !s.own);
-    let dir = if scripts.iter().all(|s| s.own) {
-        paths.image_scripts_dir(image)
-    } else {
-        paths.provision_scripts_dir()
-    };
-    let mut text = format!("Custom scripts from {}", paths.display(&dir));
-    text.push_str(if mixed { ", in run order:" } else { ":" });
-    let width = scripts
-        .iter()
-        .map(|s| s.file.chars().count())
-        .max()
-        .unwrap_or(0);
-    for script in scripts {
-        if mixed && script.own {
-            let _ = write!(text, "\n  {:width$}  ({image})", script.file);
-        } else {
+    let mut text = format!("Image file: {}", paths.display(&paths.image_file(image)));
+    if scripts.len() > 1 {
+        let _ = write!(
+            text,
+            "\nScripts it calls, from {}:",
+            paths.display(&paths.provision_scripts_dir())
+        );
+        for script in &scripts[1..] {
             let _ = write!(text, "\n  {}", script.file);
         }
     }
@@ -330,13 +485,14 @@ pub fn provision(
         return Ok(());
     }
     let base = paths.image_dir(name);
+    // Mistakes in the scripts show before anything is downloaded.
+    let scripts = custom_scripts(paths, name)?;
+    let mounts = mounts_of(&scripts)?;
 
     let image = image::debian_image(paths)?;
     fs::create_dir_all(paths.ssh_dir())?;
     let public_key = ssh_public_key(&paths.ssh_key())?;
     let root_public_key = ssh_public_key(&paths.root_ssh_key())?;
-    let scripts = custom_scripts(paths, name)?;
-    let mounts = mounts_of(&scripts)?;
 
     let work = paths.provision_dir(name);
     util::fresh_dir(&work)?;
@@ -484,17 +640,7 @@ fn build_seed_iso(
     fs::write(dir.join("root.pub"), format!("{root_public_key}\n"))?;
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
     fs::write(dir.join("token"), format!("{token}\n"))?;
-    // Numbered file names survive the ISO's file name limits; `list` maps
-    // them back to the original names for the log.
-    let custom = dir.join("custom");
-    fs::create_dir_all(&custom)?;
-    let mut list = String::new();
-    for (i, script) in scripts.iter().enumerate() {
-        let file = format!("{:03}.sh", i + 1);
-        fs::write(custom.join(&file), &script.content)?;
-        let _ = writeln!(list, "{file} {}", script.name);
-    }
-    fs::write(custom.join("list"), list)?;
+    write_custom_scripts(&dir.join("custom"), scripts)?;
 
     let iso = work.join("seed.iso");
     util::run_output(
@@ -506,6 +652,25 @@ fn build_seed_iso(
     )
     .context("creating the seed ISO")?;
     Ok(iso)
+}
+
+/// Writes `scripts`, as `custom_scripts` returns them, into the seed's
+/// `custom` directory. The image file is `main.sh`. The scripts it calls get
+/// numbered file names, which survive the ISO's file name limits; `list`
+/// maps them back to the names that `sendit-provision` takes.
+fn write_custom_scripts(custom: &Path, scripts: &[CustomScript]) -> Result<()> {
+    fs::create_dir_all(custom)?;
+    let mut list = String::new();
+    if let Some((main, called)) = scripts.split_first() {
+        fs::write(custom.join("main.sh"), &main.content)?;
+        for (i, script) in called.iter().enumerate() {
+            let file = format!("{:03}.sh", i + 1);
+            fs::write(custom.join(&file), &script.content)?;
+            let _ = writeln!(list, "{file} {}", script.file);
+        }
+    }
+    fs::write(custom.join("list"), list)?;
+    Ok(())
 }
 
 /// A token for provision.sh to print after its success sentinel: 128
@@ -533,7 +698,9 @@ mod tests {
         // that echoes its own source would look successful.
         assert!(!PROVISION_SCRIPT.contains(SUCCESS_SENTINEL));
         assert!(PROVISION_SCRIPT.contains("echo \"SENDIT_PROVISION_${status} $token\""));
-        assert!(PROVISION_SCRIPT.contains("$seed/custom/list"));
+        assert!(PROVISION_SCRIPT.contains("\"$seed/custom/list\""));
+        assert!(PROVISION_SCRIPT.contains("bash -e -l \"$seed/custom/main.sh\""));
+        assert!(PROVISION_SCRIPT.contains(&format!("/usr/local/bin/{RUN_COMMAND}\n")));
         assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));
     }
@@ -563,8 +730,8 @@ mod tests {
             "The rust image in ~/.cache/sendit/images/rust is already provisioned. \
              Use --force to rebuild it."
         );
-        fs::create_dir_all(paths.provision_scripts_dir()).unwrap();
-        fs::write(paths.provision_scripts_dir().join("10-new.sh"), "true").unwrap();
+        fs::create_dir_all(paths.image_files_dir()).unwrap();
+        fs::write(paths.image_file(&rust), "true").unwrap();
         assert!(
             why()
                 .unwrap()
@@ -605,49 +772,246 @@ mod tests {
         name.parse().unwrap()
     }
 
+    /// Writes `content` to `path` below `~/.config/sendit`.
+    fn write_config(paths: &Paths, path: &str, content: &str) {
+        let path = paths.config_dir().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    /// The names of the custom scripts for `image`, in order.
+    fn script_names(paths: &Paths, image: &ImageName) -> Vec<String> {
+        custom_scripts(paths, image)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    fn script_error(paths: &Paths, image: &ImageName) -> String {
+        match custom_scripts(paths, image) {
+            Ok(_) => panic!("no error"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
     #[test]
-    fn collects_custom_scripts_in_name_order() {
+    fn resolves_the_scripts_an_image_file_calls() {
         let home = TempDir::new("scripts");
         let paths = Paths::new(home.path().to_path_buf());
         let rust = image("rust");
+        // Without an image file, shared scripts don't run.
+        write_config(&paths, "provision-scripts/unused.sh", "echo unused");
         assert!(custom_scripts(&paths, &rust).unwrap().is_empty());
 
-        let dir = paths.provision_scripts_dir();
-        fs::create_dir_all(dir.join("30-dir.sh")).unwrap();
-        for name in ["20-node.sh", "10-editors.sh", ".hidden.sh", "notes.txt"] {
-            fs::write(dir.join(name), name).unwrap();
-        }
-        let names = |image: &ImageName| -> Vec<(String, String)> {
-            custom_scripts(&paths, image)
-                .unwrap()
-                .into_iter()
-                .map(|s| (s.name, String::from_utf8(s.content).unwrap()))
-                .collect()
-        };
-        let shared = |name: &str| (name.to_string(), name.to_string());
-        assert_eq!(
-            names(&rust),
-            [shared("10-editors.sh"), shared("20-node.sh")]
+        write_config(
+            &paths,
+            "images/rust.sh",
+            "#!/bin/bash\n\
+             # sendit-provision commented-out.sh\n\
+             sendit-provision rust.sh  # the shared one, not this file\n\
+             sudo apt-get install -y postgresql-client # sendit-provision no.sh\n\
+             (sendit-provision helix.sh)\n\
+             if [ -n \"$CI\" ]; then sendit-provision ci.sh; fi\n\
+             sendit-provision rust.sh\n",
         );
-
-        // The image's own scripts join in name order and replace shared
-        // ones of the same name; other images don't see them.
-        let own = paths.image_scripts_dir(&rust);
-        fs::create_dir_all(&own).unwrap();
-        fs::write(own.join("15-cargo.sh"), "cargo").unwrap();
-        fs::write(own.join("20-node.sh"), "no node").unwrap();
+        write_config(&paths, "provision-scripts/rust.sh", "curl | sh");
+        write_config(
+            &paths,
+            "provision-scripts/helix.sh",
+            "  sendit-provision rust.sh\nsendit-provision grammars.sh&&echo done\n",
+        );
+        write_config(
+            &paths,
+            "provision-scripts/grammars.sh",
+            "hx --grammar fetch",
+        );
+        write_config(&paths, "provision-scripts/ci.sh", "true");
+        // The image file first, then each script it calls, directly or not,
+        // once, in the order they are first found.
         assert_eq!(
-            names(&rust),
+            script_names(&paths, &rust),
             [
-                shared("10-editors.sh"),
-                ("rust/15-cargo.sh".into(), "cargo".into()),
-                ("rust/20-node.sh".into(), "no node".into()),
+                "images/rust.sh",
+                "rust.sh",
+                "helix.sh",
+                "grammars.sh",
+                "ci.sh"
             ]
         );
+        let scripts = custom_scripts(&paths, &rust).unwrap();
+        assert_eq!(scripts[0].file, "rust.sh");
+        assert_eq!(scripts[1].content, b"curl | sh");
+        // Other images don't get them.
+        assert!(custom_scripts(&paths, &image("go")).unwrap().is_empty());
+
+        // On the seed ISO, the image file is main.sh, and the list names the
+        // others as `sendit-provision` does.
+        let custom = home.path().join("seed/custom");
+        write_custom_scripts(&custom, &scripts).unwrap();
         assert_eq!(
-            names(&ImageName::default()),
-            [shared("10-editors.sh"), shared("20-node.sh")]
+            fs::read_to_string(custom.join("main.sh")).unwrap(),
+            String::from_utf8(scripts[0].content.clone()).unwrap()
         );
+        assert_eq!(
+            fs::read_to_string(custom.join("list")).unwrap(),
+            "001.sh rust.sh\n002.sh helix.sh\n003.sh grammars.sh\n004.sh ci.sh\n"
+        );
+        assert_eq!(
+            fs::read_to_string(custom.join("003.sh")).unwrap(),
+            "hx --grammar fetch"
+        );
+        write_custom_scripts(&home.path().join("empty"), &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.path().join("empty/list")).unwrap(),
+            ""
+        );
+        assert!(!home.path().join("empty/main.sh").exists());
+    }
+
+    #[test]
+    fn rejects_cycles_and_missing_scripts() {
+        let home = TempDir::new("script-cycles");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        write_config(&paths, "images/rust.sh", "sendit-provision a.sh\n");
+        write_config(&paths, "provision-scripts/a.sh", "sendit-provision b.sh\n");
+        write_config(&paths, "provision-scripts/b.sh", "sendit-provision c.sh\n");
+        write_config(&paths, "provision-scripts/c.sh", "sendit-provision a.sh\n");
+        let error = script_error(&paths, &rust);
+        assert!(
+            error.contains("call each other in a cycle: a.sh -> b.sh -> c.sh -> a.sh"),
+            "{error}"
+        );
+        write_config(&paths, "provision-scripts/c.sh", "sendit-provision c.sh\n");
+        let error = script_error(&paths, &rust);
+        assert!(error.contains("cycle: c.sh -> c.sh"), "{error}");
+
+        write_config(
+            &paths,
+            "provision-scripts/c.sh",
+            "sendit-provision missing.sh\n",
+        );
+        assert_eq!(
+            script_error(&paths, &rust),
+            "the custom script c.sh calls `sendit-provision missing.sh`, but there is no \
+             ~/.config/sendit/provision-scripts/missing.sh"
+        );
+        // Only `*.sh` files that aren't hidden can be called.
+        write_config(
+            &paths,
+            "provision-scripts/c.sh",
+            "sendit-provision notes.txt\n",
+        );
+        write_config(&paths, "provision-scripts/notes.txt", "");
+        assert!(script_error(&paths, &rust).contains("there is no"));
+    }
+
+    #[test]
+    fn calls_scripts_only_by_literal_file_names() {
+        let home = TempDir::new("script-names");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        // Files that a name with a path could reach.
+        write_config(&paths, "secret.sh", "");
+        write_config(&paths, "provision-scripts/sub.sh", "");
+        write_config(&paths, "provision-scripts/.hidden.sh", "");
+        for (call, reason) in [
+            ("sendit-provision ../secret.sh", "without a directory"),
+            ("sendit-provision ./sub.sh", "without a directory"),
+            ("sendit-provision /etc/passwd", "without a directory"),
+            ("sendit-provision ..", "can't start with a dot"),
+            ("sendit-provision .hidden.sh", "can't start with a dot"),
+            ("sendit-provision sub\u{1b}.sh", "control characters"),
+            ("sendit-provision \"$x\"", "literal file name"),
+            ("sendit-provision $x", "literal file name"),
+            ("sendit-provision 'sub.sh'", "literal file name"),
+            ("sendit-provision `echo sub.sh`", "literal file name"),
+            ("sendit-provision sub*.sh", "literal file name"),
+            ("sendit-provision", "names no script"),
+            ("x && sendit-provision; true", "names no script"),
+        ] {
+            write_config(&paths, "images/rust.sh", &format!("echo\n{call}\n"));
+            let error = script_error(&paths, &rust);
+            assert!(
+                error.contains(reason) && error.contains("images/rust.sh"),
+                "{call}: {error}"
+            );
+        }
+        // The same goes for the scripts it calls.
+        write_config(&paths, "images/rust.sh", "sendit-provision sub.sh\n");
+        write_config(
+            &paths,
+            "provision-scripts/sub.sh",
+            "sendit-provision ../secret.sh",
+        );
+        let error = script_error(&paths, &rust);
+        assert!(error.contains("in the custom script sub.sh"), "{error}");
+    }
+
+    #[test]
+    fn refuses_subfolders_of_shared_scripts() {
+        let home = TempDir::new("script-subfolders");
+        let paths = Paths::new(home.path().to_path_buf());
+        // A repository's metadata is fine.
+        fs::create_dir_all(paths.provision_scripts_dir().join(".git")).unwrap();
+        assert!(custom_scripts(&paths, &image("rust")).unwrap().is_empty());
+        // An image's own scripts in the old layout, even without image files.
+        write_config(&paths, "provision-scripts/rust/10-cargo.sh", "cargo");
+        assert_eq!(
+            script_error(&paths, &ImageName::default()),
+            "~/.config/sendit/provision-scripts/rust/: subfolders are no longer supported; \
+             images are defined by ~/.config/sendit/images/NAME.sh (see the CHANGELOG)"
+        );
+    }
+
+    #[test]
+    fn notices_changes_to_the_scripts_that_run() {
+        let home = TempDir::new("script-changes");
+        let paths = Paths::new(home.path().to_path_buf());
+        let rust = image("rust");
+        write_config(&paths, "images/rust.sh", "sendit-provision a.sh\n");
+        write_config(&paths, "provision-scripts/a.sh", "sendit-provision b.sh\n");
+        write_config(&paths, "provision-scripts/b.sh", "echo b\n");
+        write_config(&paths, "provision-scripts/unused.sh", "echo unused\n");
+        let base = VmDir::new(paths.image_dir(&rust));
+        fs::create_dir_all(base.path()).unwrap();
+        let marker = Marker {
+            revision: BASE_REVISION,
+            custom_scripts: custom_scripts(&paths, &rust)
+                .unwrap()
+                .iter()
+                .map(CustomScript::stamp)
+                .collect(),
+        };
+        let names: Vec<_> = marker.custom_scripts.iter().map(|s| &s.name[..]).collect();
+        assert_eq!(names, ["images/rust.sh", "a.sh", "b.sh"]);
+        fs::write(marker_file(&base), toml::to_string(&marker).unwrap()).unwrap();
+        let changed = || {
+            matches!(
+                base_state(&paths, &rust).unwrap(),
+                BaseState::ScriptsChanged
+            )
+        };
+        assert!(!changed());
+
+        write_config(&paths, "provision-scripts/unused.sh", "echo other\n");
+        assert!(!changed());
+        write_config(&paths, "provision-scripts/b.sh", "# A comment.\necho b\n");
+        assert!(!changed());
+        write_config(&paths, "provision-scripts/b.sh", "echo B\n");
+        assert!(changed());
+        write_config(&paths, "provision-scripts/b.sh", "echo b\n");
+        assert!(!changed());
+        // So does the order they run in.
+        write_config(
+            &paths,
+            "images/rust.sh",
+            "sendit-provision b.sh\nsendit-provision a.sh\n",
+        );
+        assert!(changed());
+        fs::remove_file(paths.image_file(&rust)).unwrap();
+        assert!(changed());
     }
 
     #[test]
@@ -657,27 +1021,28 @@ mod tests {
         let rust = image("rust");
         let describe = || describe_scripts(&paths, &rust, &custom_scripts(&paths, &rust).unwrap());
 
-        let own = paths.image_scripts_dir(&rust);
-        fs::create_dir_all(&own).unwrap();
-        for name in ["00-rust.sh", "01-helix.sh"] {
-            fs::write(own.join(name), name).unwrap();
-        }
-        assert_eq!(
-            describe(),
-            "Custom scripts from ~/.config/sendit/provision-scripts/rust:\n  \
-             00-rust.sh\n  \
-             01-helix.sh"
-        );
+        write_config(&paths, "images/rust.sh", "cargo install ripgrep\n");
+        assert_eq!(describe(), "Image file: ~/.config/sendit/images/rust.sh");
 
-        fs::write(paths.provision_scripts_dir().join("00-apt.sh"), "apt").unwrap();
-        fs::write(paths.provision_scripts_dir().join("10-dotfiles.sh"), "dots").unwrap();
+        write_config(
+            &paths,
+            "images/rust.sh",
+            "sendit-provision rust.sh\nsendit-provision helix.sh\n",
+        );
+        write_config(&paths, "provision-scripts/rust.sh", "rustup");
+        write_config(
+            &paths,
+            "provision-scripts/helix.sh",
+            "sendit-provision grammars.sh",
+        );
+        write_config(&paths, "provision-scripts/grammars.sh", "hx");
         assert_eq!(
             describe(),
-            "Custom scripts from ~/.config/sendit/provision-scripts, in run order:\n  \
-             00-apt.sh\n  \
-             00-rust.sh      (rust)\n  \
-             01-helix.sh     (rust)\n  \
-             10-dotfiles.sh"
+            "Image file: ~/.config/sendit/images/rust.sh\n\
+             Scripts it calls, from ~/.config/sendit/provision-scripts:\n  \
+             rust.sh\n  \
+             helix.sh\n  \
+             grammars.sh"
         );
     }
 
@@ -685,9 +1050,8 @@ mod tests {
     fn stamps_scripts_without_their_header() {
         let stamp = |content: &str| {
             CustomScript {
-                name: "10-tool.sh".into(),
-                file: "10-tool.sh".into(),
-                own: false,
+                name: "tool.sh".into(),
+                file: "tool.sh".into(),
                 content: content.into(),
             }
             .stamp()
@@ -716,23 +1080,20 @@ mod tests {
         let paths = Paths::new(home.path().to_path_buf());
         let rust = image("rust");
         let mounts = || script_mounts(&paths, &rust);
-        let write = |name: &str, content: &str| {
-            let path = paths.provision_scripts_dir().join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, content).unwrap();
-        };
+        let write = |path: &str, content: &str| write_config(&paths, path, content);
 
         write(
-            "10-cargo.sh",
-            "#!/bin/sh\n\
-             # Installs cargo.\n\
+            "images/rust.sh",
+            "#!/bin/bash\n\
+             # Rust, with a shared registry.\n\
              # sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry\n\
              \n  # sendit-mount: /opt/data:rw  \n\
-             set -eu\n\
+             sendit-provision notes.sh\n\
              # sendit-mount: ~/after-the-first-command\n",
         );
-        write("rust/20-own.sh", "# sendit-mount: ~/notes\n");
-        write("go/20-other.sh", "# sendit-mount: ~/go\n");
+        write("provision-scripts/notes.sh", "# sendit-mount: ~/notes\n");
+        write("provision-scripts/unused.sh", "# sendit-mount: ~/unused\n");
+        write("images/go.sh", "# sendit-mount: ~/go\n");
         let described: Vec<_> = mounts()
             .unwrap()
             .iter()
@@ -741,28 +1102,28 @@ mod tests {
         assert_eq!(
             described,
             [
-                "10-cargo.sh ~/.cargo/registry:/home/dev/.cargo/registry:ro",
-                "10-cargo.sh /opt/data:rw",
-                "rust/20-own.sh ~/notes:ro",
+                "images/rust.sh ~/.cargo/registry:/home/dev/.cargo/registry:ro",
+                "images/rust.sh /opt/data:rw",
+                "notes.sh ~/notes:ro",
             ]
         );
         assert_eq!(
             describe_mounts(&mounts().unwrap()),
             "VMs made from the image share what the scripts ask for:\n  \
-             ~/.cargo/registry:/home/dev/.cargo/registry:ro  (10-cargo.sh)\n  \
-             /opt/data:rw  (10-cargo.sh)\n  \
-             ~/notes:ro  (rust/20-own.sh)"
+             ~/.cargo/registry:/home/dev/.cargo/registry:ro  (images/rust.sh)\n  \
+             /opt/data:rw  (images/rust.sh)\n  \
+             ~/notes:ro  (notes.sh)"
         );
 
         // Mistakes name the script, and so does a relative host path, which
         // would depend on where `sendit run` happens to be started.
-        write("rust/30-bad.sh", "# sendit-mount: a:b:c:d\n");
+        write("provision-scripts/notes.sh", "# sendit-mount: a:b:c:d\n");
         let error = format!("{:#}", mounts().unwrap_err());
-        assert!(error.contains("rust/30-bad.sh"), "{error}");
-        write("rust/30-bad.sh", "# sendit-mount: data:/data\n");
+        assert!(error.contains("custom script notes.sh"), "{error}");
+        write("provision-scripts/notes.sh", "# sendit-mount: data:/data\n");
         let error = format!("{:#}", mounts().unwrap_err());
         assert!(
-            error.contains("rust/30-bad.sh") && error.contains("absolute"),
+            error.contains("custom script notes.sh") && error.contains("absolute"),
             "{error}"
         );
     }
@@ -774,16 +1135,28 @@ mod tests {
         let config = Config::default();
         assert_eq!(images(&paths, &config).unwrap(), [ImageName::default()]);
 
-        let scripts = paths.provision_scripts_dir();
-        fs::create_dir_all(scripts.join("rust")).unwrap();
-        fs::create_dir_all(scripts.join("Not An Image")).unwrap();
-        fs::write(scripts.join("node"), "a file").unwrap();
+        let files = paths.image_files_dir();
+        fs::create_dir_all(files.join("dir.sh")).unwrap();
+        for name in ["rust.sh", ".hidden.sh", "notes.txt"] {
+            fs::write(files.join(name), "").unwrap();
+        }
+        // Only an image file makes an image, not shared scripts.
+        write_config(&paths, "provision-scripts/node.sh", "");
         fs::create_dir_all(paths.image_dir(&image("go"))).unwrap();
         fs::create_dir_all(paths.image_partial_dir(&image("zig"))).unwrap();
-        let config: Config = toml::from_str("image = \"node\"").unwrap();
+        let config: Config = toml::from_str("image = \"zig\"").unwrap();
         assert_eq!(
             images(&paths, &config).unwrap(),
-            [image("default"), image("go"), image("node"), image("rust")]
+            [image("default"), image("go"), image("rust"), image("zig")]
+        );
+
+        // The name becomes part of paths, so it must be a valid one.
+        fs::write(files.join("Rust 2.sh"), "").unwrap();
+        let error = format!("{:#}", images(&paths, &config).unwrap_err());
+        assert!(
+            error.contains("image file ~/.config/sendit/images/Rust 2.sh")
+                && error.contains("invalid image name \"Rust 2\""),
+            "{error}"
         );
     }
 }
