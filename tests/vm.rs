@@ -46,7 +46,7 @@ use common::{assert_fails_with, text};
 const PROVISION_INPUTS: [&str; 3] = [
     include_str!("../src/assets/provision.sh"),
     include_str!("../src/assets/user-data.yaml"),
-    include_str!("../src/provision.rs"),
+    include_str!("../src/provision/mod.rs"),
 ];
 
 /// Including downloading Debian and its packages.

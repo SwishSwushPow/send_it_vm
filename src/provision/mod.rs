@@ -37,8 +37,8 @@ use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
 /// can't shrink it, so this is also the smallest disk size they can have.
 pub const BASE_DISK_SIZE: ByteSize = ByteSize::gib(16);
 
-const USER_DATA: &str = include_str!("assets/user-data.yaml");
-const PROVISION_SCRIPT: &str = include_str!("assets/provision.sh");
+const USER_DATA: &str = include_str!("../assets/user-data.yaml");
+const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
 
 /// Bumped whenever the base image changes in a way the host code relies on.
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
