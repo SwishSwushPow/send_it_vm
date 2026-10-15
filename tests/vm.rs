@@ -43,10 +43,12 @@ use common::{assert_fails_with, text};
 
 /// What the base images are built from, apart from custom scripts: when any
 /// of it changes, the tests provision their images again.
-const PROVISION_INPUTS: [&str; 3] = [
+const PROVISION_INPUTS: [&str; 5] = [
     include_str!("../src/assets/provision.sh"),
     include_str!("../src/assets/user-data.yaml"),
     include_str!("../src/provision/mod.rs"),
+    include_str!("../src/provision/scripts.rs"),
+    include_str!("../src/provision/shell.rs"),
 ];
 
 /// Including downloading Debian and its packages.
