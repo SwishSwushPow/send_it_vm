@@ -262,10 +262,13 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
     if marker.revision < BASE_REVISION {
         return Ok(BaseState::Outdated);
     }
-    let current: Vec<_> = custom_scripts(paths, image)?
-        .iter()
-        .map(CustomScript::stamp)
-        .collect();
+    // Scripts with a mistake have changed since the build, which resolved
+    // them. `provision` tells about it, and `script_mounts` warns.
+    check_no_subfolders(paths)?;
+    let Ok(scripts) = custom_scripts(paths, image) else {
+        return Ok(BaseState::ScriptsChanged);
+    };
+    let current: Vec<_> = scripts.iter().map(CustomScript::stamp).collect();
     Ok(if marker.custom_scripts != current {
         BaseState::ScriptsChanged
     } else {
@@ -421,16 +424,27 @@ fn add_calls(
 }
 
 /// The mounts that the custom scripts for `image` ask for, in the order
-/// the scripts are first called, each with the name of its script. Without
-/// them, if the image file is a symlink to nothing, with a warning.
+/// the scripts are first called, each with the name of its script. None,
+/// with a warning, if the image file is a symlink to nothing or the scripts
+/// have a mistake: the VMs made from the image can do without them, and
+/// `provision` refuses to build it until it is fixed.
 pub fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<(String, MountSpec)>> {
+    check_no_subfolders(paths)?;
+    let leaving_out =
+        format!("leaving out the shares that the scripts of the {image} image ask for");
     if let Some(target) = dangling_image_file(paths, image) {
         eprintln!(
-            "warning: {}; leaving out the shares its scripts ask for",
+            "warning: {}; {leaving_out}",
             describe_dangling(paths, image, &target)
         );
     }
-    mounts_of(&custom_scripts(paths, image)?)
+    match custom_scripts(paths, image).and_then(|scripts| mounts_of(&scripts)) {
+        Ok(mounts) => Ok(mounts),
+        Err(e) => {
+            eprintln!("warning: {e:#}; {leaving_out}");
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn mounts_of(scripts: &[CustomScript]) -> Result<Vec<(String, MountSpec)>> {
@@ -517,14 +531,15 @@ pub fn provision(
     if let Some(target) = dangling_image_file(paths, name) {
         bail!("{}", describe_dangling(paths, name, &target));
     }
+    // Mistakes in the scripts show before anything is downloaded, and in
+    // place of the --force that `already_provisioned` would suggest.
+    let scripts = custom_scripts(paths, name)?;
+    let mounts = mounts_of(&scripts)?;
     if !force && let Some(why) = already_provisioned(paths, name)? {
         eprintln!("{why}");
         return Ok(());
     }
     let base = paths.image_dir(name);
-    // Mistakes in the scripts show before anything is downloaded.
-    let scripts = custom_scripts(paths, name)?;
-    let mounts = mounts_of(&scripts)?;
 
     let image = image::debian_image(paths)?;
     fs::create_dir_all(paths.ssh_dir())?;
@@ -1053,6 +1068,9 @@ mod tests {
         assert!(changed());
         fs::remove_file(paths.image_file(&rust)).unwrap();
         assert!(changed());
+        // So do scripts with a mistake, which only `provision` reports.
+        write_config(&paths, "images/rust.sh", "sendit-provision missing.sh\n");
+        assert!(changed());
     }
 
     #[test]
@@ -1156,17 +1174,24 @@ mod tests {
              ~/notes:ro  (notes.sh)"
         );
 
-        // Mistakes name the script, and so does a relative host path, which
-        // would depend on where `sendit run` happens to be started.
+        // Mistakes stop a build and name the script, and so does a relative
+        // host path, which would depend on where `sendit run` happens to be
+        // started. VMs go without the scripts' shares then.
+        let build_error = || match custom_scripts(&paths, &rust).and_then(|s| mounts_of(&s)) {
+            Ok(_) => panic!("no error"),
+            Err(e) => format!("{e:#}"),
+        };
         write("provision-scripts/notes.sh", "# sendit-mount: a:b:c:d\n");
-        let error = format!("{:#}", mounts().unwrap_err());
+        let error = build_error();
         assert!(error.contains("custom script notes.sh"), "{error}");
+        assert!(mounts().unwrap().is_empty());
         write("provision-scripts/notes.sh", "# sendit-mount: data:/data\n");
-        let error = format!("{:#}", mounts().unwrap_err());
+        let error = build_error();
         assert!(
             error.contains("custom script notes.sh") && error.contains("absolute"),
             "{error}"
         );
+        assert!(mounts().unwrap().is_empty());
     }
 
     #[test]

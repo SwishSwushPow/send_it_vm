@@ -370,14 +370,31 @@ fn reports_bad_image_files() {
     }
     fs::remove_dir_all(config.join("provision-scripts/rust")).unwrap();
 
-    // A call that can't be resolved stops sendit, also before `provision`
-    // downloads Debian.
+    // A call that can't be resolved stops `provision` before it downloads
+    // Debian, even for an image that is built already, and only warns
+    // otherwise.
     write("images/rust.sh", "sendit-provision rustup.sh\n");
     let missing = "the custom script images/rust.sh calls `sendit-provision rustup.sh`, \
                    but there is no ~/.config/sendit/provision-scripts/rustup.sh";
-    assert_fails_with(&env.sendit(&["status"]), missing);
+    let leaving_out = "leaving out the shares that the scripts of the rust image ask for";
     assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
     assert!(!env.home.join(".cache/sendit/downloads").exists());
+    let built = env.home.join(".cache/sendit/images/rust");
+    fs::create_dir_all(&built).unwrap();
+    fs::write(
+        built.join("provisioned.toml"),
+        "revision = 1000\ncustom_scripts = []\n",
+    )
+    .unwrap();
+    assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
+    let (_, stderr) = env.ok(&["status"]);
+    assert!(
+        stderr.contains(&format!("warning: {missing}; {leaving_out}")),
+        "{stderr}"
+    );
+    let (images, _) = env.ok(&["images"]);
+    assert!(images.contains("scripts changed"), "{images}");
+    fs::remove_dir_all(&built).unwrap();
 
     write(
         "provision-scripts/rustup.sh",
@@ -397,9 +414,7 @@ fn reports_bad_image_files() {
     assert!(!env.home.join(".cache/sendit/downloads").exists());
     let (_, stderr) = env.ok(&["status"]);
     assert!(
-        stderr.contains(&format!(
-            "warning: {dangling}; leaving out the shares its scripts ask for"
-        )),
+        stderr.contains(&format!("warning: {dangling}; {leaving_out}")),
         "{stderr}"
     );
 }
