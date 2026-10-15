@@ -359,9 +359,31 @@ fn reports_bad_image_files() {
     };
     env.config("image = \"rust\"\n");
 
-    // Scripts in the old layout aren't silently ignored.
+    // Scripts in the old layout aren't silently ignored, also not by `run`
+    // of a VM that exists, which doesn't read the scripts.
+    let (status, _) = env.ok(&["status"]);
+    let vm = status
+        .lines()
+        .find_map(|line| line.strip_prefix("vm")?.trim().strip_prefix("~/"))
+        .and_then(|line| line.split(' ').next())
+        .map(|vm| env.home.join(vm))
+        .unwrap();
+    fs::create_dir_all(&vm).unwrap();
+    fs::write(
+        vm.join("project.toml"),
+        format!(
+            "project_path = \"{}\"\nimage = \"rust\"\nbase_revision = 999\n",
+            env.project.display()
+        ),
+    )
+    .unwrap();
     write("provision-scripts/rust/10-cargo.sh", "cargo\n");
-    for args in [&["status"][..], &["images"], &["provision", "--all"]] {
+    for args in [
+        &["status"][..],
+        &["run"],
+        &["images"],
+        &["provision", "--all"],
+    ] {
         assert_fails_with(
             &env.sendit(args),
             "~/.config/sendit/provision-scripts/rust/: subfolders are no longer supported; \
@@ -369,6 +391,7 @@ fn reports_bad_image_files() {
         );
     }
     fs::remove_dir_all(config.join("provision-scripts/rust")).unwrap();
+    fs::remove_dir_all(&vm).unwrap();
 
     // A call that can't be resolved stops `provision` before it downloads
     // Debian, even for an image that is built already. The image's VMs

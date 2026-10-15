@@ -12,7 +12,7 @@ use anyhow::{Result, bail, ensure};
 use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::paths::{ImageName, Paths, Project};
 use crate::project_vm::{self, State};
-use crate::provision::{self, BaseState};
+use crate::provision::{self, BaseState, ScriptMount};
 use crate::util::canonical;
 use crate::vm::{self, VmDir};
 
@@ -398,6 +398,12 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     let base_state = provision::base_state(paths, image)?.describe(image);
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
+    // Whether the image's scripts asked for other shares in its latest
+    // build, if it has one.
+    let latest = provision::marker(paths, image);
+    let behind = |mounts: Vec<ScriptMount>| -> Result<bool> {
+        Ok(latest.exists() && mounts != provision::marker_mounts(&latest)?)
+    };
     let state = if !vm_dir.path().exists() {
         let parent = project_vm::parent_metadata(paths, project);
         match parent {
@@ -424,10 +430,19 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             Some(m) if m.outdated() => {
                 format!("{state}; made from an outdated base image, `sendit reset` recreates it")
             }
-            Some(_) if !project_vm::shares_latest_build(paths, project, image)? => format!(
-                "{state}; shares what an earlier build of the {image} image asked for, \
-                 `sendit reset` recreates it from the current one"
-            ),
+            Some(_) if behind(project_vm::script_mounts(paths, project, image, false)?)? => {
+                // A worktree's VM made again is a copy of its parent VM, which
+                // may be behind too.
+                let how = if behind(project_vm::new_vm_mounts(paths, project, image, false)?)? {
+                    "`sendit reset` and `sendit run --fresh` recreate it"
+                } else {
+                    "`sendit reset` recreates it"
+                };
+                format!(
+                    "{state}; shares what an earlier build of the {image} image asked for, \
+                     {how} from the current one"
+                )
+            }
             _ => state,
         }
     };

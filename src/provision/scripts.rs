@@ -172,7 +172,7 @@ fn check_script_name(name: &str) -> Result<()> {
 /// Fails if `Paths::provision_scripts_dir` has subfolders: the scripts in
 /// them, the old way to give an image scripts of its own, would be left out
 /// without a word.
-pub(super) fn check_no_subfolders(paths: &Paths) -> Result<()> {
+pub fn check_no_subfolders(paths: &Paths) -> Result<()> {
     for entry in util::read_dir(&paths.provision_scripts_dir())? {
         let path = entry?.path();
         let hidden = path

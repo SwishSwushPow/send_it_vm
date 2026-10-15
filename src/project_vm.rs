@@ -81,35 +81,45 @@ pub fn image(paths: &Paths, project: &Project, chosen: Option<&ImageName>) -> Im
 }
 
 /// What the custom scripts of `image` asked to share in the build of it
-/// that the project's VM is made from: the copy of that build's marker that
-/// the VM keeps, or before the VM exists, its parent VM's if `run` would
-/// copy that, else the image's own marker. A VM of another image or an
-/// outdated one counts as not there, as `reset` recreates it from the image;
-/// one made before VMs kept a copy shares what the latest build asked for.
+/// that the project's VM is made from: the VM's, or before it exists, what
+/// `new_vm_mounts` says.
 pub fn script_mounts(
     paths: &Paths,
     project: &Project,
     image: &ImageName,
+    fresh: bool,
 ) -> Result<Vec<ScriptMount>> {
     let dir = dir(paths, project);
-    let from = if dir.path().exists() {
-        Some(dir)
+    if dir.path().exists() {
+        build_mounts(paths, Some(dir), image)
     } else {
-        parent(paths, project)
-    };
-    let copy = from
-        .filter(|from| metadata(from).is_ok_and(|m| m.image == *image && !m.outdated()))
-        .map(|from| from.image_marker())
-        .filter(|copy| copy.exists());
-    provision::marker_mounts(&copy.unwrap_or_else(|| provision::marker(paths, image)))
+        new_vm_mounts(paths, project, image, fresh)
+    }
 }
 
-/// Whether the project's VM shares what the latest build of `image` asked
-/// for, as a VM made from it now would; also if there is no build of it.
-pub fn shares_latest_build(paths: &Paths, project: &Project, image: &ImageName) -> Result<bool> {
-    let latest = provision::marker(paths, image);
-    Ok(!latest.exists()
-        || script_mounts(paths, project, image)? == provision::marker_mounts(&latest)?)
+/// What the custom scripts of `image` asked to share in the build of it
+/// that a new VM of the project would be made from: its parent VM's if `run`
+/// copies that, unless the VM is to be `fresh`, else the latest build's.
+pub fn new_vm_mounts(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    fresh: bool,
+) -> Result<Vec<ScriptMount>> {
+    build_mounts(paths, parent(paths, project).filter(|_| !fresh), image)
+}
+
+/// What the custom scripts of `image` asked to share in the build of it
+/// that `vm` was made from: the copy of that build's marker that it keeps.
+/// Without a VM, or with one of another image or an outdated one, which
+/// `run` won't copy, the latest build's; so too for a VM made before VMs
+/// kept a copy.
+fn build_mounts(paths: &Paths, vm: Option<VmDir>, image: &ImageName) -> Result<Vec<ScriptMount>> {
+    let copy = vm
+        .filter(|vm| metadata(vm).is_ok_and(|m| m.image == *image && !m.outdated()))
+        .map(|vm| vm.image_marker())
+        .filter(|copy| copy.exists());
+    provision::marker_mounts(&copy.unwrap_or_else(|| provision::marker(paths, image)))
 }
 
 /// The directory of the project's VM.
@@ -185,8 +195,9 @@ pub struct Created {
     /// be fresh.
     pub note: Option<String>,
     /// Whether the image's scripts share other directories with the new VM
-    /// than `script_mounts` said before: it was made from the image instead
-    /// of its parent VM, which came from another build.
+    /// than `new_vm_mounts` said before: the user chose to make it from the
+    /// image instead of its running parent VM, which came from another
+    /// build.
     pub other_shares: bool,
 }
 
@@ -204,11 +215,11 @@ pub fn create_if_missing(
         return Ok(None);
     }
     let image = image(paths, project, settings.image.as_ref());
-    let expected = script_mounts(paths, project, &image)?;
+    let expected = new_vm_mounts(paths, project, &image, fresh)?;
     let note = create(paths, project, &dir, &image, fresh, &commands::confirm)?;
     Ok(Some(Created {
         note,
-        other_shares: script_mounts(paths, project, &image)? != expected,
+        other_shares: script_mounts(paths, project, &image, fresh)? != expected,
     }))
 }
 
@@ -647,7 +658,7 @@ fn create(
     let (source, note) = source(paths, project, image, fresh, ask)?;
     // The marker of the image's build that the VM is made from, which it
     // keeps a copy of. A parent made before VMs kept one shares what the
-    // image's latest build asked for; so does its copy.
+    // latest build asked for; so does a copy of it, which keeps none either.
     let (from, base_revision, copy_of, marker) = match &source {
         Source::Parent {
             dir: parent,
@@ -659,14 +670,11 @@ fn create(
                 paths.display(dir.path()),
                 paths.display(&metadata.project_path)
             );
-            let marker = Some(parent.image_marker())
-                .filter(|marker| marker.exists())
-                .unwrap_or_else(|| provision::marker(paths, image));
             (
                 parent.path().to_path_buf(),
                 metadata.base_revision,
                 Some(metadata.project_path.clone()),
-                marker,
+                parent.image_marker(),
             )
         }
         Source::Base => {
@@ -987,35 +995,50 @@ mod tests {
         let rust: ImageName = "rust".parse().unwrap();
         let go: ImageName = "go".parse().unwrap();
         let vm = dir(&paths, &wt);
-        let shares = |image: &ImageName| -> Vec<String> {
-            script_mounts(&paths, &wt, image)
+        let build = |marker: &str| write_marker(&provision::marker(&paths, &rust), marker);
+        let described = |mounts: Result<Vec<ScriptMount>>| -> Vec<String> {
+            mounts
                 .unwrap()
                 .iter()
                 .map(|m| m.mount.to_string())
                 .collect()
         };
+        let shares =
+            |image: &ImageName, fresh: bool| described(script_mounts(&paths, &wt, image, fresh));
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
 
-        assert!(shares(&rust).is_empty());
+        assert!(shares(&rust, false).is_empty());
         // A parent made before VMs kept a copy of the image's marker shares
-        // what the latest build asked for, and a copy of it would too.
-        write_marker(&provision::marker(&paths, &rust), "~/first:ro");
-        assert_eq!(shares(&rust), ["~/first:ro"]);
-        write_marker(&parent.image_marker(), "~/parent:ro");
-        assert_eq!(shares(&rust), ["~/parent:ro"]);
-        // A VM of another image is made from that image instead.
-        write_marker(&provision::marker(&paths, &go), "~/go:ro");
-        assert_eq!(shares(&go), ["~/go:ro"]);
+        // what the latest build asked for, and so does a copy of it.
+        build("~/first:ro");
+        assert_eq!(shares(&rust, false), ["~/first:ro"]);
+        create(&paths, &wt, &vm, &rust, false, &never).unwrap();
+        assert!(!vm.image_marker().exists());
+        build("~/second:ro");
+        assert_eq!(shares(&rust, false), ["~/second:ro"]);
+        fs::remove_dir_all(vm.path()).unwrap();
 
-        // A copy keeps the parent's, also after the image is built again.
+        // A parent's copy is what a copy of it would share, unless the VM
+        // is to be fresh, or of another image: then it is made from the
+        // image.
+        write_marker(&parent.image_marker(), "~/parent:ro");
+        assert_eq!(shares(&rust, false), ["~/parent:ro"]);
+        assert_eq!(shares(&rust, true), ["~/second:ro"]);
+        write_marker(&provision::marker(&paths, &go), "~/go:ro");
+        assert_eq!(shares(&go, false), ["~/go:ro"]);
+
+        // A copy keeps the parent's, also after the image is built again,
+        // and made again it would be a copy of the parent again.
         create(&paths, &wt, &vm, &rust, false, &never).unwrap();
         assert_eq!(
             fs::read_to_string(vm.image_marker()).unwrap(),
             fs::read_to_string(parent.image_marker()).unwrap()
         );
-        write_marker(&provision::marker(&paths, &rust), "~/second:ro");
-        assert_eq!(shares(&rust), ["~/parent:ro"]);
-        assert!(!shares_latest_build(&paths, &wt, &rust).unwrap());
+        build("~/third:ro");
+        assert_eq!(shares(&rust, false), ["~/parent:ro"]);
+        let new_vm = |fresh| described(new_vm_mounts(&paths, &wt, &rust, fresh));
+        assert_eq!(new_vm(false), ["~/parent:ro"]);
+        assert_eq!(new_vm(true), ["~/third:ro"]);
 
         // Made from the image, it keeps that build's.
         fs::remove_dir_all(vm.path()).unwrap();
@@ -1023,14 +1046,13 @@ mod tests {
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
         create(&paths, &wt, &vm, &rust, true, &never).unwrap();
-        write_marker(&provision::marker(&paths, &rust), "~/third:ro");
-        assert_eq!(shares(&rust), ["~/second:ro"]);
+        build("~/fourth:ro");
+        assert_eq!(shares(&rust, false), ["~/third:ro"]);
 
         // A VM made before VMs kept a copy shares what the latest build
         // asked for.
         fs::remove_file(vm.image_marker()).unwrap();
-        assert_eq!(shares(&rust), ["~/third:ro"]);
-        assert!(shares_latest_build(&paths, &wt, &rust).unwrap());
+        assert_eq!(shares(&rust, false), ["~/fourth:ro"]);
     }
 
     #[test]

@@ -26,11 +26,11 @@ use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::util;
 use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
-pub use scripts::ScriptMount;
 use scripts::{
-    CustomScript, ScriptStamp, check_no_subfolders, custom_scripts, dangling_image_file,
-    describe_dangling, describe_mounts, describe_scripts, mounts_of,
+    CustomScript, ScriptStamp, custom_scripts, dangling_image_file, describe_dangling,
+    describe_mounts, describe_scripts, mounts_of,
 };
+pub use scripts::{ScriptMount, check_no_subfolders};
 
 /// Logical size of the base disk. Project VMs grow their clone further, but
 /// can't shrink it, so this is also the smallest disk size they can have.

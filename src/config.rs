@@ -304,13 +304,16 @@ impl Config {
 
     /// Merges all layers for `project`. Relative mount paths given on the
     /// command line are resolved against `cwd`; in the config file they must
-    /// be absolute or start with `~`.
+    /// be absolute or start with `~`. A VM that `run` is yet to create, as a
+    /// `fresh` one if so, shares what the image build it will be made from
+    /// asked for.
     pub fn resolve(
         &self,
         paths: &Paths,
         project: &Project,
         cli: &Settings,
         cwd: &Path,
+        fresh: bool,
     ) -> Result<VmSettings> {
         let project_settings = self.project_settings(paths, project)?;
         let chosen = cli
@@ -324,7 +327,7 @@ impl Config {
         let image_settings = Settings {
             cpus: resources.cpus,
             memory: resources.memory,
-            mounts: script_mounts(paths, project, &image)?,
+            mounts: script_mounts(paths, project, &image, fresh)?,
             ..Settings::default()
         };
         let layers = [
@@ -417,9 +420,17 @@ impl Config {
 /// of it that the project's VM is made from was provisioned, without those
 /// whose host directory doesn't exist: a script may set up a tool that
 /// hasn't been used on this Mac yet.
-fn script_mounts(paths: &Paths, project: &Project, image: &ImageName) -> Result<Vec<MountSpec>> {
+fn script_mounts(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    fresh: bool,
+) -> Result<Vec<MountSpec>> {
+    // The scripts aren't read here, but their old layout must not be left
+    // out without a word, also by `run`.
+    provision::check_no_subfolders(paths)?;
     let mut mounts = Vec::new();
-    for ScriptMount { script, mount } in project_vm::script_mounts(paths, project, image)? {
+    for ScriptMount { script, mount } in project_vm::script_mounts(paths, project, image, fresh)? {
         let host = paths.expand_tilde(&mount.host);
         if host.exists() {
             mounts.push(mount);
@@ -742,7 +753,7 @@ mod tests {
         };
 
         let vm = config
-            .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+            .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
             .unwrap();
         assert_eq!(vm.cpus, 1);
         assert_eq!(vm.memory, ByteSize::gib(1));
@@ -781,7 +792,7 @@ mod tests {
                 ..Settings::default()
             };
             let vm = config
-                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
                 .unwrap();
             if cli.image.is_none() {
                 assert_eq!(
@@ -812,7 +823,7 @@ mod tests {
         let resolve = |config: &str, cli: Settings| {
             let vm = Config::parse(config)
                 .unwrap()
-                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
                 .unwrap();
             (vm.cpus, vm.memory)
         };
@@ -853,7 +864,7 @@ mod tests {
         .unwrap();
         let vm = Config::parse("[images.rust]\ncpus = 3\n")
             .unwrap()
-            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir, false)
             .unwrap();
         assert_eq!(vm.cpus, 3);
         assert_eq!(vm.image, None);
@@ -885,7 +896,7 @@ mod tests {
             };
             let vm = Config::parse(config)
                 .unwrap()
-                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
                 .unwrap();
             let guests: Vec<_> = vm.mounts[1..].iter().map(|m| m.guest.clone()).collect();
             guests
@@ -911,7 +922,7 @@ mod tests {
         let resolve = |config: &str, cli: Settings| {
             Config::parse(config)
                 .unwrap()
-                .resolve(&fx.paths, &fx.project, &cli, &fx.dir)
+                .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
         };
 
         assert!(resolve("", Settings::default()).is_ok());
@@ -941,7 +952,7 @@ mod tests {
         let resolve = |config: &str| {
             Config::parse(config)
                 .unwrap()
-                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir)
+                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir, false)
                 .unwrap()
         };
         let main_table = format!("[projects.\"{}\"]\ncpus = 1\n", main.display());
@@ -960,7 +971,7 @@ mod tests {
         let resolve = |config: &str| {
             Config::parse(config)
                 .unwrap()
-                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir)
+                .resolve(&fx.paths, &wt, &Settings::default(), &fx.dir, false)
                 .unwrap()
         };
         // Even without the subdirectory in the main worktree.
@@ -981,7 +992,7 @@ mod tests {
         ))
         .unwrap();
         let error = config
-            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir)
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir, false)
             .unwrap_err();
         assert!(error.to_string().contains("both configure"), "{error}");
     }

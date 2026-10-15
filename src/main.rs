@@ -53,14 +53,14 @@ fn sendit() -> Result<ExitCode> {
     }
     let cwd = std::env::current_dir()?;
     let project = || Project::at(cli.project.as_deref().unwrap_or(&cwd));
-    let resolve = |project: &Project, cli: &Settings| {
-        Config::load(&paths)?.resolve(&paths, project, cli, &cwd)
+    let resolve = |project: &Project, cli: &Settings, fresh: bool| {
+        Config::load(&paths)?.resolve(&paths, project, cli, &cwd, fresh)
     };
 
     let done = match &cli.command {
         Command::Status => {
             let project = project()?;
-            let settings = resolve(&project, &Settings::default())?;
+            let settings = resolve(&project, &Settings::default(), false)?;
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
@@ -73,13 +73,13 @@ fn sendit() -> Result<ExitCode> {
                 )?)?,
                 None => project()?,
             };
-            let mut settings = resolve(&project, &args.settings())?;
+            let mut settings = resolve(&project, &args.settings(), args.fresh)?;
             commands::confirm_shares(&paths, &settings)?;
             let created = project_vm::create_if_missing(&paths, &project, &settings, args.fresh)?;
-            // Made from the image instead of its parent VM, from a build
-            // whose scripts asked for other shares than the parent's.
+            // Made from the image instead of its running parent VM, from a
+            // build whose scripts asked for other shares than the parent's.
             if created.as_ref().is_some_and(|created| created.other_shares) {
-                settings = resolve(&project, &args.settings())?;
+                settings = resolve(&project, &args.settings(), args.fresh)?;
                 commands::confirm_shares(&paths, &settings)?;
             }
             let note = created.and_then(|created| created.note);
