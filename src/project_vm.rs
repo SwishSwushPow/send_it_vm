@@ -802,6 +802,21 @@ mod tests {
         assert_eq!(image(&paths, &apps, None), ImageName::default());
     }
 
+    /// The VM's state after this process has dropped its lock. A process
+    /// another test spawns at that moment holds a copy of the lock until it
+    /// has exec'd (macOS's `posix_spawn` copies even close-on-exec
+    /// descriptors first), so the lock may stay taken for some milliseconds.
+    fn state_once_released(dir: &VmDir) -> State {
+        let start = Instant::now();
+        loop {
+            let state = state(dir).unwrap();
+            if state == State::Stopped || start.elapsed() > Duration::from_secs(2) {
+                return state;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn copies_the_parent_while_it_is_stopped() {
         let temp = crate::util::TempDir::new("vm-fork");
@@ -841,7 +856,7 @@ mod tests {
         assert_eq!(metadata.copy_of.as_ref(), Some(&parent_project));
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
-        assert_eq!(state(&parent).unwrap(), State::Stopped);
+        assert_eq!(state_once_released(&parent), State::Stopped);
     }
 
     #[test]
@@ -889,7 +904,7 @@ mod tests {
             State::Running(Some(std::process::id()))
         );
         drop(running);
-        assert_eq!(state(&vm).unwrap(), State::Stopped);
+        assert_eq!(state_once_released(&vm), State::Stopped);
         // Held to copy or delete the VM, the lock doesn't point at the
         // process of the last run.
         let _busy = try_lock(&vm).unwrap().unwrap();
