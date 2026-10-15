@@ -371,12 +371,11 @@ fn reports_bad_image_files() {
     fs::remove_dir_all(config.join("provision-scripts/rust")).unwrap();
 
     // A call that can't be resolved stops `provision` before it downloads
-    // Debian, even for an image that is built already, and only warns
-    // otherwise.
+    // Debian, even for an image that is built already. The image's VMs
+    // don't read the scripts: they share what the build recorded.
     write("images/rust.sh", "sendit-provision rustup.sh\n");
     let missing = "the custom script images/rust.sh calls `sendit-provision rustup.sh`, \
                    but there is no ~/.config/sendit/provision-scripts/rustup.sh";
-    let leaving_out = "leaving out the shares that the scripts of the rust image ask for";
     assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
     assert!(!env.home.join(".cache/sendit/downloads").exists());
     let built = env.home.join(".cache/sendit/images/rust");
@@ -387,11 +386,9 @@ fn reports_bad_image_files() {
     )
     .unwrap();
     assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
-    let (_, stderr) = env.ok(&["status"]);
-    assert!(
-        stderr.contains(&format!("warning: {missing}; {leaving_out}")),
-        "{stderr}"
-    );
+    let (status, stderr) = env.ok(&["status"]);
+    assert!(status.contains("scripts changed"), "{status}");
+    assert_eq!(stderr, "");
     let (images, _) = env.ok(&["images"]);
     assert!(images.contains("scripts changed"), "{images}");
     fs::remove_dir_all(&built).unwrap();
@@ -403,8 +400,7 @@ fn reports_bad_image_files() {
     env.ok(&["status"]);
 
     // An image file that is a symlink to nothing, e.g. into a dotfiles repo
-    // that isn't cloned yet, stops a build, which would lack its scripts,
-    // but only warns otherwise.
+    // that isn't cloned yet, stops a build, which would lack its scripts.
     let image_file = config.join("images/rust.sh");
     fs::remove_file(&image_file).unwrap();
     std::os::unix::fs::symlink(env.home.join("dotfiles/rust.sh"), &image_file).unwrap();
@@ -412,11 +408,7 @@ fn reports_bad_image_files() {
                     ~/dotfiles/rust.sh, which doesn't exist";
     assert_fails_with(&env.sendit(&["provision", "rust"]), dangling);
     assert!(!env.home.join(".cache/sendit/downloads").exists());
-    let (_, stderr) = env.ok(&["status"]);
-    assert!(
-        stderr.contains(&format!("warning: {dangling}; {leaving_out}")),
-        "{stderr}"
-    );
+    env.ok(&["status"]);
 }
 
 #[test]

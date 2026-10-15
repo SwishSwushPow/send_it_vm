@@ -18,9 +18,10 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::paths::{ImageName, Paths, Project};
+use crate::provision::ScriptMount;
 use crate::{project_vm, provision, util, worktree};
 
 const DEFAULT_CPUS: u32 = 2;
@@ -151,6 +152,13 @@ impl TryFrom<String> for MountSpec {
 
     fn try_from(s: String) -> Result<Self> {
         s.parse()
+    }
+}
+
+/// As `Display` writes it, which `FromStr` reads back.
+impl Serialize for MountSpec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -316,7 +324,7 @@ impl Config {
         let image_settings = Settings {
             cpus: resources.cpus,
             memory: resources.memory,
-            mounts: script_mounts(paths, &image)?,
+            mounts: script_mounts(paths, project, &image)?,
             ..Settings::default()
         };
         let layers = [
@@ -405,15 +413,16 @@ impl Config {
     }
 }
 
-/// The mounts that the custom scripts for `image` ask for, without those
+/// The mounts that the custom scripts of `image` asked for when the build
+/// of it that the project's VM is made from was provisioned, without those
 /// whose host directory doesn't exist: a script may set up a tool that
 /// hasn't been used on this Mac yet.
-fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<MountSpec>> {
+fn script_mounts(paths: &Paths, project: &Project, image: &ImageName) -> Result<Vec<MountSpec>> {
     let mut mounts = Vec::new();
-    for (script, spec) in provision::script_mounts(paths, image)? {
-        let host = paths.expand_tilde(&spec.host);
+    for ScriptMount { script, mount } in project_vm::script_mounts(paths, project, image)? {
+        let host = paths.expand_tilde(&mount.host);
         if host.exists() {
-            mounts.push(spec);
+            mounts.push(mount);
         } else {
             eprintln!(
                 "Not sharing {}, which the custom script {script} asks for: it doesn't exist.",
@@ -853,14 +862,22 @@ mod tests {
     #[test]
     fn adds_mounts_from_custom_scripts() {
         let fx = Fixture::new("resolve-script-mounts");
-        let image_file = fx.paths.image_file(&"rust".parse().unwrap());
-        fs::create_dir_all(image_file.parent().unwrap()).unwrap();
+        let rust = "rust".parse().unwrap();
+        // What the scripts asked for when the image was built, not what
+        // they ask for now.
+        let marker = provision::marker(&fx.paths, &rust);
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
         fs::write(
-            image_file,
-            "# sendit-mount: ~/extra:/home/dev/.cargo/registry\n\
-             # sendit-mount: ~/not-here\n",
+            marker,
+            "revision = 1\ncustom_scripts = []\n\
+             [[mounts]]\nscript = \"images/rust.sh\"\n\
+             mount = \"~/extra:/home/dev/.cargo/registry:ro\"\n\
+             [[mounts]]\nscript = \"tool.sh\"\nmount = \"~/not-here:ro\"\n",
         )
         .unwrap();
+        let image_file = fx.paths.image_file(&rust);
+        fs::create_dir_all(image_file.parent().unwrap()).unwrap();
+        fs::write(image_file, "# sendit-mount: ~/extra:/later\n").unwrap();
         let resolve = |config: &str| {
             let cli = Settings {
                 mounts: vec!["proj:/data".parse().unwrap()],

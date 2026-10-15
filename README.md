@@ -98,11 +98,11 @@ sendit-provision claude-code.sh
 
 The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file runs with `bash -e`, so a failing command or script stops the build, and a failed script fails it even if the script that called it carries on.
 
-sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be a file name in `provision-scripts/` written out literally. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` and `status` only warn about these and about unreadable mount lines, and leave out the scripts' shares, so existing VMs keep working while you edit.
+sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be a file name in `provision-scripts/` written out literally. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` doesn't read the scripts, so existing VMs keep working while you edit.
 
 Each script runs as the VM's user in its own login shell from the home directory, and `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts added, e.g. to `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
 
-`sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments; `sendit provision NAME --force` rebuilds it.
+`sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments other than mount lines; `sendit provision NAME --force` rebuilds it.
 
 A script can ask for host directories to be shared with the image's VMs, in comment lines before its first command:
 
@@ -111,7 +111,7 @@ A script can ask for host directories to be shared with the image's VMs, in comm
 # sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry
 ```
 
-These take the same form as `--mount`, with host paths absolute or starting with `~`, and come after the top-level mounts and before the project's. A host directory that doesn't exist is left out with a notice. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. `sendit provision` lists them and `sendit status` shows them. Read the mount lines of a script you copy: they give the VM access to files on the Mac.
+These take the same form as `--mount`, with host paths absolute or starting with `~`, and come after the top-level mounts and before the project's. A host directory that doesn't exist is left out with a notice. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. They are recorded when the image is built, and each VM keeps those of the build it was made from (a worktree's VM those of its main worktree's VM): a changed mount line takes effect for VMs made after the next build, or after `sendit reset`. `sendit provision` lists them and `sendit status` shows them. Read the mount lines of a script you copy: they give the VM access to files on the Mac.
 
 [`provision-scripts/`](provision-scripts) has example scripts for Rust, the Helix editor, Claude Code, the Pi coding agent, and a `CLAUDE.md` that tells Claude Code about the VM (installed as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it). [`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 

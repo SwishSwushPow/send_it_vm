@@ -9,8 +9,9 @@
 //! the VMs made from the image, in comment lines at its top:
 //! `# sendit-mount: HOST[:GUEST][:ro|rw]`.
 //!
-//! A mistake in the scripts stops `provision`; `script_mounts`, for `run`
-//! and `status`, only warns about it.
+//! The mounts are recorded in the image's marker when it is built, and
+//! project VMs keep a copy of it, so editing a script's mounts changes
+//! only the VMs made from a later build.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -37,8 +38,17 @@ pub(super) const RUN_COMMAND: &str = "sendit-provision";
 pub(super) struct ScriptStamp {
     pub(super) name: String,
     /// Of the script below its header (see `CustomScript::split_header`),
-    /// so that changing its description or mounts doesn't mark the image.
+    /// so that changing its description doesn't mark the image. Its mounts
+    /// are compared on their own.
     sha256: String,
+}
+
+/// A mount that a custom script asks for, as written, and the script's
+/// name.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ScriptMount {
+    pub script: String,
+    pub mount: MountSpec,
 }
 
 /// A custom provisioning script: the image file of the image being built,
@@ -182,7 +192,7 @@ pub(super) fn check_no_subfolders(paths: &Paths) -> Result<()> {
 /// Where the image file of `image` points if it is a symlink to nothing,
 /// e.g. into a dotfiles repository that isn't there (yet). `custom_scripts`
 /// finds no image file then, so `provision` refuses to build the image
-/// without its scripts, and `script_mounts` warns.
+/// without its scripts.
 pub(super) fn dangling_image_file(paths: &Paths, image: &ImageName) -> Option<PathBuf> {
     let file = paths.image_file(image);
     let target = fs::read_link(&file).ok()?;
@@ -267,45 +277,25 @@ fn add_calls(
     Ok(())
 }
 
-/// The mounts that the custom scripts for `image` ask for, in the order
-/// the scripts are first called, each with the name of its script. None,
-/// with a warning, if the image file is a symlink to nothing or the scripts
-/// have a mistake: the VMs made from the image can do without them, and
-/// `provision` refuses to build it until it is fixed.
-pub fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<(String, MountSpec)>> {
-    check_no_subfolders(paths)?;
-    let leaving_out =
-        format!("leaving out the shares that the scripts of the {image} image ask for");
-    if let Some(target) = dangling_image_file(paths, image) {
-        eprintln!(
-            "warning: {}; {leaving_out}",
-            describe_dangling(paths, image, &target)
-        );
-    }
-    match custom_scripts(paths, image).and_then(|scripts| mounts_of(&scripts)) {
-        Ok(mounts) => Ok(mounts),
-        Err(e) => {
-            eprintln!("warning: {e:#}; {leaving_out}");
-            Ok(Vec::new())
-        }
-    }
-}
-
-pub(super) fn mounts_of(scripts: &[CustomScript]) -> Result<Vec<(String, MountSpec)>> {
+/// The mounts that `scripts` ask for, in order.
+pub(super) fn mounts_of(scripts: &[CustomScript]) -> Result<Vec<ScriptMount>> {
     let mut mounts = Vec::new();
     for script in scripts {
-        for spec in script.mounts()? {
-            mounts.push((script.name.clone(), spec));
+        for mount in script.mounts()? {
+            mounts.push(ScriptMount {
+                script: script.name.clone(),
+                mount,
+            });
         }
     }
     Ok(mounts)
 }
 
 /// Lists `mounts` one per line, as written, each with its script.
-pub(super) fn describe_mounts(mounts: &[(String, MountSpec)]) -> String {
+pub(super) fn describe_mounts(mounts: &[ScriptMount]) -> String {
     let mut text = "VMs made from the image share what the scripts ask for:".to_string();
-    for (script, spec) in mounts {
-        let _ = write!(text, "\n  {spec}  ({script})");
+    for ScriptMount { script, mount } in mounts {
+        let _ = write!(text, "\n  {mount}  ({script})");
     }
     text
 }
@@ -663,7 +653,7 @@ mod tests {
         let home = TempDir::new("script-mounts");
         let paths = Paths::new(home.path().to_path_buf());
         let rust = image("rust");
-        let mounts = || script_mounts(&paths, &rust);
+        let mounts = || custom_scripts(&paths, &rust).and_then(|s| mounts_of(&s));
         let write = |path: &str, content: &str| write_config(&paths, path, content);
 
         write(
@@ -681,7 +671,7 @@ mod tests {
         let described: Vec<_> = mounts()
             .unwrap()
             .iter()
-            .map(|(script, spec)| format!("{script} {spec}"))
+            .map(|m| format!("{} {}", m.script, m.mount))
             .collect();
         assert_eq!(
             described,
@@ -701,21 +691,16 @@ mod tests {
 
         // Mistakes stop a build and name the script, and so does a relative
         // host path, which would depend on where `sendit run` happens to be
-        // started. VMs go without the scripts' shares then.
-        let build_error = || match custom_scripts(&paths, &rust).and_then(|s| mounts_of(&s)) {
-            Ok(_) => panic!("no error"),
-            Err(e) => format!("{e:#}"),
-        };
+        // started.
+        let error = || format!("{:#}", mounts().unwrap_err());
         write("provision-scripts/notes.sh", "# sendit-mount: a:b:c:d\n");
-        let error = build_error();
-        assert!(error.contains("custom script notes.sh"), "{error}");
-        assert!(mounts().unwrap().is_empty());
+        let message = error();
+        assert!(message.contains("custom script notes.sh"), "{message}");
         write("provision-scripts/notes.sh", "# sendit-mount: data:/data\n");
-        let error = build_error();
+        let message = error();
         assert!(
-            error.contains("custom script notes.sh") && error.contains("absolute"),
-            "{error}"
+            message.contains("custom script notes.sh") && message.contains("absolute"),
+            "{message}"
         );
-        assert!(mounts().unwrap().is_empty());
     }
 }

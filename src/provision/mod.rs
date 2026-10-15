@@ -26,7 +26,7 @@ use crate::image;
 use crate::paths::{ImageName, Paths};
 use crate::util;
 use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
-pub use scripts::script_mounts;
+pub use scripts::ScriptMount;
 use scripts::{
     CustomScript, ScriptStamp, check_no_subfolders, custom_scripts, dangling_image_file,
     describe_dangling, describe_mounts, describe_scripts, mounts_of,
@@ -55,15 +55,34 @@ pub const BASE_REVISION: u32 = 10;
 /// the build's token.
 const SUCCESS_SENTINEL: &str = "SENDIT_PROVISION_OK";
 
-/// Written into the base directory once provisioning has succeeded.
+/// Written into the base directory once provisioning has succeeded. Each
+/// project VM keeps a copy of the marker of the image it was made from.
 #[derive(Deserialize, Serialize)]
 struct Marker {
     revision: u32,
     custom_scripts: Vec<ScriptStamp>,
+    /// What the scripts asked to share when the image was built: the VMs
+    /// made from it share that, whatever the scripts ask for now. Empty for
+    /// images built before sendit recorded it.
+    #[serde(default)]
+    mounts: Vec<ScriptMount>,
 }
 
 fn marker_file(dir: &VmDir) -> PathBuf {
     dir.path().join("provisioned.toml")
+}
+
+/// The marker of the `image` image.
+pub fn marker(paths: &Paths, image: &ImageName) -> PathBuf {
+    marker_file(&VmDir::new(paths.image_dir(image)))
+}
+
+/// The mounts recorded in `marker`, an image's marker or a VM's copy of one;
+/// none if it doesn't exist.
+pub fn marker_mounts(marker: &Path) -> Result<Vec<ScriptMount>> {
+    Ok(util::read_toml::<Marker>(marker)?
+        .map(|marker| marker.mounts)
+        .unwrap_or_default())
 }
 
 pub enum BaseState {
@@ -94,6 +113,7 @@ impl BaseState {
 }
 
 pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
+    check_no_subfolders(paths)?;
     let base = VmDir::new(paths.image_dir(image));
     let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
         return Ok(BaseState::Missing);
@@ -102,17 +122,19 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
         return Ok(BaseState::Outdated);
     }
     // Scripts with a mistake have changed since the build, which resolved
-    // them. `provision` tells about it, and `script_mounts` warns.
-    check_no_subfolders(paths)?;
+    // them. `provision` tells about it.
     let Ok(scripts) = custom_scripts(paths, image) else {
         return Ok(BaseState::ScriptsChanged);
     };
     let current: Vec<_> = scripts.iter().map(CustomScript::stamp).collect();
-    Ok(if marker.custom_scripts != current {
-        BaseState::ScriptsChanged
-    } else {
-        BaseState::Current
-    })
+    let mounts = mounts_of(&scripts).ok();
+    Ok(
+        if marker.custom_scripts != current || mounts.as_ref() != Some(&marker.mounts) {
+            BaseState::ScriptsChanged
+        } else {
+            BaseState::Current
+        },
+    )
 }
 
 /// All images: `default`, and every image that the config file names, has
@@ -250,6 +272,7 @@ pub fn provision(
     let marker = toml::to_string(&Marker {
         revision: BASE_REVISION,
         custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
+        mounts,
     })?;
     fs::write(marker_file(&partial), marker)?;
 
@@ -425,6 +448,7 @@ mod tests {
             let marker = Marker {
                 revision,
                 custom_scripts: Vec::new(),
+                mounts: Vec::new(),
             };
             fs::write(marker_file(&base), toml::to_string(&marker).unwrap()).unwrap();
         };
@@ -535,13 +559,11 @@ mod tests {
         write_config(&paths, "provision-scripts/unused.sh", "echo unused\n");
         let base = VmDir::new(paths.image_dir(&rust));
         fs::create_dir_all(base.path()).unwrap();
+        let scripts = custom_scripts(&paths, &rust).unwrap();
         let marker = Marker {
             revision: BASE_REVISION,
-            custom_scripts: custom_scripts(&paths, &rust)
-                .unwrap()
-                .iter()
-                .map(CustomScript::stamp)
-                .collect(),
+            custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
+            mounts: mounts_of(&scripts).unwrap(),
         };
         let names: Vec<_> = marker.custom_scripts.iter().map(|s| &s.name[..]).collect();
         assert_eq!(names, ["images/rust.sh", "a.sh", "b.sh"]);
@@ -558,6 +580,13 @@ mod tests {
         assert!(!changed());
         write_config(&paths, "provision-scripts/b.sh", "# A comment.\necho b\n");
         assert!(!changed());
+        // A mount takes effect with the next build, so it counts.
+        write_config(
+            &paths,
+            "provision-scripts/b.sh",
+            "# sendit-mount: ~/data\necho b\n",
+        );
+        assert!(changed());
         write_config(&paths, "provision-scripts/b.sh", "echo B\n");
         assert!(changed());
         write_config(&paths, "provision-scripts/b.sh", "echo b\n");
@@ -574,6 +603,31 @@ mod tests {
         // So do scripts with a mistake, which only `provision` reports.
         write_config(&paths, "images/rust.sh", "sendit-provision missing.sh\n");
         assert!(changed());
+    }
+
+    #[test]
+    fn reads_the_mounts_recorded_in_a_marker() {
+        let home = TempDir::new("marker-mounts");
+        let file = home.path().join("provisioned.toml");
+        assert!(marker_mounts(&file).unwrap().is_empty());
+
+        let mounts = vec![ScriptMount {
+            script: "images/rust.sh".into(),
+            mount: "~/.cargo/registry:/home/dev/.cargo/registry"
+                .parse()
+                .unwrap(),
+        }];
+        let marker = Marker {
+            revision: BASE_REVISION,
+            custom_scripts: Vec::new(),
+            mounts: mounts.clone(),
+        };
+        fs::write(&file, toml::to_string(&marker).unwrap()).unwrap();
+        assert_eq!(marker_mounts(&file).unwrap(), mounts);
+
+        // Images built before sendit recorded them have none.
+        fs::write(&file, "revision = 10\ncustom_scripts = []\n").unwrap();
+        assert!(marker_mounts(&file).unwrap().is_empty());
     }
 
     #[test]

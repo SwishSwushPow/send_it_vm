@@ -1334,13 +1334,24 @@ fn runs_custom_provisioning_scripts() {
     assert!(project.image_line("broken").contains("missing"));
 
     // Changing a script that runs marks the image until the script is
-    // changed back, unless the change is in the comments at its top.
+    // changed back, unless the change is in the comments at its top. A
+    // mount there counts: it takes effect with the next build.
     let scripts = env.home.join(".config/sendit/provision-scripts");
     let script = scripts.join("shared.sh");
     let original = fs::read_to_string(&script).unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
-    fs::write(&script, format!("# sendit-mount: /tmp\n{original}")).unwrap();
+    fs::write(&script, format!("# Shared.\n{original}")).unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
+    fs::write(&script, format!("# sendit-mount: /tmp\n{original}")).unwrap();
+    assert!(project.image_line("custom").contains("scripts changed"));
+    // Until then, the VMs share what the build asked for.
+    let status = project.ok(&["status"]);
+    assert!(
+        status.contains("~/script-share -> /home/dev/script-share (ro)")
+            && !status.contains("-> /mnt/tmp"),
+        "{status}"
+    );
+    fs::write(&script, &original).unwrap();
     fs::write(scripts.join("unused.sh"), "echo changed\n").unwrap();
     assert!(project.image_line("custom").contains("provisioned"));
     fs::write(&script, format!("{original}# changed\n")).unwrap();

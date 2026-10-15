@@ -424,6 +424,10 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             Some(m) if m.outdated() => {
                 format!("{state}; made from an outdated base image, `sendit reset` recreates it")
             }
+            Some(_) if !project_vm::shares_latest_build(paths, project, image)? => format!(
+                "{state}; shares what an earlier build of the {image} image asked for, \
+                 `sendit reset` recreates it from the current one"
+            ),
             _ => state,
         }
     };

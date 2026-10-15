@@ -73,9 +73,18 @@ fn sendit() -> Result<ExitCode> {
                 )?)?,
                 None => project()?,
             };
-            let settings = resolve(&project, &args.settings())?;
+            let mut settings = resolve(&project, &args.settings())?;
             commands::confirm_shares(&paths, &settings)?;
-            let code = project_vm::run(&paths, &project, &settings, args.fresh, &args.command)?;
+            let created = project_vm::create_if_missing(&paths, &project, &settings, args.fresh)?;
+            // Made from the image instead of its parent VM, from a build
+            // whose scripts asked for other shares than the parent's.
+            if created.as_ref().is_some_and(|created| created.other_shares) {
+                settings = resolve(&project, &args.settings())?;
+                commands::confirm_shares(&paths, &settings)?;
+            }
+            let note = created.and_then(|created| created.note);
+            let code =
+                project_vm::run(&paths, &project, &settings, args.fresh, note, &args.command)?;
             // Exit codes and 128 plus a signal number fit.
             return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }

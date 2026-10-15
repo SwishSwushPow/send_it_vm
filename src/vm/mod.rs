@@ -131,6 +131,12 @@ impl VmDir {
         self.0.join("project.toml")
     }
 
+    /// A project VM's copy of the marker of the image build it was made
+    /// from, which says what the image's scripts asked to share.
+    pub fn image_marker(&self) -> PathBuf {
+        self.0.join("image.toml")
+    }
+
     /// The SSH host keys `sendit ssh` has seen for this VM.
     pub fn known_hosts(&self) -> PathBuf {
         self.0.join("known_hosts")
