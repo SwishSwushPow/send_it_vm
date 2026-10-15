@@ -287,7 +287,8 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
         let Some(name) = file.strip_suffix(".sh") else {
             continue;
         };
-        if file.starts_with('.') || !path.is_file() {
+        // A symlink to nothing counts, so that `--all` tells about it.
+        if file.starts_with('.') || path.is_dir() {
             continue;
         }
         let name = name
@@ -331,9 +332,33 @@ fn check_no_subfolders(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Where the image file of `image` points if it is a symlink to nothing,
+/// e.g. into a dotfiles repository that isn't there (yet). `custom_scripts`
+/// finds no image file then, so `provision` refuses to build the image
+/// without its scripts, and `script_mounts` warns.
+fn dangling_image_file(paths: &Paths, image: &ImageName) -> Option<PathBuf> {
+    let file = paths.image_file(image);
+    let target = fs::read_link(&file).ok()?;
+    match fs::metadata(&file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(target),
+        _ => None,
+    }
+}
+
+/// Says that the image file of `image` points to `target`, which doesn't
+/// exist.
+fn describe_dangling(paths: &Paths, image: &ImageName, target: &Path) -> String {
+    format!(
+        "the image file {} points to {}, which doesn't exist",
+        paths.display(&paths.image_file(image)),
+        paths.display(target)
+    )
+}
+
 /// The custom scripts for `image`: its image file first, then the shared
 /// scripts that it calls, directly or through other scripts, in the order
-/// they are first found. None without an image file.
+/// they are first found. None without an image file, or with one that is a
+/// symlink to nothing (see `dangling_image_file`).
 fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
     let dir = paths.provision_scripts_dir();
     check_no_subfolders(paths)?;
@@ -396,8 +421,15 @@ fn add_calls(
 }
 
 /// The mounts that the custom scripts for `image` ask for, in the order
-/// the scripts are first called, each with the name of its script.
+/// the scripts are first called, each with the name of its script. Without
+/// them, if the image file is a symlink to nothing, with a warning.
 pub fn script_mounts(paths: &Paths, image: &ImageName) -> Result<Vec<(String, MountSpec)>> {
+    if let Some(target) = dangling_image_file(paths, image) {
+        eprintln!(
+            "warning: {}; leaving out the shares its scripts ask for",
+            describe_dangling(paths, image, &target)
+        );
+    }
     mounts_of(&custom_scripts(paths, image)?)
 }
 
@@ -480,6 +512,11 @@ pub fn provision(
     force: bool,
 ) -> Result<()> {
     let _lock = lock(paths)?;
+    // Built without its scripts, the image would look current until they
+    // are back. Before `already_provisioned`, which would suggest --force.
+    if let Some(target) = dangling_image_file(paths, name) {
+        bail!("{}", describe_dangling(paths, name, &target));
+    }
     if !force && let Some(why) = already_provisioned(paths, name)? {
         eprintln!("{why}");
         return Ok(());
@@ -1144,15 +1181,26 @@ mod tests {
         for name in ["rust.sh", ".hidden.sh", "notes.txt"] {
             fs::write(files.join(name), "").unwrap();
         }
-        // Only an image file makes an image, not shared scripts.
+        // Only an image file makes an image, not shared scripts. One that
+        // is a symlink to nothing does, for `--all` to tell about it.
         write_config(&paths, "provision-scripts/node.sh", "");
+        std::os::unix::fs::symlink(home.path().join("gone.sh"), files.join("gone.sh")).unwrap();
         fs::create_dir_all(paths.image_dir(&image("go"))).unwrap();
         fs::create_dir_all(paths.image_partial_dir(&image("zig"))).unwrap();
         let config: Config = toml::from_str("image = \"zig\"").unwrap();
         assert_eq!(
             images(&paths, &config).unwrap(),
-            [image("default"), image("go"), image("rust"), image("zig")]
+            [
+                image("default"),
+                image("go"),
+                image("gone"),
+                image("rust"),
+                image("zig")
+            ]
         );
+        assert!(dangling_image_file(&paths, &image("gone")).is_some());
+        assert!(dangling_image_file(&paths, &image("rust")).is_none());
+        assert!(custom_scripts(&paths, &image("gone")).unwrap().is_empty());
 
         // The name becomes part of paths, so it must be a valid one.
         fs::write(files.join("Rust 2.sh"), "").unwrap();

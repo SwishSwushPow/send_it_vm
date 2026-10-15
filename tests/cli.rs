@@ -384,6 +384,24 @@ fn reports_bad_image_files() {
         "curl https://sh.rustup.rs | sh\n",
     );
     env.ok(&["status"]);
+
+    // An image file that is a symlink to nothing, e.g. into a dotfiles repo
+    // that isn't cloned yet, stops a build, which would lack its scripts,
+    // but only warns otherwise.
+    let image_file = config.join("images/rust.sh");
+    fs::remove_file(&image_file).unwrap();
+    std::os::unix::fs::symlink(env.home.join("dotfiles/rust.sh"), &image_file).unwrap();
+    let dangling = "the image file ~/.config/sendit/images/rust.sh points to \
+                    ~/dotfiles/rust.sh, which doesn't exist";
+    assert_fails_with(&env.sendit(&["provision", "rust"]), dangling);
+    assert!(!env.home.join(".cache/sendit/downloads").exists());
+    let (_, stderr) = env.ok(&["status"]);
+    assert!(
+        stderr.contains(&format!(
+            "warning: {dangling}; leaving out the shares its scripts ask for"
+        )),
+        "{stderr}"
+    );
 }
 
 #[test]

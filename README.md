@@ -84,7 +84,7 @@ read-only = true          # share the project directory read-only
 
 A new VM is made from the `default` image unless `image` or `--image` picks another, and keeps using the image it was made from. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
 
-An image file, `~/.config/sendit/images/NAME.sh`, adds custom provisioning to image `NAME`: it runs at the end of provisioning. Without `images/default.sh`, the `default` image is the plain base image. The image file is a bash script that calls the shared scripts in `~/.config/sendit/provision-scripts/` with `sendit-provision`:
+An image file, `~/.config/sendit/images/NAME.sh`, adds custom provisioning to image `NAME`: it runs at the end of provisioning. Without `images/default.sh`, the `default` image is the plain base image. An image file can be a symlink, e.g. into a dotfiles repository; while it points to nothing, `sendit provision` refuses to build the image, and `run` and `status` warn and leave out the shares its scripts ask for. The image file is a bash script that calls the shared scripts in `~/.config/sendit/provision-scripts/` with `sendit-provision`:
 
 ```bash
 sendit-provision rust.sh
