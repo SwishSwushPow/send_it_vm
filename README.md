@@ -6,15 +6,15 @@ I let Claude Code build this project based on my experiences with [vibe](https:/
 
 # Send it
 
-Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework. It's meant for running things like coding agents against a project without giving them the rest of the machine.
+Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework, for running things like coding agents against a project without giving them the rest of the machine.
 
-A Debian base image is provisioned once, or several with different tools installed. Each project's VM starts as an APFS clone of one, so creating one is instant and takes no space until the guest writes. The project directory is shared into the VM read-write, and its `.git` is hidden behind an empty read-only mount, so the VM can't see or change the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
+You provision a Debian base image once, or several with different tools. Each project's VM starts as an APFS clone of one: instant, and taking no space until the guest writes. The project directory is shared read-write, with `.git` hidden behind an empty read-only mount so the VM can't touch the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
 
 ## Building
 
-Requires macOS 13 (Ventura) or later on Apple silicon; tested on macOS 15 (Sequoia) and 27. Install with `cargo install send_it_vm`, or `cargo install --path .` from a clone.
+Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with `cargo install send_it_vm`, or `cargo install --path .` from a clone.
 
-Virtualization.framework only works for binaries signed with the virtualization entitlement. `cargo build` and `cargo install --path .` link through `scripts/link-and-sign.sh`, which signs the binary. A binary installed from crates.io is built without it, so on its first run `sendit` signs itself (ad hoc) and starts again.
+Virtualization.framework only runs binaries signed with the virtualization entitlement. Builds from a clone are signed at link time by `scripts/link-and-sign.sh`; a binary installed from crates.io signs itself (ad hoc) on its first run and starts again.
 
 ## Usage
 
@@ -36,30 +36,29 @@ sendit prune --outdated   # ... and VMs made from an outdated base image
 sendit prune --all        # delete every VM that isn't running
 ```
 
-Commands act on the project in the current directory, or on the one given with `-C DIR`.
+Commands act on the project in the current directory, or on `-C DIR`.
 
-A command after `sendit run` or `sendit ssh` runs the same way: as the VM's user (or root, with `sendit ssh --root`), in a login shell, so with the PATH your provisioning scripts set up in `~/.profile`, and in the project directory. Its arguments arrive unchanged; for pipes and the like, run `sh -c '...'`. It gets a terminal if sendit runs in one, so interactive programs work, e.g. `sendit run claude`, and its output can be piped otherwise. sendit exits with the command's exit code, or if the VM is stopped before the command ends, e.g. by `sendit stop` or Ctrl-C, with 128 plus the signal's number, as a shell would for a command killed by it. `sendit run` doesn't show the console then: it waits until the VM answers over SSH, runs the command, and shuts the VM down when it ends.
+A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, with `sendit ssh --root`) in a login shell in the project directory, so it gets the `PATH` your provisioning scripts set in `~/.profile`. Arguments arrive unchanged; use `sh -c '...'` for pipes and the like. It gets a terminal when sendit has one, so `sendit run claude` works, and its output can be piped otherwise. sendit exits with the command's exit code, or with 128 plus the signal's number if the VM stops first, e.g. through `sendit stop` or Ctrl-C. With a command, `sendit run` skips the console, waits for SSH, and shuts the VM down when the command ends.
 
-`sendit ssh` ignores `~/.ssh/config`: settings meant for trusted hosts, like `ForwardAgent yes` under `Host *`, would hand your SSH agent to the VM.
+`sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
 
-Inside the VM, the host is reachable as `host.sendit.internal`, whatever subnet macOS gives its VMs. Services on the host must listen on more than `127.0.0.1` for the VM to reach them.
+Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable.
 
-In the console, `exit` (or Ctrl-D) shuts the VM down. Ctrl-] asks the guest to shut down; pressing it again forces the VM off. A shutdown that takes longer than 30 seconds is forced too.
+In the console, `exit` or Ctrl-D shuts the VM down. Ctrl-] asks the guest to shut down; a second press, or 30 seconds without the VM stopping, forces it off.
 
-The project is mounted at `/home/dev/<name>`, where login shells start. `run` also takes these flags:
+The project is mounted at `/home/dev/<name>`, where login shells start. `run` also takes:
 
-- `--cpus N`
-- `--memory 8G`
-- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw` is given, mounted at `/mnt/<name>` without `GUEST`. Repeatable. When a mount is dropped, the next boot removes its mount point if it is empty. Think twice before `:rw`: the VM can then change files that the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry` or a package in an npm cache.
-- `--read-only`: shares the project directory read-only, e.g. to let an agent read code it shouldn't change. Builds that write into the project, such as `target/` or `node_modules/`, fail unless they are pointed elsewhere.
-- `--expose-git`: lets the VM see and change `.git`, including its hooks and config, which git on the Mac runs.
+- `--cpus N` and `--memory 8G`
+- `--mount HOST[:GUEST][:ro|rw]`: shares another directory, read-only unless `:rw`, at `/mnt/<name>` without `GUEST`. Repeatable. Think twice before `:rw`: the VM can then change files the Mac runs later, such as a crate's `build.rs` in `~/.cargo/registry`.
+- `--read-only`: shares the project read-only. Builds that write into it, such as `target/` or `node_modules/`, must be pointed elsewhere.
+- `--expose-git`: lets the VM see and change `.git`, including the hooks and config git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 
-`run` asks before sharing a directory, the project or an extra mount, read-only or not, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), including what the symlinks among them point to and the symlinks on the way, e.g. a provisioning script linked from a dotfiles repository. Through those the VM could become root or run commands on the Mac. sendit can't tell where else a hard-linked file lives, so link scripts and image files with symlinks, not hard links.
+`run` asks before sharing a directory that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), following symlinks, e.g. a provisioning script linked from a dotfiles repository: through those the VM could become root or run commands on the Mac. sendit can't trace hard links, so link scripts and image files with symlinks.
 
 ## Configuration
 
-`~/.config/sendit/config.toml`. Top-level keys apply to all projects, an `[images.<name>]` table overrides CPUs and memory for building that image and for the VMs made from it, and a `[projects."<path>"]` table overrides both for one project's VM. Command-line flags override all of them. Mounts from all layers are combined.
+`~/.config/sendit/config.toml`. Top-level keys apply to all projects, `[images.<name>]` overrides CPUs and memory for an image and its VMs, and `[projects."<path>"]` overrides both for one project. Flags override everything; mounts from all layers are combined.
 
 ```toml
 cpus = 4                  # default 2
@@ -82,9 +81,13 @@ read-only = true          # share the project directory read-only
 
 ## Base images
 
-A new VM is made from the `default` image unless `image` or `--image` picks another, and keeps using the image it was made from. `sendit provision NAME` builds the image called `NAME`; without a name, it builds the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
+New VMs are made from the `default` image unless `image` or `--image` picks another, and keep using the image they were made from. If that setting later names a different image, `sendit run` refuses to start the VM until `sendit reset` deletes it. Rebuilding or deleting an image doesn't affect existing VMs.
 
-An image file, `~/.config/sendit/images/NAME.sh`, adds custom provisioning to image `NAME`: it runs at the end of provisioning. Without `images/default.sh`, the `default` image is the plain base image. An image file can be a symlink, e.g. into a dotfiles repository; while it points to nothing, `sendit provision` refuses to build the image, and `run` and `status` warn and leave out the shares its scripts ask for. The image file is a bash script that calls the shared scripts in `~/.config/sendit/provision-scripts/` with `sendit-provision`:
+`sendit provision NAME` builds image `NAME`; without a name, the current project's image, and with `--all`, every image sendit knows of. Names are lowercase letters, digits and dashes.
+
+### Image files
+
+`~/.config/sendit/images/NAME.sh` customizes image `NAME` and runs at the end of provisioning; without `default.sh`, the `default` image is the plain base image. It's a bash script that calls shared scripts from `~/.config/sendit/provision-scripts/` with `sendit-provision`:
 
 ```bash
 sendit-provision rust.sh
@@ -93,38 +96,40 @@ sudo apt-get install -y postgresql-client
 sendit-provision claude-code.sh
 ```
 
-So it sets the order they run in, and can run commands of its own between them or call a script only `if` something holds. Shared scripts can call `sendit-provision` too. Each script runs at most once per build, the first time it's called, so several can call one they all need. The image file runs with `bash -e`: a command that fails, a script it calls included, stops the build. A script that fails also fails the build when the script that called it carries on, and calling it again returns its exit status again. To know which scripts an image needs before it builds it, sendit looks for `sendit-provision NAME` in the image file and, in turn, in the scripts it calls, outside of comments, quotes and the bodies of here-documents (a `$(...)` in double quotes counts). So `NAME` must be a plain file name in `provision-scripts/`, written out rather than in a variable, and `sendit provision` refuses names it can't find and scripts that call each other in a cycle. `run` and `status` only warn about such mistakes, and about mount lines sendit can't read (see below), and leave out the shares the scripts ask for, so the VMs made from an image keep working while you edit its scripts.
+The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file runs with `bash -e`, so a failing command or script stops the build, and a failed script fails it even if the script that called it carries on.
 
-Every script, the image file included, runs as the VM's user in a login shell of its own from the home directory, so it sees what the scripts before it added to `~/.profile`, e.g. to the `PATH`. After each `sendit-provision`, the script that called it reads `~/.profile` again, so its next commands see what the called script added. sudo is available only while provisioning runs. Trust the scripts, and whatever installers they download, as you would root in every VM made from the image: sendit takes the sudo rights away afterwards, but not a setuid binary or root service they may have left behind. `sendit status` and `sendit images` tell you when the image file or a script it calls has changed since an image was built, apart from the comments at their top; `sendit provision NAME --force` rebuilds it.
+sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be a file name in `provision-scripts/` written out literally. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` and `status` only warn about these and about unreadable mount lines, and leave out the scripts' shares, so existing VMs keep working while you edit.
 
-A script, the image file or one it calls, can ask for host directories to be shared with the VMs made from the image, in comment lines at its top, before its first command:
+Each script runs as the VM's user in its own login shell from the home directory, and `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts added, e.g. to `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
+
+`sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments; `sendit provision NAME --force` rebuilds it.
+
+A script can ask for host directories to be shared with the image's VMs, in comment lines before its first command:
 
 ```sh
 #!/bin/sh
 # sendit-mount: ~/.cargo/registry:/home/dev/.cargo/registry
 ```
 
-These take the same `HOST[:GUEST][:ro|rw]` as `--mount`, read-only unless `:rw` is given, and host paths must be absolute or start with `~`. They join the mounts of the config file and the command line, after the top-level ones and before the project's. A directory that doesn't exist on the Mac is left out with a notice instead of failing the run. `sendit provision` lists them, and `sendit status` shows them with the other mounts. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. Read the mount lines of a script you copy: they give the VM access to files on the Mac, and with `:rw` it can change them.
+These take the same form as `--mount`, with host paths absolute or starting with `~`, and come after the top-level mounts and before the project's. A host directory that doesn't exist is left out with a notice. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. `sendit provision` lists them and `sendit status` shows them. Read the mount lines of a script you copy: they give the VM access to files on the Mac.
 
-[`provision-scripts/`](provision-scripts) has example scripts: Rust, the Helix editor, Claude Code, a `CLAUDE.md` that tells Claude Code about the VM (installed as its managed memory file, `/etc/claude-code/CLAUDE.md`, which a `~/.claude` shared from the Mac doesn't hide), and the Pi coding agent. [`images/example.sh`](images/example.sh) is an image file that calls most of them. Copy the scripts you want to `~/.config/sendit/provision-scripts/`, and an image file that calls them to `~/.config/sendit/images/`.
-
-When `image` or `--image` picks a different image than the VM was made from, `sendit run` refuses to start it until `sendit reset` deletes it, so the next run starts from the new image. Rebuilding or deleting an image doesn't affect the VMs made from it.
+[`provision-scripts/`](provision-scripts) has example scripts for Rust, the Helix editor, Claude Code, the Pi coding agent, and a `CLAUDE.md` that tells Claude Code about the VM (installed as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it). [`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 
 ### Git worktrees
 
-`sendit run --worktree <branch>` checks out a branch in a worktree of the project's repository and boots the worktree's VM instead of the project's. The worktree goes next to the main checkout, into `<repo>.worktrees/<branch>`, with each `/` of the branch name replaced by `-`, e.g. `~/dev/repo.worktrees/feature-x` for `feature/x` in `~/dev/repo`; `--worktree-path` puts it elsewhere. A branch that doesn't exist yet starts at `HEAD`, or at `--from`; one that only a remote has tracks it, as with `git checkout`, and for one that several remotes have, `--from <remote>/<branch>` picks one. If the branch has a worktree already, `sendit run --worktree` boots that one's VM, so it also takes you back to the branch later. For a project in a subdirectory of the repository, as in a monorepo, it boots the VM of the same subdirectory of the worktree, e.g. `~/dev/repo.worktrees/feature-x/web` from `~/dev/repo/web`. sendit can't change your shell's directory, but the VM's console starts in the worktree.
+`sendit run --worktree <branch>` checks the branch out in a worktree and boots that worktree's VM. The worktree goes to `<repo>.worktrees/<branch>`, with `/` replaced by `-` (e.g. `~/dev/repo.worktrees/feature-x` for `feature/x`), or to `--worktree-path`. A new branch starts at `HEAD` or `--from`; a branch only a remote has is tracked as with `git checkout`, and `--from <remote>/<branch>` picks among several remotes. If the branch has a worktree already, its VM boots, so the same command takes you back later. For a project in a subdirectory of the repository, it boots the VM of the same subdirectory of the worktree. Your shell's directory doesn't change, but the console starts in the worktree.
 
-A linked worktree (`git worktree add`) gets its own VM, like any other directory. If the main worktree has a VM and it is stopped, the worktree's VM starts as a copy of it instead of the base image: with everything installed, logged into and cached there, e.g. `~/.cargo/registry`. The copy is instant and takes no space until either VM writes. A copy of a running VM's disk could miss what the VM hasn't written out yet, so while the main worktree's VM runs, `sendit run` asks whether to start from the base image instead; the default is no, to stop the main worktree's VM first. `sendit run --fresh` starts the worktree's VM from the base image instead, of the main worktree's VM's image unless `--image` or the config file names another; for a worktree whose VM is a copy already, `sendit reset` it first. Both VMs keep the same SSH host keys and machine ID. A subdirectory of a worktree does the same with the VM of the same subdirectory of the main worktree. Without a `[projects."<path>"]` table of its own, a worktree uses its main worktree's, and a subdirectory of one that of the same subdirectory of the main worktree. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
+Any linked worktree gets its own VM. If the main worktree has a stopped VM made from the same image, the worktree's VM starts as an instant copy of it, with everything installed, logged into and cached there, and the same SSH host keys and machine ID. A copy of a running VM could miss unwritten data, so while the main VM runs, `sendit run` asks whether to use the base image instead (default: no, stop the main VM first). `--fresh` starts from the base image, the main VM's unless `--image` or the config names another; for a worktree whose VM is a copy already, `sendit reset` it first. A worktree also uses its main worktree's `[projects."<path>"]` table unless it has its own. Subdirectories map to the same subdirectory of the main worktree for both. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
 
 ## Limits
 
 The VM is a boundary, but not one that makes it safe to run anything in it and then trust the project folder:
 
-- Hiding `.git` relies on root in the VM staying out of reach. The read-only mount over it is made inside the VM, so anything that gets root there can remove it and change the history, hooks or config, which git on the Mac then runs. Ways to root include a Linux kernel exploit, something a provisioning script left behind, or a package installed with `sendit ssh --root`.
-- Only the project's top-level `.git` is hidden, and only if it exists when the VM boots. The VM can plant a repository anywhere else in the project: a `.git` in a subfolder, a submodule's `.git` swapped for one of its own, or a top-level `.git` in a project that had none yet. Its config can make git run a command, e.g. through `core.fsmonitor`, as soon as git on the Mac looks inside: a `git status` in the project root is enough for a submodule, and so is a shell prompt or editor showing git status in a subfolder.
-- More generally, anything the VM changes in the project folder may run on the Mac later: `build.rs`, `.cargo/config.toml`, Makefiles, `package.json` scripts, `.vscode/tasks.json`, test suites. Review what the VM changed before building or running it on the Mac.
-- The VM's console output and `sendit ssh` sessions go straight to your terminal, including escape sequences. Depending on the terminal, these can set its title or, through OSC 52, the clipboard, so that a later paste into a shell on the Mac runs what the VM chose. Check your terminal's clipboard settings.
-- The VM has network access. It can reach the internet, the local network, and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
+- Hiding `.git` relies on root in the VM staying out of reach. The read-only mount is made inside the VM, so anything that gets root there can remove it and change the history, hooks or config that git on the Mac runs. Root could come from a kernel exploit, something a provisioning script left behind, or a package installed with `sendit ssh --root`.
+- Only the top-level `.git` is hidden, and only if it exists at boot. The VM can plant a repository elsewhere: a `.git` in a subfolder, a submodule's `.git` swapped for its own, or a top-level one in a project that had none. Its config can run a command, e.g. through `core.fsmonitor`, as soon as git on the Mac looks inside: a `git status` in the project root is enough for a submodule, as is a shell prompt or editor showing git status in a subfolder.
+- More generally, anything the VM changes may run on the Mac later: `build.rs`, `.cargo/config.toml`, Makefiles, `package.json` scripts, `.vscode/tasks.json`, test suites. Review the changes before building or running them on the Mac.
+- Console output and `sendit ssh` sessions go straight to your terminal, escape sequences included. Depending on the terminal, these can set its title or, through OSC 52, the clipboard, so a later paste into a shell runs what the VM chose. Check your terminal's clipboard settings.
+- The VM has network access: the internet, the local network, and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
 
 ## Where things live
 
@@ -134,9 +139,13 @@ Nothing is written into project directories.
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 - `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 
-To keep the VMs somewhere else, e.g. on an external drive, set `SENDIT_VM_DIR` to an existing directory, such as `export SENDIT_VM_DIR=/Volumes/External/sendit`. sendit then uses it in place of `~/.sendit` and won't create it, so a drive that isn't connected is an error. It can't be the root of a volume, the home directory or a folder that contains it, and it can't contain or sit inside `~/.cache/sendit` or `~/.config/sendit`, since every start keeps it out of Time Machine backups. Folders in it that aren't VMs are left alone, by `sendit prune --all` too. On another volume, a new VM's disk is a copy of the base image instead of an instant clone, so each VM takes the base image's space on top of its own changes. Format the drive as APFS: HFS+ (Mac OS Extended) and exFAT have no sparse files, so there every VM takes its full disk size, 64 GiB by default. If the drive ignores ownership, which external drives often do, other users of the Mac can change the VMs' files and so run commands as root in them.
+sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups: they hold only what sendit can make again, and a VM's disk changes on every run. Keep anything you can't lose in the project directory.
 
-sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups on every start. They hold only what sendit can make again, and a VM's disk changes whenever the VM runs, so each backup would copy all of it again. Keep anything inside a VM that you can't lose in the project directory, which lives on the Mac and is backed up as usual.
+To keep the VMs elsewhere, e.g. on an external drive, set `SENDIT_VM_DIR` to an existing directory. sendit uses it in place of `~/.sendit` and won't create it, so a drive that isn't connected is an error. It can't be the root of a volume, your home directory or a folder containing it, and it can't overlap `~/.cache/sendit` or `~/.config/sendit`. Folders in it that aren't VMs are left alone, by `sendit prune --all` too. Things to know about other drives:
+
+- A VM's disk is a copy of the base image instead of an instant clone, so each VM takes the base image's space on top of its own changes.
+- Format the drive as APFS: HFS+ and exFAT have no sparse files, so every VM takes its full disk size, 64 GiB by default.
+- If the drive ignores ownership, as external drives often do, other users of the Mac can change the VMs' files and so run commands as root in them.
 
 ## License
 
