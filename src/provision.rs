@@ -18,8 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::fs::{self, File};
 use std::io::Read;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::Chars;
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -139,61 +141,249 @@ impl CustomScript {
 
     /// The names of the shared scripts that this one calls with
     /// `sendit-provision`, in the order they appear. Every `sendit-provision`
-    /// word outside of comments counts, wherever it is, e.g. in an `if`. The
-    /// name after it must be a literal file name, which can be resolved
-    /// without running anything.
+    /// word counts wherever it is, e.g. in an `if`, but not in a comment, in
+    /// quotes or in the body of a here-document, except in a command
+    /// substitution there. The name after it must be a literal file name,
+    /// which can be resolved without running anything.
     fn calls(&self) -> Result<Vec<String>> {
         let text = String::from_utf8_lossy(&self.content);
+        let lines: Vec<_> = text.lines().collect();
         let mut calls = Vec::new();
-        for line in text.lines() {
-            let mut words = shell_words(line).into_iter();
-            while let Some(word) = words.next() {
-                if word != RUN_COMMAND {
-                    continue;
-                }
-                let name = words
-                    .next()
-                    .filter(|name| !is_operator(name))
-                    .unwrap_or_default();
-                check_script_name(name).with_context(|| {
-                    format!("in the custom script {}: `{}`", self.name, line.trim())
-                })?;
-                calls.push(name.to_string());
+        let mut words = shell_words(&text).into_iter();
+        while let Some((line, word)) = words.next() {
+            if word != RUN_COMMAND {
+                continue;
             }
+            let name = words
+                .next()
+                .map(|(_, name)| name)
+                .filter(|name| !is_operator(name))
+                .unwrap_or_default();
+            check_script_name(&name).with_context(|| {
+                let line = lines.get(line).copied().unwrap_or_default();
+                format!("in the custom script {}: `{}`", self.name, line.trim())
+            })?;
+            calls.push(name);
         }
         Ok(calls)
     }
 }
 
-/// The words of a line of shell, roughly: split at whitespace, with each of
+/// The words of a shell script, roughly, each with the index of the line it
+/// starts on. They are split at whitespace, with each newline and each of
 /// the characters that end a command or redirect (`;&|()<>`) a word of its
-/// own, and without a comment at the end. Quotes aren't understood.
-fn shell_words(line: &str) -> Vec<&str> {
-    let mut words = Vec::new();
-    let mut start = None;
-    for (i, c) in line.char_indices() {
-        let ends = c.is_whitespace() || is_operator(&line[i..i + c.len_utf8()]);
-        match start {
-            Some(begin) if ends => {
-                words.push(&line[begin..i]);
-                start = None;
-            }
-            None if c == '#' => break,
-            None if !ends => start = Some(i),
-            _ => {}
-        }
-        if !c.is_whitespace() && ends {
-            words.push(&line[i..i + c.len_utf8()]);
-        }
-    }
-    if let Some(begin) = start {
-        words.push(&line[begin..]);
-    }
-    words
+/// own. A word keeps its quotes and backslashes, so that it can't pass for a
+/// literal name, and a command substitution in it, `$(...)` or backticks,
+/// which also adds the words in it. Comments and the bodies of
+/// here-documents are left out.
+fn shell_words(text: &str) -> Vec<(usize, String)> {
+    let mut lexer = Lexer {
+        chars: text.chars().peekable(),
+        line: 0,
+        words: Vec::new(),
+        heredocs: Vec::new(),
+    };
+    lexer.code(None);
+    lexer.words
 }
 
 fn is_operator(word: &str) -> bool {
-    matches!(word, ";" | "&" | "|" | "(" | ")" | "<" | ">")
+    matches!(word, "\n" | ";" | "&" | "|" | "(" | ")" | "<" | ">")
+}
+
+/// Splits shell code into words for `shell_words`.
+struct Lexer<'a> {
+    chars: Peekable<Chars<'a>>,
+    /// The index of the line the next character is on.
+    line: usize,
+    words: Vec<(usize, String)>,
+    /// The delimiters of the here-documents whose bodies follow the current
+    /// line, each with whether its lines may be indented with tabs (`<<-`).
+    heredocs: Vec<(String, bool)>,
+}
+
+impl Lexer<'_> {
+    fn next(&mut self) -> Option<char> {
+        let c = self.chars.next()?;
+        if c == '\n' {
+            self.line += 1;
+        }
+        Some(c)
+    }
+
+    fn next_if(&mut self, expected: char) -> bool {
+        let found = self.chars.peek() == Some(&expected);
+        if found {
+            self.next();
+        }
+        found
+    }
+
+    /// The index in `words` of the word being read, `current`, which starts
+    /// on `line` if it is new. Taken before what comes in a word, so that a
+    /// word comes before those of a command substitution in it.
+    fn word(&mut self, current: &mut Option<usize>, line: usize) -> usize {
+        *current.get_or_insert_with(|| {
+            self.words.push((line, String::new()));
+            self.words.len() - 1
+        })
+    }
+
+    /// Reads code up to `close`, the end of a command substitution, or to the
+    /// end of the text.
+    fn code(&mut self, close: Option<char>) {
+        let mut current = None;
+        let mut depth: usize = 0;
+        loop {
+            let line = self.line;
+            let Some(c) = self.next() else {
+                return;
+            };
+            if close == Some(c) && (c == '`' || depth == 0) {
+                return;
+            }
+            match c {
+                '\n' => {
+                    current = None;
+                    self.words.push((line, "\n".into()));
+                    self.heredoc_bodies();
+                }
+                c if c.is_whitespace() => current = None,
+                '#' if current.is_none() => {
+                    while self.chars.peek().is_some_and(|&c| c != '\n') {
+                        self.next();
+                    }
+                }
+                // A line continuation.
+                '\\' if self.next_if('\n') => {}
+                '\\' => {
+                    let escaped = self.next();
+                    let i = self.word(&mut current, line);
+                    self.words[i].1.push('\\');
+                    self.words[i].1.extend(escaped);
+                }
+                '\'' => {
+                    let i = self.word(&mut current, line);
+                    self.words[i].1.push('\'');
+                    while let Some(c) = self.next() {
+                        self.words[i].1.push(c);
+                        if c == '\'' {
+                            break;
+                        }
+                    }
+                }
+                '"' => {
+                    let i = self.word(&mut current, line);
+                    self.words[i].1.push('"');
+                    self.double_quotes(i);
+                }
+                '$' if self.next_if('(') => {
+                    let i = self.word(&mut current, line);
+                    self.substitution(i, ')');
+                }
+                '`' => {
+                    let i = self.word(&mut current, line);
+                    self.substitution(i, '`');
+                }
+                '<' if self.next_if('<') => {
+                    current = None;
+                    self.words.push((line, "<".into()));
+                    if !self.next_if('<') {
+                        self.heredoc();
+                    }
+                }
+                ';' | '&' | '|' | '(' | ')' | '<' | '>' => {
+                    current = None;
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    self.words.push((line, c.into()));
+                }
+                c => {
+                    let i = self.word(&mut current, line);
+                    self.words[i].1.push(c);
+                }
+            }
+        }
+    }
+
+    /// Reads the rest of a double-quoted string into `words[i]`, and the
+    /// command substitutions in it as code.
+    fn double_quotes(&mut self, i: usize) {
+        while let Some(c) = self.next() {
+            match c {
+                '"' => {
+                    self.words[i].1.push('"');
+                    return;
+                }
+                '\\' => {
+                    self.words[i].1.push('\\');
+                    let escaped = self.next();
+                    self.words[i].1.extend(escaped);
+                }
+                '$' if self.next_if('(') => self.substitution(i, ')'),
+                '`' => self.substitution(i, '`'),
+                c => self.words[i].1.push(c),
+            }
+        }
+    }
+
+    /// Reads a command substitution that ends with `close` as code, and
+    /// marks it in `words[i]`.
+    fn substitution(&mut self, i: usize, close: char) {
+        self.words[i]
+            .1
+            .push_str(if close == ')' { "$(" } else { "`" });
+        self.code(Some(close));
+        self.words[i].1.push(close);
+    }
+
+    /// Notes the here-document after `<<`, whose body follows the line.
+    fn heredoc(&mut self) {
+        let tabs = self.next_if('-');
+        while self.chars.peek().is_some_and(|&c| c == ' ' || c == '\t') {
+            self.next();
+        }
+        // Quotes and backslashes only say that the body is literal.
+        let mut delimiter = String::new();
+        while let Some(&c) = self.chars.peek() {
+            if c.is_whitespace() || ";&|()<>".contains(c) {
+                break;
+            }
+            self.next();
+            if !"'\"\\".contains(c) {
+                delimiter.push(c);
+            }
+        }
+        self.heredocs.push((delimiter, tabs));
+    }
+
+    /// Skips the bodies of the here-documents noted on the line that just
+    /// ended. Commands in an unquoted body's substitutions run too, but are
+    /// rare enough to be left out.
+    fn heredoc_bodies(&mut self) {
+        for (delimiter, tabs) in std::mem::take(&mut self.heredocs) {
+            loop {
+                let mut line = String::new();
+                while let Some(c) = self.next() {
+                    if c == '\n' {
+                        break;
+                    }
+                    line.push(c);
+                }
+                let line = if tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    &line
+                };
+                if line.trim_end_matches('\r') == delimiter || self.chars.peek().is_none() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Fails unless `name`, which a script passes to `sendit-provision`, is a plain
@@ -1004,6 +1194,81 @@ mod tests {
         );
         let error = script_error(&paths, &rust);
         assert!(error.contains("in the custom script sub.sh"), "{error}");
+    }
+
+    #[test]
+    fn finds_calls_outside_of_quotes_and_here_documents() {
+        let calls = |text: &str| {
+            CustomScript {
+                name: "x.sh".into(),
+                file: "x.sh".into(),
+                content: text.into(),
+            }
+            .calls()
+            .map_err(|e| format!("{e:#}"))
+        };
+        let found = |text: &str| calls(text).unwrap();
+        // A `#` in quotes doesn't start a comment.
+        assert_eq!(found("echo \"step #1\"; sendit-provision a.sh\n"), ["a.sh"]);
+        assert_eq!(
+            found("echo 'it''s #2' && sendit-provision a.sh\n"),
+            ["a.sh"]
+        );
+        // Quoted, the word is text, also over several lines.
+        assert!(found("echo \"Now run sendit-provision by hand\"\n").is_empty());
+        assert!(found("echo 'first\nsendit-provision by hand'\n").is_empty());
+        // But a command substitution in double quotes runs.
+        assert_eq!(
+            found("v=\"$(sendit-provision a.sh)\"\necho \"`sendit-provision b.sh`\"\n"),
+            ["a.sh", "b.sh"]
+        );
+        // The body of a here-document is text, apostrophes included, also
+        // with its lines indented by tabs (<<-), but a here-string isn't one.
+        assert_eq!(
+            found("cat > f <<'EOF'\nDon't sendit-provision this.\nEOF\nsendit-provision a.sh\n"),
+            ["a.sh"]
+        );
+        assert_eq!(
+            found(
+                "cat <<-END; sendit-provision a.sh\n\tsendit-provision no.sh\n\tEND\nsendit-provision b.sh\n"
+            ),
+            ["a.sh", "b.sh"]
+        );
+        assert_eq!(found("cat <<<'text'\nsendit-provision a.sh\n"), ["a.sh"]);
+        // A line continuation joins lines; a newline ends the command.
+        assert_eq!(found("sendit-provision \\\n  a.sh\n"), ["a.sh"]);
+        assert!(
+            calls("sendit-provision\na.sh\n")
+                .unwrap_err()
+                .contains("names no script")
+        );
+        // Errors quote the line of the call, also after a string of several.
+        let error = calls("echo \"\n\"\nsendit-provision $x\n").unwrap_err();
+        assert!(error.contains("`sendit-provision $x`"), "{error}");
+    }
+
+    #[test]
+    fn finds_the_calls_in_the_bundled_examples() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let calls = |path: &str| {
+            CustomScript {
+                name: path.into(),
+                file: path.into(),
+                content: fs::read(root.join(path)).unwrap(),
+            }
+            .calls()
+            .unwrap()
+        };
+        assert_eq!(
+            calls("images/example.sh"),
+            ["rust.sh", "helix.sh", "claude-code.sh", "claude-md.sh"]
+        );
+        for (name, _) in script_files(&root.join("provision-scripts")).unwrap() {
+            assert!(
+                calls(&format!("provision-scripts/{name}")).is_empty(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
