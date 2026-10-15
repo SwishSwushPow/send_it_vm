@@ -27,7 +27,7 @@
 
 ### Fixed
 
-- `sendit run` also asks before sharing the target of a provisioning script or image file that is a symlink, e.g. into a dotfiles repository, even if the target doesn't exist yet. Through it, the VM could change what runs with sudo in the next build of an image.
+- `sendit run` also asks before sharing the target of a provisioning script or image file that is a symlink, e.g. into a dotfiles repository, even if the target doesn't exist yet, and of each symlink on the way to it, also for sendit's own directories. Through them, the VM could change what runs with sudo in the next build of an image.
 - `sendit run --worktree` in a subdirectory of a repository, as in a monorepo, boots the VM of the same subdirectory of the worktree instead of the worktree's root. That VM starts as a copy of the VM of the subdirectory in the main checkout, with its image, and uses its `[projects."<path>"]` table. A subdirectory of a linked worktree is recognized as one also without `--worktree`.
 
 ## 0.7.0 - 2026-10-09
