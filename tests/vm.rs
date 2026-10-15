@@ -61,21 +61,25 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The image files of the `custom` and `broken` images and the shared
 /// scripts they call, by path below `~/.config/sendit`. The `custom` image
-/// file runs a command of its own between calls, and both it and `tool.sh`
-/// call `shared.sh`, which runs once. It asks for a mount, `tool.sh` for one
-/// that doesn't exist. Nothing calls `unused.sh`.
-const CUSTOM_SCRIPTS: [(&str, &str); 6] = [
+/// file runs a command of its own between calls, which sees what `shared.sh`
+/// added to `~/.profile`, and both it and `tool.sh` call `shared.sh`, which
+/// runs once. It asks for a mount, `tool.sh` for one that doesn't exist.
+/// Nothing calls `unused.sh`. In the `broken` image, `careless.sh` carries on
+/// after `fail.sh` failed, and the image file after calling it again.
+const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
     (
         "images/custom.sh",
         "# sendit-mount: ~/script-share:/home/dev/script-share\n\
          sendit-provision shared.sh\n\
-         echo \"inline as $(id -un) in $PWD\" >> ~/provisioned\n\
+         echo \"inline as $(id -un) in $PWD, profile ${SHARED_PROFILE-unseen}\" >> ~/provisioned\n\
          sendit-provision tool.sh\n\
          sudo sh -c 'echo made by root > /etc/sendit-test'\n",
     ),
     (
         "provision-scripts/shared.sh",
-        "echo \"shared as $(id -un) in $PWD\" >> ~/provisioned\n",
+        "echo \"shared as $(id -un) in $PWD\" >> ~/provisioned\n\
+         echo 'export SHARED_PROFILE=seen' >> ~/.profile\n\
+         echo '[ -e ~/nothing ] && . ~/nothing' >> ~/.profile\n",
     ),
     (
         "provision-scripts/tool.sh",
@@ -89,7 +93,13 @@ const CUSTOM_SCRIPTS: [(&str, &str); 6] = [
     ),
     (
         "images/broken.sh",
-        "sendit-provision fail.sh\necho after the failure >> ~/provisioned\n",
+        "sendit-provision careless.sh\n\
+         if sendit-provision fail.sh; then echo fail.sh passed; \
+         else echo \"fail.sh failed again: $?\"; fi\n",
+    ),
+    (
+        "provision-scripts/careless.sh",
+        "sendit-provision fail.sh\necho careless.sh carried on\n",
     ),
     ("provision-scripts/fail.sh", "exit 3\n"),
 ];
@@ -151,8 +161,8 @@ fn env() -> &'static Env {
 }
 
 /// A scratch home of its own with `CUSTOM_SCRIPTS`, and the `custom` image
-/// built with them. Building it also checks that a failing `sendit-provision`
-/// fails the build of the `broken` image.
+/// built with them. Building it also checks that a failing script fails the
+/// build of the `broken` image, although the scripts that call it carry on.
 fn custom_env() -> &'static Env {
     static ENV: OnceLock<Result<Env, String>> = OnceLock::new();
     fixture(&ENV, || {
@@ -172,7 +182,12 @@ fn custom_env() -> &'static Env {
                 fs::read_to_string(&log).with_context(|| format!("reading {}", log.display()))?;
             ensure!(
                 log.contains("sendit: custom script fail.sh failed with exit status 3")
-                    && log.contains("sendit: the image file failed"),
+                    && log.contains("careless.sh carried on")
+                    && log.contains(
+                        "sendit: custom script fail.sh already ran and failed with exit status 3"
+                    )
+                    && log.contains("fail.sh failed again: 3")
+                    && log.contains("sendit: custom scripts failed: fail.sh"),
                 "the console log doesn't say which custom script failed"
             );
             env.provision_ok("custom")?;
@@ -1288,7 +1303,7 @@ fn runs_custom_provisioning_scripts() {
     // them, each script once, and only those it calls.
     assert_eq!(
         vm.ok("cat ~/provisioned"),
-        "shared as dev in /home/dev\ninline as dev in /home/dev\ntool"
+        "shared as dev in /home/dev\ninline as dev in /home/dev, profile seen\ntool"
     );
     // The helper is gone with the sudo rights.
     vm.fails("command -v sendit-provision");

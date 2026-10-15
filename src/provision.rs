@@ -699,7 +699,11 @@ mod tests {
         assert!(!PROVISION_SCRIPT.contains(SUCCESS_SENTINEL));
         assert!(PROVISION_SCRIPT.contains("echo \"SENDIT_PROVISION_${status} $token\""));
         assert!(PROVISION_SCRIPT.contains("\"$seed/custom/list\""));
-        assert!(PROVISION_SCRIPT.contains("bash -e -l \"$seed/custom/main.sh\""));
+        assert!(PROVISION_SCRIPT.contains("exec bash -e -l \"$2\"' \\\n"));
+        assert!(
+            PROVISION_SCRIPT
+                .contains("sendit /usr/local/lib/sendit-provision.bash \"$seed/custom/main.sh\")")
+        );
         assert!(PROVISION_SCRIPT.contains(&format!("/usr/local/bin/{RUN_COMMAND}\n")));
         assert!(USER_DATA.contains(&format!("- name: {GUEST_USER}\n")));
         assert!(PROVISION_SCRIPT.contains(&format!("\nuser={GUEST_USER}\n")));

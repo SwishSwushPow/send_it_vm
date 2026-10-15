@@ -398,8 +398,10 @@ EOF
 # prompts.
 echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
 # sendit-provision runs a script at most once per build, since most install
-# scripts can't run twice; it notes those that ran in $ran. It only runs
-# scripts that custom/list names, and finds their files there.
+# scripts can't run twice. It only runs scripts that custom/list names, and
+# finds their files there. In $ran, it notes the exit status of each script
+# that ran (empty while it runs), which a later call of the same script
+# returns.
 ran=$(mktemp -d)
 chown "$user" "$ran"
 {
@@ -424,26 +426,70 @@ if [ -z "$file" ]; then
     exit 1
 fi
 if [ -e "$ran/$file" ]; then
-    echo "sendit: custom script $1 already ran"
-    exit 0
+    status=$(cat "$ran/$file")
+    if [ "${status:-0}" -eq 0 ]; then
+        echo "sendit: custom script $1 already ran"
+    else
+        echo "sendit: custom script $1 already ran and failed with exit status $status"
+    fi
+    exit "${status:-0}"
 fi
-touch "$ran/$file"
+: > "$ran/$file"
 echo "sendit: running custom script $1"
 cd "$HOME" && bash -l "${list%/*}/$file" < /dev/null
 status=$?
+echo "$status" > "$ran/$file"
 [ "$status" -eq 0 ] || echo "sendit: custom script $1 failed with exit status $status"
 exit "$status"
 EOF
 } > /usr/local/bin/sendit-provision
 chmod 755 /usr/local/bin/sendit-provision
+# The scripts call sendit-provision as a function, which reads the login
+# shell's profile again after the script it runs, as a login shell started
+# then would. So the commands after a call see what the script added to it,
+# e.g. to the PATH. It reads the profile without -e and -u, which profiles
+# aren't written for, e.g. with a last line `[ -s FILE ] && . FILE`.
+# Exported, it reaches the scripts that the image file calls, but not those
+# run with sudo, which use the command itself.
+cat > /usr/local/lib/sendit-provision.bash <<'EOF'
+sendit-provision() {
+    command sendit-provision "$@" || return
+    local opts=$- file
+    set +eu
+    for file in ~/.bash_profile ~/.bash_login ~/.profile; do
+        if [ -r "$file" ]; then
+            . "$file"
+            break
+        fi
+    done
+    [[ $opts == *e* ]] && set -e
+    [[ $opts == *u* ]] && set -u
+    return 0
+}
+export -f sendit-provision
+EOF
 # With -e, a failing sendit-provision (or any other command) stops the image
-# file.
+# file. The function is defined after sudo, which drops exported functions.
 if [ -e "$seed/custom/main.sh" ]; then
     echo "sendit: running the image file"
-    (cd "/home/$user" && sudo -u "$user" -H bash -e -l "$seed/custom/main.sh") < /dev/null ||
+    (cd "/home/$user" && sudo -u "$user" -H bash -c '. "$1" && exec bash -e -l "$2"' \
+        sendit /usr/local/lib/sendit-provision.bash "$seed/custom/main.sh") < /dev/null ||
         { echo "sendit: the image file failed"; exit 1; }
 fi
-rm -r /etc/sudoers.d/sendit-provision /usr/local/bin/sendit-provision "$ran"
+# A script that failed fails the build, even if the script that called it
+# carried on.
+failed=
+while read -r file name; do
+    if [ -s "$ran/$file" ] && [ "$(cat "$ran/$file")" -ne 0 ]; then
+        failed="$failed $name"
+    fi
+done < "$seed/custom/list"
+if [ -n "$failed" ]; then
+    echo "sendit: custom scripts failed:$failed"
+    exit 1
+fi
+rm -r /etc/sudoers.d/sendit-provision /usr/local/bin/sendit-provision \
+    /usr/local/lib/sendit-provision.bash "$ran"
 apt-get clean
 
 # --- No more sudo -----------------------------------------------------------
