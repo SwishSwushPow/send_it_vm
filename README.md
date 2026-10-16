@@ -79,6 +79,8 @@ expose-git = true
 read-only = true          # share the project directory read-only
 ```
 
+The VM swaps to compressed memory (zram) of up to half its `memory`, so a build that briefly needs more than that slows down instead of being killed.
+
 ## Base images
 
 New VMs are made from the `default` image unless `image` or `--image` picks another, and keep using the image they were made from. If that setting later names a different image, `sendit run` refuses to start the VM until `sendit reset` deletes it. Rebuilding or deleting an image doesn't affect existing VMs.

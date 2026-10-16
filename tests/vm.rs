@@ -1460,6 +1460,28 @@ fn applies_resources_in_the_guest() {
         (3 << 29..=2 << 30).contains(&memory),
         "the guest has {memory} bytes of memory"
     );
+    // Half of it is swap on zram, compressed with zstd, which may keep at
+    // most a quarter of it. The generator works in whole MiB, and the swap
+    // area's header takes a page.
+    assert_eq!(vm.ok("awk 'NR > 1 { print $1 }' /proc/swaps"), "/dev/zram0");
+    assert!(
+        vm.ok("cat /sys/block/zram0/comp_algorithm")
+            .contains("[zstd]")
+    );
+    let near = |actual: u64, wanted: u64| (wanted - (1 << 20)..=wanted).contains(&actual);
+    let swap: u64 = vm
+        .ok("awk '/^SwapTotal:/ { print $2 * 1024 }' /proc/meminfo")
+        .parse()
+        .unwrap();
+    assert!(near(swap, memory / 2), "the guest has {swap} bytes of swap");
+    let limit: u64 = vm
+        .ok("awk '{ print $4 }' /sys/block/zram0/mm_stat")
+        .parse()
+        .unwrap();
+    assert!(
+        near(limit, memory / 4),
+        "zram may keep {limit} bytes of memory"
+    );
     // The root filesystem fills the 20 GiB disk, apart from the EFI
     // partition and the filesystem's own overhead.
     let root_size: u64 = vm.ok("findmnt -bno SIZE /").parse().unwrap();

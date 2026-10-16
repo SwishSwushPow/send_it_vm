@@ -33,7 +33,7 @@ apt-get -y -o Dpkg::Options::=--force-confold full-upgrade
 apt-get -y install --no-install-recommends \
     git curl ca-certificates build-essential pkg-config cmake sudo \
     openssh-server cloud-guest-utils less vim-tiny \
-    unzip jq ripgrep fd-find htop
+    unzip jq ripgrep fd-find htop systemd-zram-generator
 # The kernel with 16 KiB pages replaces the cloud image's kernel (4 KiB
 # pages): under memory pressure on the Mac, guests running that kernel lost
 # writes to their memory (page cache, kernel module code, page tables), and
@@ -298,6 +298,30 @@ ExecStart=/usr/local/sbin/sendit-growfs
 WantedBy=sysinit.target
 EOF
 systemctl enable sendit-growfs.service fstrim.timer
+
+# --- Memory -----------------------------------------------------------------
+# The VM can't give memory back to the Mac, so make more of what it has: it
+# swaps to compressed memory (zram), and a build that briefly needs more than
+# the VM has slows down instead of being OOM-killed. Not zswap, which needs
+# swap on the disk behind it. The generator sets zram up on every boot from
+# the VM's memory, so provisioning, which installs it, runs without it.
+# Half the memory holds about as much again at the 2-3x that build data
+# compresses to. Data that barely compresses (random data, archives, a full
+# /tmp, which is a tmpfs) may take at most a quarter of the memory; past
+# that, the kernel logs swap write errors and the OOM killer steps in. This
+# replaces the package's /usr/lib/systemd/zram-generator.conf.
+cat > /etc/systemd/zram-generator.conf <<'EOF'
+[zram0]
+zram-size = ram / 2
+zram-resident-limit = ram / 4
+compression-algorithm = zstd
+EOF
+# Swapping to zram is cheap, unlike to a disk: swap out as readily as the
+# page cache is dropped, and don't read neighbouring pages ahead.
+cat > /etc/sysctl.d/90-sendit-zram.conf <<'EOF'
+vm.swappiness = 100
+vm.page-cluster = 0
+EOF
 
 # --- Mounts -----------------------------------------------------------------
 # sendit shares a manifest and the script that applies it (mount.sh) on the

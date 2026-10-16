@@ -4,6 +4,7 @@
 
 ### Added
 
+- VMs swap to compressed memory (zram): up to half of their memory, compressed with zstd, which may itself take at most a quarter of it. A build that briefly needs more memory than the VM has slows down instead of being killed. Images get it when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`.
 - An example provisioning script, `provision-scripts/claude-md.sh`, installs a `CLAUDE.md` that tells Claude Code about the VM: no sudo, the hidden `.git`, the host's name, and that the project runs on the Mac later. It goes to `/etc/claude-code/CLAUDE.md`, Claude Code's managed memory file, so a `~/.claude` shared from the Mac doesn't hide it and nothing in the VM can change it.
 
 ### Changed
