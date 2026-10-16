@@ -66,8 +66,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// file runs a command of its own between calls, which sees what `shared.sh`
 /// added to `~/.profile`, and both it and `tool.sh` call `shared.sh`, which
 /// runs once. It asks for a mount, `tool.sh` for one that doesn't exist.
-/// Nothing calls `unused.sh`. In the `broken` image, `careless.sh` carries on
-/// after `fail.sh` failed, and the image file after calling it again.
+/// Nothing calls `unused.sh`. In the `broken` image, `fail.sh` stops at a
+/// pipeline whose first command fails, `careless.sh` carries on after it
+/// failed, and the image file after calling it again.
 const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
     (
         "images/custom.sh",
@@ -101,9 +102,12 @@ const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
     ),
     (
         "provision-scripts/careless.sh",
-        "sendit-provision fail.sh\necho careless.sh carried on\n",
+        "sendit-provision fail.sh || echo careless.sh carried on\n",
     ),
-    ("provision-scripts/fail.sh", "exit 3\n"),
+    (
+        "provision-scripts/fail.sh",
+        "sh -c 'exit 3' | cat\necho fail.sh \"went on\"\n",
+    ),
 ];
 
 /// Where the tests keep their files.
@@ -184,6 +188,7 @@ fn custom_env() -> &'static Env {
                 fs::read_to_string(&log).with_context(|| format!("reading {}", log.display()))?;
             ensure!(
                 log.contains("sendit: custom script fail.sh failed with exit status 3")
+                    && !log.contains("fail.sh went on")
                     && log.contains("careless.sh carried on")
                     && log.contains(
                         "sendit: custom script fail.sh already ran and failed with exit status 3"

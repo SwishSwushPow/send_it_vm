@@ -1,9 +1,9 @@
 #!/bin/bash
-set -e
+# Builds the Helix editor from source with cargo, into ~/.cargo/bin, and
+# puts its runtime files and config in ~/.config/helix.
 
-. "$HOME/.cargo/env"
+sendit-provision rust.sh
 
-cd
 git clone https://github.com/helix-editor/helix.git
 cd helix
 git checkout a05c151

@@ -417,9 +417,10 @@ EOF
 # `sendit-provision NAME`; they can do so too. Each script runs as the login
 # user in a login shell of its own from its home directory, so it sees the
 # same environment as the console (e.g. PATH changes earlier scripts made in
-# ~/.profile), and uses sudo for anything that needs root. sudo keeps
-# DEBIAN_FRONTEND meanwhile, so apt-get doesn't stop at configuration
-# prompts.
+# ~/.profile), and uses sudo for anything that needs root. Like the image
+# file, it runs with -e and pipefail, so the first command that fails stops
+# it and fails it. sudo keeps DEBIAN_FRONTEND meanwhile, so apt-get doesn't
+# stop at configuration prompts.
 echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
 # sendit-provision runs a script at most once per build, since most install
 # scripts can't run twice. It only runs scripts that custom/list names, and
@@ -460,7 +461,7 @@ if [ -e "$ran/$file" ]; then
 fi
 : > "$ran/$file"
 echo "sendit: running custom script $1"
-cd "$HOME" && bash -l "${list%/*}/$file" < /dev/null
+cd "$HOME" && bash -e -o pipefail -l "${list%/*}/$file" < /dev/null
 status=$?
 echo "$status" > "$ran/$file"
 [ "$status" -eq 0 ] || echo "sendit: custom script $1 failed with exit status $status"
@@ -492,11 +493,12 @@ sendit-provision() {
 }
 export -f sendit-provision
 EOF
-# With -e, a failing sendit-provision (or any other command) stops the image
-# file. The function is defined after sudo, which drops exported functions.
+# With -e and pipefail, a failing sendit-provision (or any other command)
+# stops the image file. The function is defined after sudo, which drops
+# exported functions.
 if [ -e "$seed/custom/main.sh" ]; then
     echo "sendit: running the image file"
-    (cd "/home/$user" && sudo -u "$user" -H bash -c '. "$1" && exec bash -e -l "$2"' \
+    (cd "/home/$user" && sudo -u "$user" -H bash -c '. "$1" && exec bash -e -o pipefail -l "$2"' \
         sendit /usr/local/lib/sendit-provision.bash "$seed/custom/main.sh") < /dev/null ||
         { echo "sendit: the image file failed"; exit 1; }
 fi

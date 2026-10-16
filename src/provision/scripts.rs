@@ -565,8 +565,13 @@ mod tests {
             ["rust.sh", "helix.sh", "claude-code.sh", "claude-md.sh"]
         );
         for (name, _) in script_files(&root.join("provision-scripts")).unwrap() {
-            assert!(
-                calls(&format!("provision-scripts/{name}")).is_empty(),
+            let expected: &[&str] = match name.as_str() {
+                "helix.sh" => &["rust.sh"],
+                _ => &[],
+            };
+            assert_eq!(
+                calls(&format!("provision-scripts/{name}")),
+                expected,
                 "{name}"
             );
         }

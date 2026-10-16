@@ -6,13 +6,12 @@
 # provision-scripts/ to ~/.config/sendit/provision-scripts/.
 #
 # It runs like the scripts it calls: as the VM's user, in a login shell from
-# the home directory, with sudo. It also runs with `bash -e`, so a command
-# that fails, a script it calls included, stops the build. After each
+# the home directory, with sudo, and with `bash -e -o pipefail`, so a
+# command that fails, a script it calls included, stops the build. After each
 # `sendit-provision`, it reads ~/.profile again, so the commands after it
 # see what the script added there, e.g. to the PATH.
 
 sendit-provision rust.sh
-# Built with Rust, so it runs after it.
 sendit-provision helix.sh
 sudo apt-get -y install --no-install-recommends postgresql-client
 sendit-provision claude-code.sh

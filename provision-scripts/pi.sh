@@ -4,7 +4,6 @@
 # /usr/local first; pi's installer only offers to install Node.js itself when
 # it can ask on a terminal. Without a terminal it installs without asking,
 # into ~/.local/bin, which Debian's ~/.profile puts on the PATH.
-set -euo pipefail
 
 command -v xz > /dev/null || sudo apt-get -y install --no-install-recommends xz-utils
 

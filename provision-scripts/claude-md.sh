@@ -4,7 +4,6 @@
 # file, which Claude Code loads in addition to the user's and the project's
 # CLAUDE.md. It lives outside the home directory, so a ~/.claude shared from
 # the Mac doesn't hide it, and belongs to root, so the agent can't change it.
-set -euo pipefail
 
 tmp=$(mktemp)
 cat > "$tmp" <<'EOF'

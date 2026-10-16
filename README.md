@@ -93,16 +93,16 @@ New VMs are made from the `default` image unless `image` or `--image` picks anot
 
 ```bash
 sendit-provision rust.sh
-sendit-provision helix.sh    # built with Rust, so it runs after it
+sendit-provision helix.sh    # calls rust.sh too, which runs only once
 sudo apt-get install -y postgresql-client
 sendit-provision claude-code.sh
 ```
 
-The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file runs with `bash -e`, so a failing command or script stops the build, and a failed script fails it even if the script that called it carries on.
+The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file and the scripts run with `bash -e -o pipefail`: a failing command, pipelines included, stops the script it's in, and a failing script stops the build. A failed script fails the build even if the script that called it carries on, e.g. with `sendit-provision x.sh || true`.
 
 sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be a file name in `provision-scripts/` written out literally. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` doesn't read the scripts, so existing VMs keep working while you edit.
 
-Each script runs as the VM's user in its own login shell from the home directory, and `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts added, e.g. to `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
+Each script runs as the VM's user in its own login shell from the home directory. `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts added, e.g. to `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
 
 `sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments other than mount lines; `sendit provision NAME --force` rebuilds it.
 
