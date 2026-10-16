@@ -122,6 +122,80 @@ fn explains_what_to_do_in_a_fresh_home() {
 }
 
 #[test]
+fn tells_when_the_vm_is_from_an_earlier_build() {
+    let env = Env::new("earlier-build");
+    let build = |built: u64| {
+        let image = env.home.join(".cache/sendit/images/default");
+        fs::create_dir_all(&image).unwrap();
+        fs::write(
+            image.join("provisioned.toml"),
+            format!("revision = 1000\ncustom_scripts = []\nbuilt = {built}\n"),
+        )
+        .unwrap();
+    };
+    let vm_state = || {
+        let (status, _) = env.ok(&["status"]);
+        let line = status.lines().find(|l| l.starts_with("vm ")).unwrap();
+        let state = line.split_once(" (").unwrap().1;
+        state.strip_suffix(')').unwrap().to_string()
+    };
+
+    build(1);
+    let (status, _) = env.ok(&["status"]);
+    let vm = status
+        .lines()
+        .find_map(|line| line.strip_prefix("vm")?.trim().strip_prefix("~/"))
+        .and_then(|line| line.split(' ').next())
+        .map(|vm| env.home.join(vm))
+        .unwrap();
+    fs::create_dir_all(&vm).unwrap();
+    fs::write(
+        vm.join("project.toml"),
+        format!(
+            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n",
+            env.project.display()
+        ),
+    )
+    .unwrap();
+    fs::copy(
+        env.home
+            .join(".cache/sendit/images/default/provisioned.toml"),
+        vm.join("image.toml"),
+    )
+    .unwrap();
+    assert_eq!(vm_state(), "stopped");
+
+    build(2);
+    assert_eq!(
+        vm_state(),
+        "stopped; made from an earlier build of the default image, \
+         `sendit reset` recreates it from the current one"
+    );
+
+    // A linked worktree of the project, as `git worktree add` leaves it,
+    // whose VM would be a copy of the project's.
+    let wt = Env {
+        home: env.home.clone(),
+        project: env.project.with_file_name("wt"),
+    };
+    let gitdir = env.project.join(".git/worktrees/wt");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::create_dir_all(&wt.project).unwrap();
+    let dot_git = wt.project.join(".git");
+    fs::write(&dot_git, format!("gitdir: {}\n", gitdir.display())).unwrap();
+    fs::write(gitdir.join("gitdir"), format!("{}\n", dot_git.display())).unwrap();
+    let (status, _) = wt.ok(&["status"]);
+    assert!(
+        status.contains(&format!(
+            "(not created; `sendit run` copies the VM of {}, made from an earlier build \
+             of the default image; `sendit run --fresh` makes it from the current one)",
+            env.project.display()
+        )),
+        "{status}"
+    );
+}
+
+#[test]
 fn has_nothing_to_list_or_remove_without_vms() {
     let env = Env::new("empty-home");
 
@@ -168,11 +242,8 @@ fn lists_vms_and_images() {
     let images = env.home.join(".cache/sendit/images");
     // From a base revision no sendit has yet, so never outdated.
     fs::create_dir_all(images.join("rust")).unwrap();
-    fs::write(
-        images.join("rust/provisioned.toml"),
-        "revision = 999\ncustom_scripts = []\n",
-    )
-    .unwrap();
+    let marker = |built: u32| format!("revision = 999\ncustom_scripts = []\nbuilt = {built}\n");
+    fs::write(images.join("rust/provisioned.toml"), marker(2)).unwrap();
     fs::write(images.join("rust/disk.img"), vec![1; 8192]).unwrap();
     // An image that only has an image file.
     let image_files = env.home.join(".config/sendit/images");
@@ -198,8 +269,11 @@ fn lists_vms_and_images() {
         dir
     };
     let gone = env.home.parent().unwrap().join("gone");
-    vm("app", "c1", Some((&env.project, "rust", 999)));
-    vm("gone", "c2", Some((&gone, "rust", 999)));
+    // Made from the latest build of the rust image, and from an earlier one.
+    let app = vm("app", "c1", Some((&env.project, "rust", 999)));
+    fs::write(app.join("image.toml"), marker(2)).unwrap();
+    let gone_vm = vm("gone", "c2", Some((&gone, "rust", 999)));
+    fs::write(gone_vm.join("image.toml"), marker(1)).unwrap();
     vm("old", "c3", Some((&env.project, "default", 0)));
     vm("broken", "c4", None);
 
@@ -223,11 +297,25 @@ fn lists_vms_and_images() {
                 "?",
                 "(~/.sendit/broken_6ba7b811-9dad-11d1-80b4-00c04fd430c4)"
             ],
-            vec!["stopped", "0", "B", "rust", &gone, "(missing)"],
+            vec![
+                "stopped",
+                "0",
+                "B",
+                "rust",
+                "(earlier",
+                "build)",
+                &gone,
+                "(missing)"
+            ],
             vec!["outdated", "0", "B", "default", &project],
         ],
         "{list}"
     );
+    // A VM's copy of the marker that can't be read leaves it unmarked.
+    fs::write(gone_vm.join("image.toml"), "not toml").unwrap();
+    let (list, _) = env.ok(&["list"]);
+    assert!(!list.contains("earlier build"), "{list}");
+    assert_eq!(list.lines().count(), 5, "{list}");
 
     let (images, _) = env.ok(&["images"]);
     let rows: Vec<Vec<_>> = images

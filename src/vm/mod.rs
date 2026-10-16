@@ -132,7 +132,8 @@ impl VmDir {
     }
 
     /// A project VM's copy of the marker of the image build it was made
-    /// from, which says what the image's scripts asked to share.
+    /// from, which says what the image's scripts asked to share and when
+    /// the build was made.
     pub fn image_marker(&self) -> PathBuf {
         self.0.join("image.toml")
     }

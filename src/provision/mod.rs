@@ -17,6 +17,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,11 @@ struct Marker {
     /// images built before sendit recorded it.
     #[serde(default)]
     mounts: Vec<ScriptMount>,
+    /// When the image was built, in seconds since the Unix epoch, which
+    /// tells a VM's build from a later one. None for images built before
+    /// sendit recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    built: Option<u64>,
 }
 
 fn marker_file(dir: &VmDir) -> PathBuf {
@@ -83,6 +89,12 @@ pub fn marker_mounts(marker: &Path) -> Result<Vec<ScriptMount>> {
     Ok(util::read_toml::<Marker>(marker)?
         .map(|marker| marker.mounts)
         .unwrap_or_default())
+}
+
+/// When the build that `marker` records was made (see `Marker::built`);
+/// None if it doesn't exist or doesn't say.
+pub fn marker_built(marker: &Path) -> Result<Option<u64>> {
+    Ok(util::read_toml::<Marker>(marker)?.and_then(|marker| marker.built))
 }
 
 pub enum BaseState {
@@ -273,6 +285,7 @@ pub fn provision(
         revision: BASE_REVISION,
         custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
         mounts,
+        built: Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()),
     })?;
     fs::write(marker_file(&partial), marker)?;
 
@@ -450,6 +463,7 @@ mod tests {
                 revision,
                 custom_scripts: Vec::new(),
                 mounts: Vec::new(),
+                built: None,
             };
             fs::write(marker_file(&base), toml::to_string(&marker).unwrap()).unwrap();
         };
@@ -565,6 +579,7 @@ mod tests {
             revision: BASE_REVISION,
             custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
             mounts: mounts_of(&scripts).unwrap(),
+            built: None,
         };
         let names: Vec<_> = marker.custom_scripts.iter().map(|s| &s.name[..]).collect();
         assert_eq!(names, ["images/rust.sh", "a.sh", "b.sh"]);
@@ -607,10 +622,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_mounts_recorded_in_a_marker() {
+    fn reads_the_mounts_and_build_recorded_in_a_marker() {
         let home = TempDir::new("marker-mounts");
         let file = home.path().join("provisioned.toml");
         assert!(marker_mounts(&file).unwrap().is_empty());
+        assert_eq!(marker_built(&file).unwrap(), None);
 
         let mounts = vec![ScriptMount {
             script: "images/rust.sh".into(),
@@ -622,13 +638,16 @@ mod tests {
             revision: BASE_REVISION,
             custom_scripts: Vec::new(),
             mounts: mounts.clone(),
+            built: Some(1_760_000_000),
         };
         fs::write(&file, toml::to_string(&marker).unwrap()).unwrap();
         assert_eq!(marker_mounts(&file).unwrap(), mounts);
+        assert_eq!(marker_built(&file).unwrap(), Some(1_760_000_000));
 
         // Images built before sendit recorded them have none.
         fs::write(&file, "revision = 10\ncustom_scripts = []\n").unwrap();
         assert!(marker_mounts(&file).unwrap().is_empty());
+        assert_eq!(marker_built(&file).unwrap(), None);
     }
 
     #[test]

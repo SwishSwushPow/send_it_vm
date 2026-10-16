@@ -116,10 +116,47 @@ pub fn new_vm_mounts(
 /// kept a copy.
 fn build_mounts(paths: &Paths, vm: Option<VmDir>, image: &ImageName) -> Result<Vec<ScriptMount>> {
     let copy = vm
-        .filter(|vm| metadata(vm).is_ok_and(|m| m.image == *image && !m.outdated()))
+        .filter(|vm| made_from(vm, image))
         .map(|vm| vm.image_marker())
         .filter(|copy| copy.exists());
     provision::marker_mounts(&copy.unwrap_or_else(|| provision::marker(paths, image)))
+}
+
+/// Whether a new VM of the project would be made from an earlier build of
+/// `image` than the latest one: whether its parent VM was, if `run` copies
+/// that, unless the VM is to be `fresh`.
+pub fn new_vm_from_earlier_build(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    fresh: bool,
+) -> Result<bool> {
+    match parent(paths, project).filter(|_| !fresh) {
+        Some(parent) => earlier_build(paths, &parent, image),
+        None => Ok(false),
+    }
+}
+
+/// Whether `vm` was made from an earlier build of `image` than the latest
+/// one, by the copy of that build's marker that it keeps. Not if it is a VM
+/// of another image or an outdated one, which `run` won't copy: a new one
+/// would be made from the latest build. Unknown, and so false, while the
+/// latest build doesn't record when it was made; a VM whose copy doesn't,
+/// or that has none, was made before it.
+pub fn earlier_build(paths: &Paths, vm: &VmDir, image: &ImageName) -> Result<bool> {
+    if !made_from(vm, image) {
+        return Ok(false);
+    }
+    let Some(latest) = provision::marker_built(&provision::marker(paths, image))? else {
+        return Ok(false);
+    };
+    Ok(provision::marker_built(&vm.image_marker())? != Some(latest))
+}
+
+/// Whether `vm` was made from a build of `image` that this version of
+/// sendit can run.
+fn made_from(vm: &VmDir, image: &ImageName) -> bool {
+    metadata(vm).is_ok_and(|m| m.image == *image && !m.outdated())
 }
 
 /// The directory of the project's VM.
@@ -970,6 +1007,74 @@ mod tests {
         let metadata = metadata(&vm).unwrap();
         assert_eq!(metadata.image, rust);
         assert_eq!(metadata.copy_of, None);
+    }
+
+    /// Writes the marker of a build made at `built`.
+    fn write_built(path: &Path, built: u64) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "revision = {}\ncustom_scripts = []\nbuilt = {built}\n",
+                provision::BASE_REVISION
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn knows_whether_it_was_made_from_an_earlier_build() {
+        let temp = crate::util::TempDir::new("vm-earlier-build");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        let rust: ImageName = "rust".parse().unwrap();
+        let go: ImageName = "go".parse().unwrap();
+        let vm = dir(&paths, &wt);
+        let build = |built: u64| write_built(&provision::marker(&paths, &rust), built);
+        let new_vm = |image: &ImageName, fresh: bool| {
+            new_vm_from_earlier_build(&paths, &wt, image, fresh).unwrap()
+        };
+        let made = || earlier_build(&paths, &vm, &rust).unwrap();
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+
+        // Unknown while the latest build doesn't say when it was made.
+        assert!(!new_vm(&rust, false));
+        write_marker(&provision::marker(&paths, &rust), "~/old:ro");
+        assert!(!new_vm(&rust, false));
+
+        // A parent made before VMs kept a copy, or before the builds were
+        // recorded, is from an earlier one, and so would be a copy of it,
+        // unless the VM is to be fresh, or of another image.
+        build(2);
+        assert!(new_vm(&rust, false));
+        write_marker(&parent.image_marker(), "~/old:ro");
+        assert!(new_vm(&rust, false));
+        assert!(!new_vm(&rust, true));
+        write_built(&provision::marker(&paths, &go), 1);
+        assert!(!new_vm(&go, false));
+
+        // A copy of a parent made from the latest build is too, until the
+        // image is built again; made again, it would be a copy again.
+        write_built(&parent.image_marker(), 2);
+        assert!(!new_vm(&rust, false));
+        create(&paths, &wt, &vm, &rust, false, &never).unwrap();
+        assert!(!made());
+        build(3);
+        assert!(made());
+        assert!(new_vm(&rust, false));
+        assert!(!new_vm(&rust, true));
+        // Not from an earlier build of an image it wasn't made from.
+        assert!(!earlier_build(&paths, &vm, &go).unwrap());
+
+        // Made from the image, it is from the latest build until the next.
+        fs::remove_dir_all(vm.path()).unwrap();
+        let base = VmDir::new(paths.image_dir(&rust));
+        fs::write(base.disk(), "base disk").unwrap();
+        fs::write(base.efi_vars(), "base efi").unwrap();
+        create(&paths, &wt, &vm, &rust, true, &never).unwrap();
+        assert!(!made());
+        build(4);
+        assert!(made());
     }
 
     /// Writes an image's marker, or a VM's copy of one, to `path`, saying

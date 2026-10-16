@@ -176,7 +176,14 @@ pub fn list(paths: &Paths) -> Result<()> {
                     ProjectDir::Unmounted => format!("{path} (volume not mounted)"),
                     ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
                 };
-                (metadata.image.to_string(), project)
+                // Only a hint: a marker that can't be read doesn't stop the listing.
+                let earlier = project_vm::earlier_build(paths, &dir, &metadata.image);
+                let image = if earlier.unwrap_or(false) {
+                    format!("{} (earlier build)", metadata.image)
+                } else {
+                    metadata.image.to_string()
+                };
+                (image, project)
             }
             Err(_) => (
                 "?".to_string(),
@@ -404,13 +411,30 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     let behind = |mounts: Vec<ScriptMount>| -> Result<bool> {
         Ok(latest.exists() && mounts != provision::marker_mounts(&latest)?)
     };
+    // Whether a new VM would be made from an earlier build than the latest.
+    let new_vm_behind = || -> Result<bool> {
+        Ok(
+            behind(project_vm::new_vm_mounts(paths, project, image, false)?)?
+                || project_vm::new_vm_from_earlier_build(paths, project, image, false)?,
+        )
+    };
     let state = if !vm_dir.path().exists() {
         let parent = project_vm::parent_metadata(paths, project);
         match parent {
-            Some(m) if m.image == *image && !m.outdated() => format!(
-                "not created; `sendit run` copies the VM of {}",
-                paths.display(&m.project_path)
-            ),
+            Some(m) if m.image == *image && !m.outdated() => {
+                let copy = format!(
+                    "not created; `sendit run` copies the VM of {}",
+                    paths.display(&m.project_path)
+                );
+                if new_vm_behind()? {
+                    format!(
+                        "{copy}, made from an earlier build of the {image} image; \
+                         `sendit run --fresh` makes it from the current one"
+                    )
+                } else {
+                    copy
+                }
+            }
             _ => "not created".to_string(),
         }
     } else {
@@ -430,20 +454,27 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             Some(m) if m.outdated() => {
                 format!("{state}; made from an outdated base image, `sendit reset` recreates it")
             }
-            Some(_) if behind(project_vm::script_mounts(paths, project, image, false)?)? => {
-                // A worktree's VM made again is a copy of its parent VM, which
-                // may be behind too.
-                let how = if behind(project_vm::new_vm_mounts(paths, project, image, false)?)? {
-                    "`sendit reset` and `sendit run --fresh` recreate it"
+            Some(_) => {
+                let shares = behind(project_vm::script_mounts(paths, project, image, false)?)?;
+                if shares || project_vm::earlier_build(paths, &vm_dir, image)? {
+                    // A worktree's VM made again is a copy of its parent VM,
+                    // which may be behind too.
+                    let how = if new_vm_behind()? {
+                        "`sendit reset` and `sendit run --fresh` recreate it"
+                    } else {
+                        "`sendit reset` recreates it"
+                    };
+                    let what = if shares {
+                        format!("shares what an earlier build of the {image} image asked for")
+                    } else {
+                        format!("made from an earlier build of the {image} image")
+                    };
+                    format!("{state}; {what}, {how} from the current one")
                 } else {
-                    "`sendit reset` recreates it"
-                };
-                format!(
-                    "{state}; shares what an earlier build of the {image} image asked for, \
-                     {how} from the current one"
-                )
+                    state
+                }
             }
-            _ => state,
+            None => state,
         }
     };
     println!(

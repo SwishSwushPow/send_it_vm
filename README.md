@@ -104,7 +104,7 @@ sendit finds the scripts an image needs by reading the `sendit-provision NAME` c
 
 Each script runs as the VM's user in its own login shell from the home directory. `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts added, e.g. to `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
 
-`sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments other than mount lines; `sendit provision NAME --force` rebuilds it.
+`sendit status` and `sendit images` tell you when an image's scripts changed since it was built, apart from their leading comments other than mount lines; `sendit provision NAME --force` rebuilds it. `sendit status` also tells you when the project's VM was made from an earlier build of its image, and `sendit reset` makes it again from the latest one; `sendit list` marks such VMs with "(earlier build)".
 
 A script can ask for host directories to be shared with the image's VMs, in comment lines before its first command:
 
