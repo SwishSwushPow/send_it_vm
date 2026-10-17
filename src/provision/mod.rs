@@ -28,10 +28,11 @@ use crate::paths::{ImageName, Paths};
 use crate::util;
 use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
 use scripts::{
-    CustomScript, ScriptStamp, custom_scripts, dangling_image_file, describe_dangling,
-    describe_mounts, describe_scripts, mounts_of,
+    CustomScript, ScriptStamp, custom_scripts, describe_mounts, describe_scripts, mounts_of,
 };
-pub use scripts::{ScriptMount, check_no_subfolders};
+pub use scripts::{
+    ScriptMount, check_no_subfolders, dangling_image_file, describe_dangling, same_mounts,
+};
 
 /// Logical size of the base disk. Project VMs grow their clone further, but
 /// can't shrink it, so this is also the smallest disk size they can have.
@@ -337,7 +338,12 @@ pub fn provision(
         revision: BASE_REVISION,
         custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
         mounts,
-        built: Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()),
+        // Not worth failing over, and leaving the build behind: a clock set
+        // before 1970 only hides which VMs are from an earlier build.
+        built: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs()),
     })?;
     fs::write(marker_file(&partial), marker)?;
 

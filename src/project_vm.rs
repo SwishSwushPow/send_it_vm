@@ -119,7 +119,21 @@ fn build_mounts(paths: &Paths, vm: Option<VmDir>, image: &ImageName) -> Result<V
         .filter(|vm| made_from(vm, image))
         .map(|vm| vm.image_marker())
         .filter(|copy| copy.exists());
-    provision::marker_mounts(&copy.unwrap_or_else(|| provision::marker(paths, image)))
+    match copy {
+        Some(copy) => {
+            provision::marker_mounts(&copy).with_context(|| broken_marker_copy(paths, &copy))
+        }
+        None => provision::marker_mounts(&provision::marker(paths, image)),
+    }
+}
+
+/// Says how to get past a VM's `copy` of its build's marker that can't be
+/// read, e.g. after it was edited by hand.
+fn broken_marker_copy(paths: &Paths, copy: &std::path::Path) -> String {
+    format!(
+        "reading {}; `sendit reset` in the VM's project makes it again",
+        paths.display(copy)
+    )
 }
 
 /// Whether a new VM of the project would be made from an earlier build of
@@ -150,7 +164,9 @@ pub fn earlier_build(paths: &Paths, vm: &VmDir, image: &ImageName) -> Result<boo
     let Some(latest) = provision::marker_built(&provision::marker(paths, image))? else {
         return Ok(false);
     };
-    Ok(provision::marker_built(&vm.image_marker())? != Some(latest))
+    let copy = vm.image_marker();
+    let built = provision::marker_built(&copy).with_context(|| broken_marker_copy(paths, &copy))?;
+    Ok(built != Some(latest))
 }
 
 /// Whether `vm` was made from a build of `image` that this version of
@@ -258,7 +274,10 @@ pub fn create_if_missing(
     let note = create(paths, project, &dir, &image, fresh, ask)?;
     Ok(Some(Created {
         note,
-        other_shares: script_mounts(paths, project, &image, fresh)? != expected,
+        other_shares: !provision::same_mounts(
+            &script_mounts(paths, project, &image, fresh)?,
+            &expected,
+        ),
     }))
 }
 
@@ -987,6 +1006,7 @@ mod tests {
         let error = create(&paths, &wt, &vm, &rust, false, &yes).unwrap_err();
         assert!(error.to_string().contains("rust image"), "{error:#}");
         drop(running);
+        assert_eq!(state_once_released(&parent), State::Stopped);
 
         // Made from another image: from the base image without asking.
         let go: ImageName = "go".parse().unwrap();
@@ -1029,17 +1049,19 @@ mod tests {
         let yes = |_: &str, _: &str| Ok(true);
         let vm = dir(&paths, &wt);
         let _running = lock(&parent, &wt, &[]).unwrap();
-        let other_shares = |parent_marker: &str| {
-            write_marker(&parent.image_marker(), parent_marker);
+        let other_shares = |script: &str, mount: &str| {
+            write_marker_of(&parent.image_marker(), script, mount);
             let created = create_if_missing(&paths, &wt, &settings, false, &yes).unwrap();
             assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
             fs::remove_dir_all(vm.path()).unwrap();
             created.unwrap().other_shares
         };
 
-        // Confirmed for the parent's build, made from the latest.
-        assert!(other_shares("~/parent:ro"));
-        assert!(!other_shares("~/latest:ro"));
+        // Confirmed for the parent's build, made from the latest. Only the
+        // shares count, not the scripts asking for them.
+        assert!(other_shares("images/rust.sh", "~/parent:ro"));
+        assert!(!other_shares("images/rust.sh", "~/latest:ro"));
+        assert!(!other_shares("renamed.sh", "~/latest:ro"));
     }
 
     #[test]
@@ -1197,12 +1219,17 @@ mod tests {
     /// Writes an image's marker, or a VM's copy of one, to `path`, saying
     /// that the scripts asked for `mount`.
     fn write_marker(path: &Path, mount: &str) {
+        write_marker_of(path, "images/rust.sh", mount);
+    }
+
+    /// Like `write_marker`, with the mount asked for by `script`.
+    fn write_marker_of(path: &Path, script: &str, mount: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             path,
             format!(
                 "revision = {}\ncustom_scripts = []\n\
-                 [[mounts]]\nscript = \"images/rust.sh\"\nmount = \"{mount}\"\n",
+                 [[mounts]]\nscript = \"{script}\"\nmount = \"{mount}\"\n",
                 provision::BASE_REVISION
             ),
         )
@@ -1271,6 +1298,24 @@ mod tests {
         build("~/fourth:ro");
         assert_eq!(shares(&rust, false), ["~/third:ro"]);
 
+        // A copy that can't be read, e.g. after it was edited by hand, says
+        // how to get past it.
+        fs::write(vm.image_marker(), "mounts = 1\n").unwrap();
+        // Only read once the latest build says when it was made.
+        let marker = provision::marker(&paths, &rust);
+        let latest = fs::read_to_string(&marker).unwrap();
+        fs::write(&marker, format!("built = 1\n{latest}")).unwrap();
+        for error in [
+            script_mounts(&paths, &wt, &rust, false).unwrap_err(),
+            earlier_build(&paths, &vm, &rust).unwrap_err(),
+        ] {
+            let error = format!("{error:#}");
+            assert!(
+                error.contains("image.toml; `sendit reset` in the VM's project makes it again"),
+                "{error}"
+            );
+        }
+
         // A VM made before VMs kept a copy shares what the latest build
         // asked for.
         fs::remove_file(vm.image_marker()).unwrap();
@@ -1293,8 +1338,16 @@ mod tests {
         drop(running);
         assert_eq!(state_once_released(&vm), State::Stopped);
         // Held to copy or delete the VM, the lock doesn't point at the
-        // process of the last run.
-        let _busy = try_lock(&vm).unwrap().unwrap();
+        // process of the last run. Taken once a spawned process has let go
+        // of its copy, as in `state_once_released`.
+        let start = Instant::now();
+        let _busy = loop {
+            match try_lock(&vm).unwrap() {
+                Some(lock) => break lock,
+                None if start.elapsed() < Duration::from_secs(2) => {}
+                None => panic!("the lock stays taken"),
+            }
+        };
         assert_eq!(state(&vm).unwrap(), State::Running(None));
         assert!(stop(&paths, &project).is_err());
     }

@@ -9,9 +9,10 @@ use std::str::Chars;
 /// the characters that end a command or redirect (`;&|()<>`) a word of its
 /// own. A word keeps its quotes and backslashes, so that it can't pass for a
 /// literal name, and a command substitution in it, `$(...)` or backticks,
-/// which also adds the words in it. Arithmetic, `$((...))` or a `((...))`
-/// command, is a word too. Comments and the bodies of here-documents are
-/// left out.
+/// which also adds the words in it, then its closing `)` or backtick, which
+/// ends the command in it, as a word of its own. Arithmetic, `$((...))` or a
+/// `((...))` command, is a word too. Comments and the bodies of
+/// here-documents are left out.
 pub(super) fn shell_words(text: &str) -> Vec<(usize, String)> {
     let mut lexer = Lexer {
         chars: text.chars().peekable(),
@@ -24,7 +25,7 @@ pub(super) fn shell_words(text: &str) -> Vec<(usize, String)> {
 }
 
 pub(super) fn is_operator(word: &str) -> bool {
-    matches!(word, "\n" | ";" | "&" | "|" | "(" | ")" | "<" | ">")
+    matches!(word, "\n" | ";" | "&" | "|" | "(" | ")" | "<" | ">" | "`")
 }
 
 /// Splits shell code into words for `shell_words`.
@@ -234,6 +235,7 @@ impl Lexer<'_> {
             .1
             .push_str(if close == ')' { "$(" } else { "`" });
         self.code(Some(close));
+        self.words.push((self.line, close.into()));
         self.words[i].1.push(close);
     }
 

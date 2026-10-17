@@ -118,7 +118,15 @@ fn sendit() -> Result<ExitCode> {
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),
-        Command::Reset { yes } => commands::reset(&paths, &project()?, *yes),
+        Command::Reset { yes } => {
+            let project = project()?;
+            // Only for a hint: a config file sendit can't read doesn't stop it.
+            let chosen = Config::load(&paths)
+                .and_then(|config| config.resolve_image(&paths, &project))
+                .ok()
+                .flatten();
+            commands::reset(&paths, &project, chosen.as_ref(), *yes)
+        }
         Command::List => commands::list(&paths),
         Command::Images { delete, yes } if !delete.is_empty() => {
             commands::delete_images(&paths, &Config::load(&paths)?, delete, *yes)

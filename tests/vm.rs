@@ -1472,8 +1472,8 @@ fn applies_resources_in_the_guest() {
         "the guest has {memory} bytes of memory"
     );
     // Half of it is swap on zram, compressed with zstd, which may keep at
-    // most a quarter of it. The generator works in whole MiB, and the swap
-    // area's header takes a page.
+    // most a quarter of it. The generator truncates MemTotal to whole MiB
+    // before taking the fractions, and the swap area's header takes a page.
     assert_eq!(vm.ok("awk 'NR > 1 { print $1 }' /proc/swaps"), "/dev/zram0");
     assert!(
         vm.ok("cat /sys/block/zram0/comp_algorithm")
@@ -1492,6 +1492,11 @@ fn applies_resources_in_the_guest() {
     assert!(
         near(limit, memory / 4),
         "zram may keep {limit} bytes of memory"
+    );
+    // Swapping out as readily as dropping the page cache, one page at a time.
+    assert_eq!(
+        vm.ok("cat /proc/sys/vm/swappiness /proc/sys/vm/page-cluster"),
+        "100\n0"
     );
     // The root filesystem fills the 20 GiB disk, apart from the EFI
     // partition and the filesystem's own overhead.

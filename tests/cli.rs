@@ -165,6 +165,22 @@ fn tells_when_the_vm_is_from_an_earlier_build() {
     .unwrap();
     assert_eq!(vm_state(), "stopped");
 
+    // Renaming a script that asks for a share changes nothing for the VM.
+    let marker = |script: &str| {
+        format!(
+            "revision = 1000\ncustom_scripts = []\nbuilt = 1\n\
+             [[mounts]]\nscript = \"{script}\"\nmount = \"~/x:ro\"\n"
+        )
+    };
+    let latest = env
+        .home
+        .join(".cache/sendit/images/default/provisioned.toml");
+    fs::write(&latest, marker("renamed.sh")).unwrap();
+    fs::write(vm.join("image.toml"), marker("images/default.sh")).unwrap();
+    assert_eq!(vm_state(), "stopped");
+    build(1);
+    fs::copy(&latest, vm.join("image.toml")).unwrap();
+
     build(2);
     assert_eq!(
         vm_state(),
@@ -350,7 +366,7 @@ fn lists_vms_and_images() {
 fn deletes_images() {
     let env = Env::new("delete-images");
     let cache = env.home.join(".cache/sendit");
-    for image in ["default", "go", "old", "rust"] {
+    for image in ["default", "go", "old", "rust", "web"] {
         let dir = cache.join("images").join(image);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
@@ -363,11 +379,18 @@ fn deletes_images() {
     // Left behind by a build that was killed.
     fs::create_dir_all(cache.join("images/.rust.partial")).unwrap();
     // `provision --all` builds rust for its image file, go for the config
-    // file, default always, and old not at all.
+    // file, default always, and old not at all: an image file that is a
+    // directory doesn't count. It stops at web's, which points to nothing.
     let image_file = env.home.join(".config/sendit/images/rust.sh");
     fs::create_dir_all(image_file.parent().unwrap()).unwrap();
     fs::write(&image_file, "true\n").unwrap();
     env.config("[images.go]\ncpus = 1\n");
+    fs::create_dir_all(env.home.join(".config/sendit/images/old.sh")).unwrap();
+    std::os::unix::fs::symlink(
+        env.home.join("dotfiles/web.sh"),
+        env.home.join(".config/sendit/images/web.sh"),
+    )
+    .unwrap();
     for uuid in ["c1", "c2"] {
         let vm = env.home.join(format!(
             ".sendit/app_6ba7b811-9dad-11d1-80b4-00c04fd430{uuid}"
@@ -388,6 +411,15 @@ fn deletes_images() {
         &env.sendit(&["images", "--delete", "rust", "--delete", "python"]),
         "the python image isn't provisioned",
     );
+    // Unless a first build of it left something behind.
+    fs::create_dir_all(cache.join("provision/python")).unwrap();
+    let output = env.sendit(&["images", "--delete", "python"]);
+    assert_fails_with(
+        &output,
+        "Base images to delete:\n  python  (what its builds left behind)\n",
+    );
+    env.ok(&["images", "--delete", "python", "--yes"]);
+    assert!(!cache.join("provision/python").exists());
     assert_eq!(env.sendit(&["images", "--yes"]).status.code(), Some(2));
     // Without a terminal, it only lists what it would delete.
     let output = env.sendit(&["images", "--delete", "rust", "--delete", "go"]);
@@ -422,13 +454,16 @@ fn deletes_images() {
     );
 
     let (_, deleted) = env.ok(&[
-        "images", "--delete", "old", "--delete", "go", "--delete", "default", "--yes",
+        "images", "--delete", "old", "--delete", "go", "--delete", "default", "--delete", "web",
+        "--yes",
     ]);
     assert!(
         deleted.ends_with(
-            "Deleted 3 images.\n\
+            "Deleted 4 images.\n\
              `sendit provision --all` builds the default image again.\n\
-             `sendit provision --all` builds the go image again while the config file names it.\n"
+             `sendit provision --all` builds the go image again while the config file names it.\n\
+             `sendit provision --all` stops with an error while the image file \
+             ~/.config/sendit/images/web.sh points to ~/dotfiles/web.sh, which doesn't exist.\n"
         ),
         "{deleted}"
     );

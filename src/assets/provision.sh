@@ -309,7 +309,10 @@ systemctl enable sendit-growfs.service fstrim.timer
 # compresses to. Data that barely compresses (random data, archives, a full
 # /tmp, which is a tmpfs) may take at most a quarter of the memory; past
 # that, the kernel logs swap write errors and the OOM killer steps in. This
-# replaces the package's /usr/lib/systemd/zram-generator.conf.
+# replaces the package's /usr/lib/systemd/zram-generator.conf. An image file
+# can retune it with a drop-in in /etc/systemd/zram-generator.conf.d/, or
+# turn zram off with `sudo ln -sf /dev/null /etc/systemd/zram-generator.conf`
+# (removing the file brings back the package's min(ram / 2, 4 GiB)).
 cat > /etc/systemd/zram-generator.conf <<'EOF'
 [zram0]
 zram-size = ram / 2
@@ -449,7 +452,9 @@ while read -r number name; do
     fi
 done < "$list"
 if [ -z "$file" ]; then
-    echo "sendit: no custom script $1 on the seed ISO" >&2
+    echo "sendit: no custom script $1 on the seed ISO; sendit includes only the scripts" \
+        "it finds called literally as 'sendit-provision $1', not through a variable," \
+        "eval or bash -c" >&2
     exit 1
 fi
 if [ -e "$ran/$file" ]; then
@@ -477,9 +482,11 @@ EOF
 chmod 755 /usr/local/bin/sendit-provision
 # The scripts call sendit-provision as a function, which reads the login
 # shell's profile again after the script it runs, as a login shell started
-# then would. So the commands after a call see what the script added to it,
-# e.g. to the PATH. It reads the profile without -e and -u, which profiles
-# aren't written for, e.g. with a last line `[ -s FILE ] && . FILE`.
+# then would. So the commands after a call see what the script exports in
+# it, e.g. the PATH; read in a function, a `declare -x` or `typeset` there
+# makes a local variable, gone after the call. It reads the profile without
+# -e and -u, which profiles aren't written for, e.g. with a last line
+# `[ -s FILE ] && . FILE`.
 # Exported, it reaches the scripts that the image file calls, but not those
 # run with sudo, which use the command itself.
 cat > /usr/local/lib/sendit-provision.bash <<'EOF'

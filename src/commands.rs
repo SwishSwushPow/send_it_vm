@@ -58,7 +58,11 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
         (paths.image_files_dir(), "sendit's image files"),
         (paths.ssh_dir(), "sendit's SSH keys"),
     ] {
-        state.extend(protected_paths(&path).into_iter().map(|path| (path, what)));
+        state.extend(
+            protected_paths(&path)
+                .into_iter()
+                .map(|(path, link)| (path, link, what)),
+        );
     }
     // So can each script and image file, which runs with sudo in the next
     // build.
@@ -73,7 +77,7 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
             state.extend(
                 protected_paths(&entry.path())
                     .into_iter()
-                    .map(|path| (path, what)),
+                    .map(|(path, link)| (path, link, what)),
             );
         }
     }
@@ -86,8 +90,13 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
             let reason = if home.starts_with(host) {
                 "contains your home directory".to_string()
             } else {
-                state.iter().find_map(|(path, what)| {
-                    if path.starts_with(host) {
+                state.iter().find_map(|(path, link, what)| {
+                    // A link reads as the way there, which the VM could
+                    // change, not as what it protects.
+                    if path.starts_with(host) && *link {
+                        let path = paths.display(path);
+                        Some(format!("contains {path}, a symlink on the way to {what}"))
+                    } else if path.starts_with(host) {
                         Some(format!("contains {what} ({})", paths.display(path)))
                     } else if host.starts_with(path) {
                         Some(format!("is inside {what} ({})", paths.display(path)))
@@ -107,13 +116,14 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
 }
 
 /// The paths through which the VM could change what the absolute `path`
-/// leads to. `path` is resolved one component at a time, as the kernel
-/// does, and each symlink on the way counts as itself, directory links
-/// included, with the directories before it resolved. Last comes where
-/// `path` ends up, or, once a component doesn't exist, where it would be in
-/// the last directory that does: the VM could create it there. A loop ends
-/// after 32 links, as it does for macOS (kern.maxsymlinks).
-fn protected_paths(path: &Path) -> Vec<PathBuf> {
+/// leads to, each with whether it is a symlink. `path` is resolved one
+/// component at a time, as the kernel does, and each symlink on the way
+/// counts as itself, directory links included, with the directories before
+/// it resolved. Last comes where `path` ends up, or, once a component
+/// doesn't exist, where it would be in the last directory that does: the VM
+/// could create it there. A loop ends after 32 links, as it does for macOS
+/// (kern.maxsymlinks).
+fn protected_paths(path: &Path) -> Vec<(PathBuf, bool)> {
     fn push(rest: &mut Vec<OsString>, path: &Path) {
         rest.extend(path.components().rev().map(|c| c.as_os_str().to_owned()));
     }
@@ -135,7 +145,7 @@ fn protected_paths(path: &Path) -> Vec<PathBuf> {
                 Ok(metadata) if metadata.is_symlink() => {
                     links += 1;
                     let target = fs::read_link(&next);
-                    found.push(next);
+                    found.push((next, true));
                     match target {
                         Ok(target) if links <= 32 => push(&mut rest, &target),
                         _ => return found,
@@ -143,17 +153,25 @@ fn protected_paths(path: &Path) -> Vec<PathBuf> {
                 }
                 Ok(_) => dir = next,
                 Err(_) => {
-                    found.push(rest.iter().rev().fold(next, |path, name| path.join(name)));
+                    let path = rest.iter().rev().fold(next, |path, name| path.join(name));
+                    found.push((path, false));
                     return found;
                 }
             }
         }
     }
-    found.push(dir);
+    found.push((dir, false));
     found
 }
 
-pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
+/// Deletes the project's VM, after asking unless `yes`. `chosen` is the
+/// image the config file chooses for the project, if it does.
+pub fn reset(
+    paths: &Paths,
+    project: &Project,
+    chosen: Option<&ImageName>,
+    yes: bool,
+) -> Result<()> {
     let dir = project_vm::dir(paths, project);
     if !dir.path().exists() {
         eprintln!("This project has no VM.");
@@ -163,15 +181,29 @@ pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
         bail!("the VM is running; stop it first with `sendit stop`");
     }
     let parent = project_vm::parent_metadata(paths, project);
-    let next = match parent {
+    let next = match &parent {
         Some(parent) => format!(
             "of the VM of {}, or of the base image if that is running then",
             paths.display(&parent.project_path)
         ),
         None => "of the base image".to_string(),
     };
+    // The image a new VM would be made from, as `project_vm::image` finds
+    // it once this one is gone.
+    let image = chosen
+        .cloned()
+        .or_else(|| parent.map(|parent| parent.image))
+        .unwrap_or_default();
+    let missing = match provision::base_state(paths, &image) {
+        Ok(BaseState::Missing) => format!(
+            " (the {image} image is {})",
+            BaseState::Missing.describe(&image)
+        ),
+        _ => String::new(),
+    };
     let question = format!(
-        "Delete {} and everything stored in it? The next `run` starts from a fresh copy {next}.",
+        "Delete {} and everything stored in it? The next `run` starts from a fresh copy \
+         {next}{missing}.",
         paths.display(dir.path())
     );
     if !yes {
@@ -260,8 +292,9 @@ pub fn images(paths: &Paths, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Deletes the `images`, which must all be provisioned, after asking unless
-/// `yes`. Tells which of them `provision --all` would build again.
+/// Deletes the `images`, which must all be provisioned or have a build
+/// that left something behind, after asking unless `yes`. Tells which of
+/// them `provision --all` would build again.
 pub fn delete_images(
     paths: &Paths,
     config: &Config,
@@ -272,15 +305,25 @@ pub fn delete_images(
     images.sort();
     images.dedup();
     for image in &images {
+        // A first build that failed or was killed leaves no image.
+        let left = [
+            paths.image_partial_dir(image),
+            paths.image_old_dir(image),
+            paths.provision_dir(image),
+        ];
         ensure!(
-            paths.image_dir(image).is_dir(),
+            paths.image_dir(image).is_dir() || left.iter().any(|dir| dir.exists()),
             "the {image} image isn't provisioned"
         );
     }
     let vms = vms_per_image(paths)?;
     eprintln!("Base images to delete:");
     for image in &images {
-        let dir = paths.display(&paths.image_dir(image));
+        let dir = if paths.image_dir(image).is_dir() {
+            paths.display(&paths.image_dir(image))
+        } else {
+            "what its builds left behind".to_string()
+        };
         match vms.get(image).copied().unwrap_or(0) {
             0 => eprintln!("  {image}  ({dir})"),
             1 => eprintln!("  {image}  ({dir}; 1 VM was made from it)"),
@@ -297,9 +340,16 @@ pub fn delete_images(
     provision::delete_images(paths, &images)?;
     eprintln!("Deleted {what}.");
     for image in &images {
+        // As `provision::images` finds them, and `provision` takes them.
+        if let Some(target) = provision::dangling_image_file(paths, image) {
+            eprintln!(
+                "`sendit provision --all` stops with an error while {}.",
+                provision::describe_dangling(paths, image, &target)
+            );
+            continue;
+        }
         let file = paths.image_file(image);
-        // A symlink to nothing counts, as for `provision::images`.
-        let when = if fs::symlink_metadata(&file).is_ok() {
+        let when = if fs::symlink_metadata(&file).is_ok() && !file.is_dir() {
             format!(" while {} exists", paths.display(&file))
         } else if config.images().any(|named| named == image) {
             " while the config file names it".to_string()
@@ -496,9 +546,11 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     // Whether the image's scripts asked for other shares in its latest
     // build, if it has one.
     let latest = provision::marker(paths, image);
-    let behind = |mounts: Vec<ScriptMount>| -> Result<bool> {
-        Ok(latest.exists() && mounts != provision::marker_mounts(&latest)?)
-    };
+    let behind =
+        |mounts: Vec<ScriptMount>| -> Result<bool> {
+            Ok(latest.exists()
+                && !provision::same_mounts(&mounts, &provision::marker_mounts(&latest)?))
+        };
     // Whether a new VM would be made from an earlier build than the latest.
     let new_vm_behind = || -> Result<bool> {
         Ok(
@@ -773,7 +825,9 @@ mod tests {
         std::os::unix::fs::symlink("loop.sh", scripts.join("loop.sh")).unwrap();
         assert_eq!(
             risky(&[mount(&home.join("links"), false)]),
-            ["~/links (read-write) contains sendit's provisioning scripts (~/links/helix.sh)"]
+            [
+                "~/links (read-write) contains ~/links/helix.sh, a symlink on the way to sendit's provisioning scripts"
+            ]
         );
         assert_eq!(
             risky(&[mount(&home.join("store"), true)]),
@@ -788,7 +842,9 @@ mod tests {
         std::os::unix::fs::symlink(home.join("links/ssh"), &ssh).unwrap();
         assert_eq!(
             risky(&[mount(&home.join("links"), false)]),
-            ["~/links (read-write) contains sendit's SSH keys (~/links/ssh)"]
+            [
+                "~/links (read-write) contains ~/links/ssh, a symlink on the way to sendit's SSH keys"
+            ]
         );
     }
 
@@ -820,7 +876,9 @@ mod tests {
         let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
         assert_eq!(
             risky("dotfiles"),
-            ["~/dotfiles (read-write) contains sendit's provisioning scripts (~/dotfiles/scripts)"]
+            [
+                "~/dotfiles (read-write) contains ~/dotfiles/scripts, a symlink on the way to sendit's provisioning scripts"
+            ]
         );
         assert_eq!(
             risky("store"),
@@ -849,7 +907,9 @@ mod tests {
         let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
         assert_eq!(
             risky("dotfiles"),
-            ["~/dotfiles (read-write) contains sendit's configuration (~/dotfiles/config)"]
+            [
+                "~/dotfiles (read-write) contains ~/dotfiles/config, a symlink on the way to sendit's configuration"
+            ]
         );
         assert_eq!(
             risky("store"),

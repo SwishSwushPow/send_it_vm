@@ -51,6 +51,12 @@ pub struct ScriptMount {
     pub mount: MountSpec,
 }
 
+/// Whether `a` and `b` ask for the same shares, whichever scripts ask for
+/// them: a renamed script shares what it did.
+pub fn same_mounts(a: &[ScriptMount], b: &[ScriptMount]) -> bool {
+    a.iter().map(|m| &m.mount).eq(b.iter().map(|m| &m.mount))
+}
+
 /// A custom provisioning script: the image file of the image being built,
 /// or a shared script from `Paths::provision_scripts_dir` that it calls.
 pub(super) struct CustomScript {
@@ -117,12 +123,13 @@ impl CustomScript {
     /// word counts wherever it is, e.g. in an `if`, but not in a comment, in
     /// quotes or in the body of a here-document, except in a command
     /// substitution there. The name after it must be a literal file name,
-    /// which can be resolved without running anything.
+    /// which can be resolved without running anything, and the only
+    /// argument: `sendit-provision` would stop the build with a usage error.
     fn calls(&self) -> Result<Vec<String>> {
         let text = String::from_utf8_lossy(&self.content);
         let lines: Vec<_> = text.lines().collect();
         let mut calls = Vec::new();
-        let mut words = shell_words(&text).into_iter();
+        let mut words = shell_words(&text).into_iter().peekable();
         while let Some((line, word)) = words.next() {
             if word != RUN_COMMAND {
                 continue;
@@ -132,10 +139,26 @@ impl CustomScript {
                 .map(|(_, name)| name)
                 .filter(|name| !is_operator(name))
                 .unwrap_or_default();
-            check_script_name(&name).with_context(|| {
-                let line = lines.get(line).copied().unwrap_or_default();
-                format!("in the custom script {}: `{}`", self.name, line.trim())
-            })?;
+            // The number of a file descriptor to redirect, as in `2>&1`,
+            // isn't an argument.
+            let another = words
+                .next_if(|(_, next)| !is_operator(next))
+                .filter(|(_, next)| {
+                    !next.bytes().all(|b| b.is_ascii_digit())
+                        || !words.peek().is_some_and(|(_, w)| w == "<" || w == ">")
+                });
+            check_script_name(&name)
+                .and_then(|()| {
+                    ensure!(
+                        another.is_none(),
+                        "{RUN_COMMAND} takes one script name; call it once for each script"
+                    );
+                    Ok(())
+                })
+                .with_context(|| {
+                    let line = lines.get(line).copied().unwrap_or_default();
+                    format!("in the custom script {}: `{}`", self.name, line.trim())
+                })?;
             calls.push(name);
         }
         Ok(calls)
@@ -193,7 +216,7 @@ pub fn check_no_subfolders(paths: &Paths) -> Result<()> {
 /// e.g. into a dotfiles repository that isn't there (yet). `custom_scripts`
 /// finds no image file then, so `provision` refuses to build the image
 /// without its scripts.
-pub(super) fn dangling_image_file(paths: &Paths, image: &ImageName) -> Option<PathBuf> {
+pub fn dangling_image_file(paths: &Paths, image: &ImageName) -> Option<PathBuf> {
     let file = paths.image_file(image);
     let target = fs::read_link(&file).ok()?;
     match fs::metadata(&file) {
@@ -204,7 +227,7 @@ pub(super) fn dangling_image_file(paths: &Paths, image: &ImageName) -> Option<Pa
 
 /// Says that the image file of `image` points to `target`, which doesn't
 /// exist.
-pub(super) fn describe_dangling(paths: &Paths, image: &ImageName, target: &Path) -> String {
+pub fn describe_dangling(paths: &Paths, image: &ImageName, target: &Path) -> String {
     format!(
         "the image file {} points to {}, which doesn't exist",
         paths.display(&paths.image_file(image)),
@@ -260,9 +283,9 @@ fn add_calls(
         }
         let Some(content) = shared.remove(&name) else {
             bail!(
-                "the custom script {} calls `{RUN_COMMAND} {name}`, but there is no {}",
+                "the custom script {} calls `{RUN_COMMAND} {name}`, but {}",
                 scripts[caller].name,
-                paths.display(&paths.provision_scripts_dir().join(&name))
+                why_missing(paths, &name)
             );
         };
         scripts.push(CustomScript {
@@ -275,6 +298,26 @@ fn add_calls(
         chain.pop();
     }
     Ok(())
+}
+
+/// Why `script_files` has no shared script `name`, which `ls` may well
+/// show.
+fn why_missing(paths: &Paths, name: &str) -> String {
+    let path = paths.provision_scripts_dir().join(name);
+    let shown = paths.display(&path);
+    match (fs::symlink_metadata(&path), fs::metadata(&path)) {
+        (Err(_), _) => format!("there is no {shown}"),
+        (Ok(_), Err(e)) if e.kind() == std::io::ErrorKind::NotFound => match fs::read_link(&path) {
+            Ok(target) => format!(
+                "{shown} points to {}, which doesn't exist",
+                paths.display(&target)
+            ),
+            Err(_) => format!("there is no {shown}"),
+        },
+        _ if !name.ends_with(".sh") => format!("only *.sh files can be called, not {shown}"),
+        // A directory stops `check_no_subfolders` first.
+        _ => format!("{shown} isn't a file"),
+    }
 }
 
 /// The mounts that `scripts` ask for, in order.
@@ -452,7 +495,24 @@ mod tests {
             "sendit-provision notes.txt\n",
         );
         write_config(&paths, "provision-scripts/notes.txt", "");
-        assert!(script_error(&paths, &rust).contains("there is no"));
+        let error = script_error(&paths, &rust);
+        assert!(
+            error.ends_with(
+                "but only *.sh files can be called, not \
+                 ~/.config/sendit/provision-scripts/notes.txt"
+            ),
+            "{error}"
+        );
+        // Which `ls` lists, so say why they don't count.
+        let scripts = paths.provision_scripts_dir();
+        write_config(&paths, "provision-scripts/c.sh", "sendit-provision d.sh\n");
+        std::os::unix::fs::symlink(home.path().join("dotfiles/d.sh"), scripts.join("d.sh"))
+            .unwrap();
+        assert_eq!(
+            script_error(&paths, &rust),
+            "the custom script c.sh calls `sendit-provision d.sh`, but \
+             ~/.config/sendit/provision-scripts/d.sh points to ~/dotfiles/d.sh, which doesn't exist"
+        );
     }
 
     #[test]
@@ -478,6 +538,9 @@ mod tests {
             ("sendit-provision sub*.sh", "literal file name"),
             ("sendit-provision", "names no script"),
             ("x && sendit-provision; true", "names no script"),
+            // `sendit-provision` would only fail in the VM, with a usage
+            // error, after minutes of building.
+            ("sendit-provision sub.sh sub.sh", "takes one script name"),
         ] {
             write_config(&paths, "images/rust.sh", &format!("echo\n{call}\n"));
             let error = script_error(&paths, &rust);
@@ -576,6 +639,56 @@ mod tests {
         // Errors quote the line of the call, also after a string of several.
         let error = calls("echo \"\n\"\nsendit-provision $x\n").unwrap_err();
         assert!(error.contains("`sendit-provision $x`"), "{error}");
+
+        // The name is the only argument, but redirects may follow, and the
+        // end of a command substitution ends the call.
+        assert_eq!(found("sendit-provision a.sh 2>&1 | tee log\n"), ["a.sh"]);
+        assert_eq!(found("sendit-provision a.sh >log 2>&1\n"), ["a.sh"]);
+        assert_eq!(
+            found("echo \"$(sendit-provision a.sh)\" done; echo `sendit-provision b.sh` too\n"),
+            ["a.sh", "b.sh"]
+        );
+        // An unquoted here-document's body is text too, as are two
+        // here-documents' after one line.
+        assert_eq!(
+            found("cat <<EOF\nsendit-provision no.sh\nEOF\nsendit-provision a.sh\n"),
+            ["a.sh"]
+        );
+        assert_eq!(
+            found(
+                "cat <<A - <<'B'\nsendit-provision no.sh\nA\nsendit-provision no.sh\nB\n\
+                 sendit-provision a.sh\n"
+            ),
+            ["a.sh"]
+        );
+        // Command substitutions nest.
+        assert_eq!(
+            found("x=$(echo $(echo $(sendit-provision a.sh)))\nsendit-provision b.sh\n"),
+            ["a.sh", "b.sh"]
+        );
+        // A `#` in a word doesn't start a comment, and an escaped
+        // apostrophe doesn't start quotes.
+        assert_eq!(found("y=${x#*/}; sendit-provision a.sh\n"), ["a.sh"]);
+        assert_eq!(
+            found("echo it\\'s; sendit-provision a.sh\nsendit-provision b.sh\n"),
+            ["a.sh", "b.sh"]
+        );
+        // Unterminated text ends with the script.
+        for (text, expected) in [
+            (
+                "sendit-provision a.sh; echo 'oops\nsendit-provision b.sh\n",
+                &["a.sh"][..],
+            ),
+            ("sendit-provision a.sh; echo \"oops\n", &["a.sh"]),
+            ("echo $'oops\\", &[]),
+            ("x=$(sendit-provision a.sh\n", &["a.sh"]),
+            ("x=`sendit-provision a.sh", &["a.sh"]),
+            ("x=$(( 1 + $(sendit-provision a.sh", &["a.sh"]),
+            ("cat <<EOF\nsendit-provision no.sh\n", &[]),
+            ("cat <<", &[]),
+        ] {
+            assert_eq!(found(text), expected, "{text:?}");
+        }
     }
 
     #[test]
