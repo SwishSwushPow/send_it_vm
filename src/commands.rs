@@ -204,12 +204,7 @@ pub fn list(paths: &Paths) -> Result<()> {
 }
 
 pub fn images(paths: &Paths, config: &Config) -> Result<()> {
-    let mut vms = BTreeMap::<ImageName, usize>::new();
-    for dir in project_vm::all(paths)? {
-        if let Ok(metadata) = project_vm::metadata(&dir) {
-            *vms.entry(metadata.image).or_default() += 1;
-        }
-    }
+    let vms = vms_per_image(paths)?;
     // Images that VMs were made from stay listed after they were deleted.
     let images: BTreeSet<_> = provision::images(paths, config)?
         .into_iter()
@@ -234,6 +229,70 @@ pub fn images(paths: &Paths, config: &Config) -> Result<()> {
         println!("{:<width$}  {state:<15} {disk:>9}  {count}", image.as_str());
     }
     Ok(())
+}
+
+/// Deletes the `images`, which must all be provisioned, after asking unless
+/// `yes`. Tells which of them `provision --all` would build again.
+pub fn delete_images(
+    paths: &Paths,
+    config: &Config,
+    images: &[ImageName],
+    yes: bool,
+) -> Result<()> {
+    let mut images = images.to_vec();
+    images.sort();
+    images.dedup();
+    for image in &images {
+        ensure!(
+            paths.image_dir(image).is_dir(),
+            "the {image} image isn't provisioned"
+        );
+    }
+    let vms = vms_per_image(paths)?;
+    eprintln!("Base images to delete:");
+    for image in &images {
+        let dir = paths.display(&paths.image_dir(image));
+        match vms.get(image).copied().unwrap_or(0) {
+            0 => eprintln!("  {image}  ({dir})"),
+            1 => eprintln!("  {image}  ({dir}; 1 VM was made from it)"),
+            n => eprintln!("  {image}  ({dir}; {n} VMs were made from it)"),
+        }
+    }
+    let what = match images.len() {
+        1 => format!("the {} image", images[0]),
+        n => format!("{n} images"),
+    };
+    if !yes {
+        confirmed(&format!("Delete {what}?"), PASS_YES)?;
+    }
+    provision::delete_images(paths, &images)?;
+    eprintln!("Deleted {what}.");
+    for image in &images {
+        let file = paths.image_file(image);
+        // A symlink to nothing counts, as for `provision::images`.
+        let when = if fs::symlink_metadata(&file).is_ok() {
+            format!(" while {} exists", paths.display(&file))
+        } else if config.images().any(|named| named == image) {
+            " while the config file names it".to_string()
+        } else if *image == ImageName::default() {
+            String::new()
+        } else {
+            continue;
+        };
+        eprintln!("`sendit provision --all` builds the {image} image again{when}.");
+    }
+    Ok(())
+}
+
+/// How many VMs were made from each image, of those that have any.
+fn vms_per_image(paths: &Paths) -> Result<BTreeMap<ImageName, usize>> {
+    let mut vms = BTreeMap::<ImageName, usize>::new();
+    for dir in project_vm::all(paths)? {
+        if let Ok(metadata) = project_vm::metadata(&dir) {
+            *vms.entry(metadata.image).or_default() += 1;
+        }
+    }
+    Ok(vms)
 }
 
 /// The space a disk file takes up. Blocks shared with other files (as

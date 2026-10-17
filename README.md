@@ -31,6 +31,7 @@ sendit status             # show the VM and its effective settings
 sendit reset              # delete the VM; the next run starts from a fresh copy
 sendit list               # list all project VMs
 sendit images             # list the base images and how many VMs use each
+sendit images --delete go # delete the go image; its VMs keep working
 sendit prune              # delete VMs whose project directory is gone
 sendit prune --outdated   # ... and VMs made from an outdated base image
 sendit prune --all        # delete every VM that isn't running

@@ -114,7 +114,10 @@ fn sendit() -> Result<ExitCode> {
         Command::Stop => project_vm::stop(&paths, &project()?),
         Command::Reset { yes } => commands::reset(&paths, &project()?, *yes),
         Command::List => commands::list(&paths),
-        Command::Images => commands::images(&paths, &Config::load(&paths)?),
+        Command::Images { delete, yes } if !delete.is_empty() => {
+            commands::delete_images(&paths, &Config::load(&paths)?, delete, *yes)
+        }
+        Command::Images { .. } => commands::images(&paths, &Config::load(&paths)?),
         Command::Prune { outdated, all, yes } => {
             let scope = if *all {
                 PruneScope::All

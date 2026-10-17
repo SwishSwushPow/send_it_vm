@@ -72,7 +72,17 @@ pub enum Command {
     /// List all project VMs
     List,
     /// List the base images and how many VMs were made from each
-    Images,
+    Images {
+        /// Delete the IMAGE base image instead (repeatable). The VMs made
+        /// from it keep working; once one is reset, `sendit run` can't make
+        /// it again from the image until `sendit provision IMAGE` builds it
+        /// again
+        #[arg(long, value_name = "IMAGE")]
+        delete: Vec<ImageName>,
+        /// Don't ask for confirmation
+        #[arg(short, long, requires = "delete")]
+        yes: bool,
+    },
     /// Delete VMs whose project directory no longer exists
     Prune {
         /// Also delete VMs made from an outdated base image, which can't run

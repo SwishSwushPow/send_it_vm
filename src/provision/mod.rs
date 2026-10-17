@@ -188,6 +188,25 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
     Ok(images.into_iter().collect())
 }
 
+/// Deletes the `images` and the files their builds left behind: the
+/// console log, and a partial image if a build was killed.
+pub fn delete_images(paths: &Paths, images: &[ImageName]) -> Result<()> {
+    // Not while one of them may be replaced by a new build.
+    let _lock = lock(paths)?;
+    for image in images {
+        let dirs = [
+            paths.image_dir(image),
+            paths.image_partial_dir(image),
+            paths.provision_dir(image),
+        ];
+        for dir in dirs {
+            util::if_exists(fs::remove_dir_all(&dir))
+                .with_context(|| format!("deleting {}", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// The command that builds `image`, e.g. `sendit provision rust --force`.
 fn command(image: &ImageName, force: bool) -> String {
     let mut command = "sendit provision".to_string();

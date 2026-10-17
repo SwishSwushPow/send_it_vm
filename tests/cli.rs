@@ -347,6 +347,96 @@ fn lists_vms_and_images() {
 }
 
 #[test]
+fn deletes_images() {
+    let env = Env::new("delete-images");
+    let cache = env.home.join(".cache/sendit");
+    for image in ["default", "go", "old", "rust"] {
+        let dir = cache.join("images").join(image);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("provisioned.toml"),
+            "revision = 999\ncustom_scripts = []\n",
+        )
+        .unwrap();
+        fs::create_dir_all(cache.join("provision").join(image)).unwrap();
+    }
+    // Left behind by a build that was killed.
+    fs::create_dir_all(cache.join("images/.rust.partial")).unwrap();
+    // `provision --all` builds rust for its image file, go for the config
+    // file, default always, and old not at all.
+    let image_file = env.home.join(".config/sendit/images/rust.sh");
+    fs::create_dir_all(image_file.parent().unwrap()).unwrap();
+    fs::write(&image_file, "true\n").unwrap();
+    env.config("[images.go]\ncpus = 1\n");
+    for uuid in ["c1", "c2"] {
+        let vm = env.home.join(format!(
+            ".sendit/app_6ba7b811-9dad-11d1-80b4-00c04fd430{uuid}"
+        ));
+        fs::create_dir_all(&vm).unwrap();
+        fs::write(
+            vm.join("project.toml"),
+            format!(
+                "project_path = \"{}\"\nimage = \"rust\"\nbase_revision = 999\n",
+                env.project.display()
+            ),
+        )
+        .unwrap();
+    }
+    let vms = env.home.join(".sendit");
+
+    assert_fails_with(
+        &env.sendit(&["images", "--delete", "rust", "--delete", "python"]),
+        "the python image isn't provisioned",
+    );
+    assert_eq!(env.sendit(&["images", "--yes"]).status.code(), Some(2));
+    // Without a terminal, it only lists what it would delete.
+    let output = env.sendit(&["images", "--delete", "rust", "--delete", "go"]);
+    assert_fails_with(&output, "pass --yes");
+    assert_fails_with(
+        &output,
+        "Base images to delete:\n  go  (~/.cache/sendit/images/go)\n  \
+         rust  (~/.cache/sendit/images/rust; 2 VMs were made from it)\n",
+    );
+    assert!(cache.join("images/rust").exists());
+
+    let (_, deleted) = env.ok(&["images", "--delete", "rust", "--delete", "rust", "--yes"]);
+    assert!(
+        deleted.ends_with(
+            "Deleted the rust image.\n`sendit provision --all` builds the rust image again \
+             while ~/.config/sendit/images/rust.sh exists.\n"
+        ),
+        "{deleted}"
+    );
+    for gone in ["images/rust", "images/.rust.partial", "provision/rust"] {
+        assert!(!cache.join(gone).exists(), "{gone}");
+    }
+    assert!(image_file.exists());
+    assert_eq!(fs::read_dir(&vms).unwrap().count(), 2);
+    // Still listed for its VMs.
+    let (images, _) = env.ok(&["images"]);
+    assert!(
+        images
+            .lines()
+            .any(|line| line.split_whitespace().eq(["rust", "missing", "-", "2"])),
+        "{images}"
+    );
+
+    let (_, deleted) = env.ok(&[
+        "images", "--delete", "old", "--delete", "go", "--delete", "default", "--yes",
+    ]);
+    assert!(
+        deleted.ends_with(
+            "Deleted 3 images.\n\
+             `sendit provision --all` builds the default image again.\n\
+             `sendit provision --all` builds the go image again while the config file names it.\n"
+        ),
+        "{deleted}"
+    );
+    assert_eq!(fs::read_dir(cache.join("images")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(cache.join("provision")).unwrap().count(), 0);
+}
+
+#[test]
 fn reports_bad_configuration() {
     let env = Env::new("config-errors");
     let status_fails_with = |config: &str, message: &str| {
