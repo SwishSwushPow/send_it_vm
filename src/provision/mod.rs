@@ -308,11 +308,29 @@ pub fn provision(
     })?;
     fs::write(marker_file(&partial), marker)?;
 
-    if base.exists() {
-        fs::remove_dir_all(&base).with_context(|| format!("removing {}", base.display()))?;
-    }
-    fs::rename(partial.path(), &base)?;
+    swap_in(paths, name)?;
     eprintln!("The {name} image is ready in {}.", paths.display(&base));
+    Ok(())
+}
+
+/// Replaces the `name` image with its partial build. By renaming: a VM
+/// being made from the image meanwhile finds one build or none, never part
+/// of one (see `project_vm::create`).
+pub fn swap_in(paths: &Paths, name: &ImageName) -> Result<()> {
+    let (base, old) = (paths.image_dir(name), paths.image_old_dir(name));
+    // Left behind if deleting it was cut short.
+    util::if_exists(fs::remove_dir_all(&old))
+        .with_context(|| format!("deleting {}", paths.display(&old)))?;
+    util::if_exists(fs::rename(&base, &old))
+        .with_context(|| format!("moving {} aside", paths.display(&base)))?;
+    fs::rename(paths.image_partial_dir(name), &base)
+        .with_context(|| format!("moving the new build to {}", paths.display(&base)))?;
+    if let Err(e) = util::if_exists(fs::remove_dir_all(&old)) {
+        eprintln!(
+            "warning: could not delete the previous build in {}: {e}",
+            paths.display(&old)
+        );
+    }
     Ok(())
 }
 

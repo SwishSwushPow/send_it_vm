@@ -732,13 +732,40 @@ fn create(
         }
     };
     let from = VmDir::new(from);
+    let read_marker = || {
+        util::if_exists(fs::read(&marker)).with_context(|| format!("reading {}", marker.display()))
+    };
+    // `provision` swaps in a new build of the image, and `images --delete`
+    // deletes it, without waiting for VMs being made from it, nor they for
+    // a build, which takes minutes. Unless the image's marker is the same
+    // after cloning as before, the disk may be from another build than the
+    // marker, or gone.
+    let rebuilt = || {
+        anyhow::anyhow!(
+            "the {image} image was rebuilt or deleted while {} was made from it; run again",
+            paths.display(dir.path())
+        )
+    };
+    let copy = read_marker()?;
+    if matches!(source, Source::Base) && copy.is_none() {
+        return Err(rebuilt());
+    }
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     util::fresh_dir(partial.path())?;
     let made = (|| {
-        image::clone_file(&from.disk(), &partial.disk())?;
-        image::clone_file(&from.efi_vars(), &partial.efi_vars())?;
-        util::if_exists(fs::copy(&marker, partial.image_marker()))
-            .with_context(|| format!("copying {}", marker.display()))?;
+        let cloned = (|| {
+            image::clone_file(&from.disk(), &partial.disk())?;
+            image::clone_file(&from.efi_vars(), &partial.efi_vars())
+        })();
+        // Also after an error, which an image deleted meanwhile causes.
+        if matches!(source, Source::Base) && read_marker()? != copy {
+            return Err(rebuilt());
+        }
+        cloned?;
+        if let Some(copy) = &copy {
+            fs::write(partial.image_marker(), copy)
+                .with_context(|| format!("copying {}", marker.display()))?;
+        }
         let metadata = toml::to_string(&Metadata {
             project_path: project.root.clone(),
             image: image.clone(),
@@ -1075,6 +1102,59 @@ mod tests {
         assert!(!made());
         build(4);
         assert!(made());
+    }
+
+    #[test]
+    fn keeps_the_marker_of_the_build_its_disk_is_from() {
+        let temp = crate::util::TempDir::new("vm-rebuilt");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let rust: ImageName = "rust".parse().unwrap();
+        let vm = dir(&paths, &project);
+        // Each build's files say which build they are.
+        let build = |paths: &Paths, n: u64| {
+            let partial = VmDir::new(paths.image_partial_dir(&rust));
+            fs::create_dir_all(partial.path()).unwrap();
+            fs::write(partial.disk(), n.to_string()).unwrap();
+            fs::write(partial.efi_vars(), n.to_string()).unwrap();
+            write_built(&partial.path().join("provisioned.toml"), n);
+            provision::swap_in(paths, &rust).unwrap();
+        };
+        build(&paths, 0);
+        let done = AtomicBool::new(false);
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        let (mut made, mut wrong) = (0, Vec::new());
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for n in 1.. {
+                    if done.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    build(&paths, n);
+                    std::thread::sleep(Duration::from_micros(500));
+                }
+            });
+            for _ in 0..300 {
+                match create(&paths, &project, &vm, &rust, false, &never) {
+                    Ok(_) => made += 1,
+                    // Missing for a moment, or rebuilt meanwhile.
+                    Err(e) if e.to_string().starts_with("the rust image") => continue,
+                    Err(e) => {
+                        wrong.push(format!("{e:#}"));
+                        continue;
+                    }
+                }
+                let disk = fs::read_to_string(vm.disk()).unwrap();
+                let built = provision::marker_built(&vm.image_marker()).unwrap();
+                if built.map(|n| n.to_string()).as_ref() != Some(&disk) {
+                    wrong.push(format!("disk of build {disk}, marker of {built:?}"));
+                }
+                fs::remove_dir_all(vm.path()).unwrap();
+            }
+            done.store(true, Ordering::Relaxed);
+        });
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert!(made > 0, "never made");
     }
 
     /// Writes an image's marker, or a VM's copy of one, to `path`, saying

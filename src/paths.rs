@@ -124,6 +124,12 @@ impl Paths {
         self.images_dir().join(format!(".{image}.partial"))
     }
 
+    /// Where a base image is moved to be deleted, so that nothing finds
+    /// part of it at `image_dir`.
+    pub fn image_old_dir(&self, image: &ImageName) -> PathBuf {
+        self.images_dir().join(format!(".{image}.old"))
+    }
+
     /// Scratch space for provisioning an image (seed ISO, console log).
     pub fn provision_dir(&self, image: &ImageName) -> PathBuf {
         self.cache_dir().join("provision").join(image.as_str())
@@ -378,6 +384,10 @@ mod tests {
         assert_eq!(
             paths.image_partial_dir(&rust),
             Path::new("/home/me/.cache/sendit/images/.rust.partial")
+        );
+        assert_eq!(
+            paths.image_old_dir(&rust),
+            Path::new("/home/me/.cache/sendit/images/.rust.old")
         );
         assert_eq!(
             paths.image_file(&rust),
