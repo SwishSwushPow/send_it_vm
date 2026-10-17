@@ -610,6 +610,24 @@ fn reports_bad_image_files() {
     assert_fails_with(&env.sendit(&["provision", "rust"]), dangling);
     assert!(!env.home.join(".cache/sendit/downloads").exists());
     env.ok(&["status"]);
+    // An image built before the link was made, without an image file, no
+    // longer counts as current, so `status` points to `provision`, which
+    // tells what is wrong.
+    fs::create_dir_all(&built).unwrap();
+    fs::write(
+        built.join("provisioned.toml"),
+        "revision = 1000\ncustom_scripts = []\n",
+    )
+    .unwrap();
+    let (status, _) = env.ok(&["status"]);
+    assert!(
+        status.contains("custom scripts changed; rebuild it with `sendit provision rust --force`"),
+        "{status}"
+    );
+    let (images, _) = env.ok(&["images"]);
+    assert!(images.contains("scripts changed"), "{images}");
+    assert_fails_with(&env.sendit(&["provision", "rust", "--force"]), dangling);
+    assert_fails_with(&env.sendit(&["provision", "rust"]), dangling);
 }
 
 #[test]

@@ -134,7 +134,11 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
         return Ok(BaseState::Outdated);
     }
     // Scripts with a mistake have changed since the build, which resolved
-    // them. `provision` tells about it.
+    // them, and so has an image file that points to nothing, which
+    // `custom_scripts` takes for none. `provision` tells about them.
+    if dangling_image_file(paths, image).is_some() {
+        return Ok(BaseState::ScriptsChanged);
+    }
     let Ok(scripts) = custom_scripts(paths, image) else {
         return Ok(BaseState::ScriptsChanged);
     };
@@ -655,6 +659,13 @@ mod tests {
         assert!(changed());
         // So do scripts with a mistake, which only `provision` reports.
         write_config(&paths, "images/rust.sh", "sendit-provision missing.sh\n");
+        assert!(changed());
+        // And an image file that points to nothing, even for a build made
+        // without one.
+        fs::write(marker_file(&base), "revision = 10\ncustom_scripts = []\n").unwrap();
+        fs::remove_file(paths.image_file(&rust)).unwrap();
+        assert!(!changed());
+        std::os::unix::fs::symlink(home.path().join("gone.sh"), paths.image_file(&rust)).unwrap();
         assert!(changed());
     }
 
