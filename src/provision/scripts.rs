@@ -536,6 +536,27 @@ mod tests {
             ["a.sh", "b.sh"]
         );
         assert_eq!(found("cat <<<'text'\nsendit-provision a.sh\n"), ["a.sh"]);
+        // Nor is a shift in arithmetic, also in double quotes, but a
+        // subshell, written with a space, can hold a here-document.
+        for text in [
+            "x=$((1 << 20))\n",
+            "(( n <<= 1 ))\n",
+            "echo \"$(( 1 << 4 ))\"\n",
+            "x=$(cat <<EOF\nsendit-provision no.sh\nEOF\n)\n",
+            "x=$( (cat <<EOF\nsendit-provision no.sh\nEOF\n) )\n",
+            "( (cat <<EOF\nsendit-provision no.sh\nEOF\n) )\n",
+        ] {
+            assert_eq!(
+                found(&format!("{text}sendit-provision a.sh\n")),
+                ["a.sh"],
+                "{text}"
+            );
+        }
+        // A command substitution in arithmetic runs.
+        assert_eq!(
+            found("x=$(( (1 + 2) << $(sendit-provision a.sh) ))\nsendit-provision b.sh\n"),
+            ["a.sh", "b.sh"]
+        );
         // A line continuation joins lines; a newline ends the command.
         assert_eq!(found("sendit-provision \\\n  a.sh\n"), ["a.sh"]);
         assert!(

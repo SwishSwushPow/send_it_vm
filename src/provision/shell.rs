@@ -9,8 +9,9 @@ use std::str::Chars;
 /// the characters that end a command or redirect (`;&|()<>`) a word of its
 /// own. A word keeps its quotes and backslashes, so that it can't pass for a
 /// literal name, and a command substitution in it, `$(...)` or backticks,
-/// which also adds the words in it. Comments and the bodies of
-/// here-documents are left out.
+/// which also adds the words in it. Arithmetic, `$((...))` or a `((...))`
+/// command, is a word too. Comments and the bodies of here-documents are
+/// left out.
 pub(super) fn shell_words(text: &str) -> Vec<(usize, String)> {
     let mut lexer = Lexer {
         chars: text.chars().peekable(),
@@ -114,11 +115,18 @@ impl Lexer<'_> {
                 }
                 '$' if self.next_if('(') => {
                     let i = self.word(&mut current, line);
-                    self.substitution(i, ')');
+                    self.dollar_paren(i);
                 }
                 '`' => {
                     let i = self.word(&mut current, line);
                     self.substitution(i, '`');
+                }
+                // An arithmetic command; `( (...) )` is a subshell in one.
+                '(' if self.next_if('(') => {
+                    current = None;
+                    let i = self.word(&mut current, line);
+                    self.arithmetic(i, "((");
+                    current = None;
                 }
                 '<' if self.next_if('<') => {
                     current = None;
@@ -158,10 +166,48 @@ impl Lexer<'_> {
                     let escaped = self.next();
                     self.words[i].1.extend(escaped);
                 }
-                '$' if self.next_if('(') => self.substitution(i, ')'),
+                '$' if self.next_if('(') => self.dollar_paren(i),
                 '`' => self.substitution(i, '`'),
                 c => self.words[i].1.push(c),
             }
+        }
+    }
+
+    /// Reads what follows `$(` into `words[i]`: arithmetic if another `(`
+    /// follows right away, otherwise a command substitution.
+    fn dollar_paren(&mut self, i: usize) {
+        if self.next_if('(') {
+            self.arithmetic(i, "$((");
+        } else {
+            self.substitution(i, ')');
+        }
+    }
+
+    /// Reads arithmetic that starts with `open`, `$((` or `((`, up to the
+    /// matching `))` into `words[i]`, and the command substitutions in it as
+    /// code. A `<<` in it is a shift, not a here-document.
+    fn arithmetic(&mut self, i: usize, open: &str) {
+        self.words[i].1.push_str(open);
+        let mut depth: usize = 0;
+        while let Some(c) = self.next() {
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 && self.next_if(')') => {
+                    self.words[i].1.push_str("))");
+                    return;
+                }
+                ')' => depth = depth.saturating_sub(1),
+                '$' if self.next_if('(') => {
+                    self.dollar_paren(i);
+                    continue;
+                }
+                '`' => {
+                    self.substitution(i, '`');
+                    continue;
+                }
+                _ => {}
+            }
+            self.words[i].1.push(c);
         }
     }
 
