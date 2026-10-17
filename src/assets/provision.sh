@@ -425,8 +425,10 @@ echo 'Defaults env_keep += "DEBIAN_FRONTEND"' > /etc/sudoers.d/sendit-provision
 # sendit-provision runs a script at most once per build, since most install
 # scripts can't run twice. It only runs scripts that custom/list names, and
 # finds their files there. In $ran, it notes the exit status of each script
-# that ran (empty while it runs), which a later call of the same script
-# returns.
+# that ran, which a later call of the same script returns. The file is
+# empty while the script runs: a call then fails, since the script hasn't
+# done its work yet, and the build fails if it never finishes, e.g. run in
+# the background and cut off when the VM powers off.
 ran=$(mktemp -d)
 chown "$user" "$ran"
 {
@@ -452,12 +454,16 @@ if [ -z "$file" ]; then
 fi
 if [ -e "$ran/$file" ]; then
     status=$(cat "$ran/$file")
-    if [ "${status:-0}" -eq 0 ]; then
+    if [ -z "$status" ]; then
+        echo "sendit: custom script $1 is still running (called again while it runs, or in the background)"
+        exit 1
+    fi
+    if [ "$status" -eq 0 ]; then
         echo "sendit: custom script $1 already ran"
     else
         echo "sendit: custom script $1 already ran and failed with exit status $status"
     fi
-    exit "${status:-0}"
+    exit "$status"
 fi
 : > "$ran/$file"
 echo "sendit: running custom script $1"
@@ -503,10 +509,15 @@ if [ -e "$seed/custom/main.sh" ]; then
         { echo "sendit: the image file failed"; exit 1; }
 fi
 # A script that failed fails the build, even if the script that called it
-# carried on.
+# carried on, and so does one that never finished, e.g. one that runs in
+# the background.
 failed=
 while read -r file name; do
-    if [ -s "$ran/$file" ] && [ "$(cat "$ran/$file")" -ne 0 ]; then
+    [ -e "$ran/$file" ] || continue
+    code=$(cat "$ran/$file")
+    if [ -z "$code" ]; then
+        failed="$failed $name (never finished)"
+    elif [ "$code" -ne 0 ]; then
         failed="$failed $name"
     fi
 done < "$seed/custom/list"

@@ -68,8 +68,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// runs once. It asks for a mount, `tool.sh` for one that doesn't exist.
 /// Nothing calls `unused.sh`. In the `broken` image, `fail.sh` stops at a
 /// pipeline whose first command fails, `careless.sh` carries on after it
-/// failed, and the image file after calling it again.
-const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
+/// failed, and the image file after calling it again, then ends while
+/// `slow.sh` still runs in the background.
+const CUSTOM_SCRIPTS: [(&str, &str); 8] = [
     (
         "images/custom.sh",
         "# sendit-mount: ~/script-share:/home/dev/script-share\n\
@@ -98,7 +99,9 @@ const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
         "images/broken.sh",
         "sendit-provision careless.sh\n\
          if sendit-provision fail.sh; then echo fail.sh passed; \
-         else echo \"fail.sh failed again: $?\"; fi\n",
+         else echo \"fail.sh failed again: $?\"; fi\n\
+         sendit-provision slow.sh &\n\
+         sleep 3\n",
     ),
     (
         "provision-scripts/careless.sh",
@@ -108,6 +111,7 @@ const CUSTOM_SCRIPTS: [(&str, &str); 7] = [
         "provision-scripts/fail.sh",
         "sh -c 'exit 3' | cat\necho fail.sh \"went on\"\n",
     ),
+    ("provision-scripts/slow.sh", "sleep 30\n"),
 ];
 
 /// Where the tests keep their files.
@@ -194,7 +198,9 @@ fn custom_env() -> &'static Env {
                         "sendit: custom script fail.sh already ran and failed with exit status 3"
                     )
                     && log.contains("fail.sh failed again: 3")
-                    && log.contains("sendit: custom scripts failed: fail.sh"),
+                    && log.contains(
+                        "sendit: custom scripts failed: fail.sh slow.sh (never finished)"
+                    ),
                 "the console log doesn't say which custom script failed"
             );
             env.provision_ok("custom")?;
