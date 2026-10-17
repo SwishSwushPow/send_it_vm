@@ -2,6 +2,7 @@
 //! `images` and `prune`, plus the confirmation prompts they share with `run`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::fs::MetadataExt;
@@ -39,11 +40,11 @@ pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
 
 /// One line for each mount that `confirm_shares` asks about.
 fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
-    // Canonical, like the mounts' host paths, so that a symlinked
-    // ~/.config/sendit is caught through a share of its target. The files
-    // most worth protecting come last, for when they are symlinks of their
-    // own, e.g. into a dotfiles repo. Each link on the way counts too: the
-    // VM could point it elsewhere.
+    // Resolved, like the mounts' host paths, so that a symlinked
+    // ~/.config/sendit is caught through a share of its target. Each link
+    // on the way counts too, directory links included: the VM could point
+    // it elsewhere. The files most worth protecting come last, for when
+    // they are symlinks of their own, e.g. into a dotfiles repo.
     let mut state = Vec::new();
     for (path, what) in [
         (paths.config_dir(), "sendit's configuration"),
@@ -57,12 +58,10 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
         (paths.image_files_dir(), "sendit's image files"),
         (paths.ssh_dir(), "sendit's SSH keys"),
     ] {
-        state.push((canonical(&path), what));
-        state.extend(link_hops(&path).into_iter().map(|hop| (hop, what)));
+        state.extend(protected_paths(&path).into_iter().map(|path| (path, what)));
     }
     // So can each script and image file, which runs with sudo in the next
-    // build. Its target counts even if it doesn't exist (yet), or the VM
-    // could create it.
+    // build.
     for (dir, what) in [
         (
             paths.provision_scripts_dir(),
@@ -71,7 +70,11 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
         (paths.image_files_dir(), "sendit's image files"),
     ] {
         for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            state.extend(link_hops(&entry.path()).into_iter().map(|hop| (hop, what)));
+            state.extend(
+                protected_paths(&entry.path())
+                    .into_iter()
+                    .map(|path| (path, what)),
+            );
         }
     }
     let home = canonical(paths.home());
@@ -103,25 +106,51 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
         .collect()
 }
 
-/// Where the symlink chain that starts at `path` leads, hop by hop: each
-/// path a link points to, canonical but for its last component, so that a
-/// link on the way is itself and not where it leads. The last hop is the
-/// file at the end of the chain, or the path where it would be. Empty unless
-/// `path` is a symlink; a loop ends after 40 hops, as it does for the kernel.
-fn link_hops(path: &Path) -> Vec<PathBuf> {
-    let mut hops = Vec::new();
-    let mut link = path.to_path_buf();
-    while hops.len() < 40
-        && let Ok(target) = fs::read_link(&link)
-    {
-        let next = link.parent().unwrap_or(Path::new("/")).join(target);
-        link = match (next.parent(), next.file_name()) {
-            (Some(dir), Some(name)) => canonical(dir).join(name),
-            _ => canonical(&next),
-        };
-        hops.push(link.clone());
+/// The paths through which the VM could change what the absolute `path`
+/// leads to. `path` is resolved one component at a time, as the kernel
+/// does, and each symlink on the way counts as itself, directory links
+/// included, with the directories before it resolved. Last comes where
+/// `path` ends up, or, once a component doesn't exist, where it would be in
+/// the last directory that does: the VM could create it there. A loop ends
+/// after 32 links, as it does for macOS (kern.maxsymlinks).
+fn protected_paths(path: &Path) -> Vec<PathBuf> {
+    fn push(rest: &mut Vec<OsString>, path: &Path) {
+        rest.extend(path.components().rev().map(|c| c.as_os_str().to_owned()));
     }
-    hops
+    let mut found = Vec::new();
+    let mut dir = PathBuf::from("/");
+    // The components left to resolve, the next one last.
+    let mut rest = Vec::new();
+    push(&mut rest, path);
+    let mut links = 0;
+    while let Some(name) = rest.pop() {
+        if name == "/" {
+            dir = PathBuf::from("/");
+        } else if name == ".." {
+            // `dir` has no links in it, so this is the directory `..` is.
+            dir.pop();
+        } else if name != "." {
+            let next = dir.join(&name);
+            match fs::symlink_metadata(&next) {
+                Ok(metadata) if metadata.is_symlink() => {
+                    links += 1;
+                    let target = fs::read_link(&next);
+                    found.push(next);
+                    match target {
+                        Ok(target) if links <= 32 => push(&mut rest, &target),
+                        _ => return found,
+                    }
+                }
+                Ok(_) => dir = next,
+                Err(_) => {
+                    found.push(rest.iter().rev().fold(next, |path, name| path.join(name)));
+                    return found;
+                }
+            }
+        }
+    }
+    found.push(dir);
+    found
 }
 
 pub fn reset(paths: &Paths, project: &Project, yes: bool) -> Result<()> {
@@ -760,6 +789,71 @@ mod tests {
         assert_eq!(
             risky(&[mount(&home.join("links"), false)]),
             ["~/links (read-write) contains sendit's SSH keys (~/links/ssh)"]
+        );
+    }
+
+    #[test]
+    fn flags_shares_of_directory_links_on_the_way() {
+        let temp = TempDir::new("risky-dir-links");
+        let mount = |host: PathBuf| Mount {
+            host,
+            guest: "/mnt/x".into(),
+            read_only: false,
+        };
+
+        // A script linked into a dotfiles repo whose scripts directory is a
+        // link of its own: the VM could point that one elsewhere.
+        let home = temp.path().join("a");
+        for dir in [".config/sendit/provision-scripts", "store/scripts"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        fs::create_dir_all(home.join("dotfiles")).unwrap();
+        fs::write(home.join("store/scripts/rust.sh"), "").unwrap();
+        std::os::unix::fs::symlink(home.join("store/scripts"), home.join("dotfiles/scripts"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            home.join("dotfiles/scripts/rust.sh"),
+            home.join(".config/sendit/provision-scripts/rust.sh"),
+        )
+        .unwrap();
+        let paths = Paths::new(home.clone());
+        let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
+        assert_eq!(
+            risky("dotfiles"),
+            ["~/dotfiles (read-write) contains sendit's provisioning scripts (~/dotfiles/scripts)"]
+        );
+        assert_eq!(
+            risky("store"),
+            [
+                "~/store (read-write) contains sendit's provisioning scripts (~/store/scripts/rust.sh)"
+            ]
+        );
+        // Where the script would be once the VM creates the directory.
+        fs::remove_dir_all(home.join("store/scripts")).unwrap();
+        assert_eq!(
+            risky("store"),
+            [
+                "~/store (read-write) contains sendit's provisioning scripts (~/store/scripts/rust.sh)"
+            ]
+        );
+
+        // A linked ~/.config, through a link in a dotfiles repo.
+        let home = temp.path().join("b");
+        for dir in ["dotfiles", "store/config/sendit"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        std::os::unix::fs::symlink(home.join("store/config"), home.join("dotfiles/config"))
+            .unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/config"), home.join(".config")).unwrap();
+        let paths = Paths::new(home.clone());
+        let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
+        assert_eq!(
+            risky("dotfiles"),
+            ["~/dotfiles (read-write) contains sendit's configuration (~/dotfiles/config)"]
+        );
+        assert_eq!(
+            risky("store"),
+            ["~/store (read-write) contains sendit's configuration (~/store/config/sendit)"]
         );
     }
 }
