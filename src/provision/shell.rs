@@ -113,6 +113,22 @@ impl Lexer<'_> {
                     self.words[i].1.push('"');
                     self.double_quotes(i);
                 }
+                // ANSI-C quotes, in which a backslash escapes an apostrophe.
+                '$' if self.next_if('\'') => {
+                    let i = self.word(&mut current, line);
+                    self.words[i].1.push_str("$'");
+                    while let Some(c) = self.next() {
+                        self.words[i].1.push(c);
+                        match c {
+                            '\\' => {
+                                let escaped = self.next();
+                                self.words[i].1.extend(escaped);
+                            }
+                            '\'' => break,
+                            _ => {}
+                        }
+                    }
+                }
                 '$' if self.next_if('(') => {
                     let i = self.word(&mut current, line);
                     self.dollar_paren(i);

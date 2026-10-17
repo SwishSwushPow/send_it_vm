@@ -515,6 +515,15 @@ mod tests {
             found("echo 'it''s #2' && sendit-provision a.sh\n"),
             ["a.sh"]
         );
+        // In ANSI-C quotes, a backslash escapes an apostrophe.
+        assert_eq!(
+            found("echo $'it\\'s'; sendit-provision a.sh\nsendit-provision b.sh\n"),
+            ["a.sh", "b.sh"]
+        );
+        assert_eq!(
+            found("x=$(echo $'it\\'s'; sendit-provision a.sh)\nsendit-provision b.sh\n"),
+            ["a.sh", "b.sh"]
+        );
         // Quoted, the word is text, also over several lines.
         assert!(found("echo \"Now run sendit-provision by hand\"\n").is_empty());
         assert!(found("echo 'first\nsendit-provision by hand'\n").is_empty());
