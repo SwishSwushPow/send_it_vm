@@ -193,22 +193,51 @@ pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
 }
 
 /// Deletes the `images` and the files their builds left behind: the
-/// console log, and a partial image if a build was killed.
+/// console log, and a partial image if a build was killed. An error says
+/// which of them are deleted already.
 pub fn delete_images(paths: &Paths, images: &[ImageName]) -> Result<()> {
     // Not while one of them may be replaced by a new build.
     let _lock = lock(paths)?;
-    for image in images {
-        let dirs = [
-            paths.image_dir(image),
-            paths.image_partial_dir(image),
-            paths.provision_dir(image),
-        ];
-        for dir in dirs {
-            util::if_exists(fs::remove_dir_all(&dir))
-                .with_context(|| format!("deleting {}", dir.display()))?;
-        }
+    for (i, image) in images.iter().enumerate() {
+        delete_image(paths, image).with_context(|| match &images[..i] {
+            [] => format!("deleting the {image} image"),
+            done => format!(
+                "deleting the {image} image (deleted already: {})",
+                done.iter()
+                    .map(ImageName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })?;
     }
     Ok(())
+}
+
+/// Deletes the `name` image as `delete_images` does. Moved aside first, an
+/// image that can't be deleted entirely doesn't look provisioned.
+fn delete_image(paths: &Paths, name: &ImageName) -> Result<()> {
+    let dirs = [
+        move_aside(paths, name)?,
+        paths.image_partial_dir(name),
+        paths.provision_dir(name),
+    ];
+    for dir in dirs {
+        util::if_exists(fs::remove_dir_all(&dir))
+            .with_context(|| format!("deleting {}", paths.display(&dir)))?;
+    }
+    Ok(())
+}
+
+/// Moves the `name` image, if there is one, to where it is deleted from
+/// (`Paths::image_old_dir`), which it returns.
+fn move_aside(paths: &Paths, name: &ImageName) -> Result<PathBuf> {
+    let (base, old) = (paths.image_dir(name), paths.image_old_dir(name));
+    // Left behind if deleting it was cut short.
+    util::if_exists(fs::remove_dir_all(&old))
+        .with_context(|| format!("deleting {}", paths.display(&old)))?;
+    util::if_exists(fs::rename(&base, &old))
+        .with_context(|| format!("moving {} aside", paths.display(&base)))?;
+    Ok(old)
 }
 
 /// The command that builds `image`, e.g. `sendit provision rust --force`.
@@ -321,12 +350,8 @@ pub fn provision(
 /// being made from the image meanwhile finds one build or none, never part
 /// of one (see `project_vm::create`).
 pub fn swap_in(paths: &Paths, name: &ImageName) -> Result<()> {
-    let (base, old) = (paths.image_dir(name), paths.image_old_dir(name));
-    // Left behind if deleting it was cut short.
-    util::if_exists(fs::remove_dir_all(&old))
-        .with_context(|| format!("deleting {}", paths.display(&old)))?;
-    util::if_exists(fs::rename(&base, &old))
-        .with_context(|| format!("moving {} aside", paths.display(&base)))?;
+    let base = paths.image_dir(name);
+    let old = move_aside(paths, name)?;
     fs::rename(paths.image_partial_dir(name), &base)
         .with_context(|| format!("moving the new build to {}", paths.display(&base)))?;
     if let Err(e) = util::if_exists(fs::remove_dir_all(&old)) {
@@ -544,6 +569,55 @@ mod tests {
         drop(first);
         assert!(rx.recv_timeout(wait * 10).is_ok(), "still waiting");
         waiting.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn moves_an_image_aside_before_deleting_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = TempDir::new("delete-images");
+        let paths = Paths::new(home.path().to_path_buf());
+        let (go, rust) = (image("go"), image("rust"));
+        for name in [&go, &rust] {
+            let base = VmDir::new(paths.image_dir(name));
+            fs::create_dir_all(base.path()).unwrap();
+            fs::write(base.disk(), "disk").unwrap();
+            fs::write(
+                marker_file(&base),
+                format!("revision = {BASE_REVISION}\ncustom_scripts = []\n"),
+            )
+            .unwrap();
+        }
+        // Something in the rust image that can't be deleted.
+        let stuck = paths.image_dir(&rust).join("stuck");
+        fs::create_dir(&stuck).unwrap();
+        fs::write(stuck.join("file"), "").unwrap();
+        fs::set_permissions(&stuck, fs::Permissions::from_mode(0o500)).unwrap();
+        let error = delete_images(&paths, &[go.clone(), rust.clone()]).unwrap_err();
+        for stuck in [&stuck, &paths.image_old_dir(&rust).join("stuck")] {
+            let _ = fs::set_permissions(stuck, fs::Permissions::from_mode(0o700));
+        }
+        assert_eq!(
+            format!("{error:#}")
+                .split(": Permission denied")
+                .next()
+                .unwrap(),
+            "deleting the rust image (deleted already: go): deleting \
+             ~/.cache/sendit/images/.rust.old"
+        );
+        // Half-deleted, it is no image; the next build or deletion deletes
+        // the rest.
+        assert!(!paths.image_dir(&go).exists() && !paths.image_dir(&rust).exists());
+        assert!(matches!(
+            base_state(&paths, &rust).unwrap(),
+            BaseState::Missing
+        ));
+        assert_eq!(
+            images(&paths, &Config::default()).unwrap(),
+            [ImageName::default()]
+        );
+        fs::create_dir_all(paths.image_partial_dir(&rust)).unwrap();
+        swap_in(&paths, &rust).unwrap();
+        assert!(!paths.image_old_dir(&rust).exists() && paths.image_dir(&rust).exists());
     }
 
     #[test]
