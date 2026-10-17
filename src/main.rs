@@ -75,7 +75,13 @@ fn sendit() -> Result<ExitCode> {
             };
             let mut settings = resolve(&project, &args.settings(), args.fresh)?;
             commands::confirm_shares(&paths, &settings)?;
-            let created = project_vm::create_if_missing(&paths, &project, &settings, args.fresh)?;
+            let created = project_vm::create_if_missing(
+                &paths,
+                &project,
+                &settings,
+                args.fresh,
+                &commands::confirm,
+            )?;
             // Made from the image instead of its running parent VM, from a
             // build whose scripts asked for other shares than the parent's.
             if created.as_ref().is_some_and(|created| created.other_shares) {

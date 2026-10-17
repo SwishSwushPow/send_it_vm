@@ -240,12 +240,14 @@ pub struct Created {
 
 /// Creates the project's VM unless it exists, from the image `settings`
 /// choose. A `fresh` VM is created from the base image even for a git
-/// worktree, whose VM is otherwise a copy of its parent VM.
+/// worktree, whose VM is otherwise a copy of its parent VM; while that
+/// runs, only if the user agrees when asked with `ask`.
 pub fn create_if_missing(
     paths: &Paths,
     project: &Project,
     settings: &VmSettings,
     fresh: bool,
+    ask: Ask,
 ) -> Result<Option<Created>> {
     let dir = dir(paths, project);
     if dir.path().exists() {
@@ -253,7 +255,7 @@ pub fn create_if_missing(
     }
     let image = image(paths, project, settings.image.as_ref());
     let expected = new_vm_mounts(paths, project, &image, fresh)?;
-    let note = create(paths, project, &dir, &image, fresh, &commands::confirm)?;
+    let note = create(paths, project, &dir, &image, fresh, ask)?;
     Ok(Some(Created {
         note,
         other_shares: script_mounts(paths, project, &image, fresh)? != expected,
@@ -622,7 +624,7 @@ enum Source {
 }
 
 /// Asks a yes/no question, like `commands::confirm`.
-type Ask<'a> = &'a dyn Fn(&str, &str) -> Result<bool>;
+pub type Ask<'a> = &'a dyn Fn(&str, &str) -> Result<bool>;
 
 /// The parent VM, locked, if the project has one, it can be copied for
 /// `image` and the VM isn't to be `fresh`; else the base image, with a note
@@ -1003,6 +1005,41 @@ mod tests {
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
         // The parent can start again.
         assert_eq!(state_once_released(&parent), State::Stopped);
+    }
+
+    #[test]
+    fn asks_about_shares_again_if_the_image_asks_for_others() {
+        let temp = crate::util::TempDir::new("vm-other-shares");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = worktree_with_parent(temp.path(), &paths);
+        let rust: ImageName = "rust".parse().unwrap();
+        let base = VmDir::new(paths.image_dir(&rust));
+        write_marker(&provision::marker(&paths, &rust), "~/latest:ro");
+        fs::write(base.disk(), "base disk").unwrap();
+        fs::write(base.efi_vars(), "base efi").unwrap();
+        let settings = VmSettings {
+            cpus: 1,
+            memory: ByteSize::gib(1),
+            disk_size: ByteSize::gib(8),
+            mounts: Vec::new(),
+            expose_git: false,
+            banner: true,
+            image: None,
+        };
+        let yes = |_: &str, _: &str| Ok(true);
+        let vm = dir(&paths, &wt);
+        let _running = lock(&parent, &wt, &[]).unwrap();
+        let other_shares = |parent_marker: &str| {
+            write_marker(&parent.image_marker(), parent_marker);
+            let created = create_if_missing(&paths, &wt, &settings, false, &yes).unwrap();
+            assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
+            fs::remove_dir_all(vm.path()).unwrap();
+            created.unwrap().other_shares
+        };
+
+        // Confirmed for the parent's build, made from the latest.
+        assert!(other_shares("~/parent:ro"));
+        assert!(!other_shares("~/latest:ro"));
     }
 
     #[test]
