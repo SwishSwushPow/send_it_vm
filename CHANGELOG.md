@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- sendit makes `~/.cache/sendit/` and the VM directory (`~/.sendit/` or `$SENDIT_VM_DIR`) accessible only to you, on every run, so directories made by earlier versions are fixed too. Other users of the Mac could read them before: the base images, the VM disks, and the copies of the provisioning scripts that a build keeps, which hold whatever the scripts put there, secrets included.
+
 ## 0.8.0 - 2026-10-17
 
 ### Added

@@ -294,17 +294,19 @@ fn lists_vms_and_images() {
     vm("broken", "c4", None);
 
     let (list, _) = env.ok(&["list"]);
-    let rows: Vec<Vec<_>> = list
+    let project = env.project.display().to_string();
+    let gone = gone.display().to_string();
+    // The paths may contain spaces, as in a checkout under /Volumes/macOS beta.
+    let columns = list.replace(&project, "<project>").replace(&gone, "<gone>");
+    let rows: Vec<Vec<_>> = columns
         .lines()
         .map(|line| line.split_whitespace().collect())
         .collect();
-    let project = env.project.display().to_string();
-    let gone = gone.display().to_string();
     assert_eq!(
         rows,
         [
             vec!["STATE", "DISK", "IMAGE", "PROJECT"],
-            vec!["stopped", "0", "B", "rust", &project],
+            vec!["stopped", "0", "B", "rust", "<project>"],
             vec![
                 "stopped",
                 "0",
@@ -320,10 +322,10 @@ fn lists_vms_and_images() {
                 "rust",
                 "(earlier",
                 "build)",
-                &gone,
+                "<gone>",
                 "(missing)"
             ],
-            vec!["outdated", "0", "B", "default", &project],
+            vec!["outdated", "0", "B", "default", "<project>"],
         ],
         "{list}"
     );

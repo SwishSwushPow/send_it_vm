@@ -142,7 +142,7 @@ Nothing is written into project directories.
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM
 - `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 
-sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups: they hold only what sendit can make again, and a VM's disk changes on every run. Keep anything you can't lose in the project directory.
+sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups: they hold only what sendit can make again, and a VM's disk changes on every run. Keep anything you can't lose in the project directory. It also makes both accessible only to you, since base images, VM disks and the files of a build hold whatever the provisioning scripts put there, secrets included.
 
 To keep the VMs elsewhere, e.g. on an external drive, set `SENDIT_VM_DIR` to an existing directory. sendit uses it in place of `~/.sendit` and won't create it, so a drive that isn't connected is an error. It can't be the root of a volume, your home directory or a folder containing it, and it can't overlap `~/.cache/sendit` or `~/.config/sendit`. Folders in it that aren't VMs are left alone, by `sendit prune --all` too. Things to know about other drives:
 

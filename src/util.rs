@@ -4,6 +4,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::ptr::NonNull;
@@ -62,6 +63,24 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temp);
     }
     written.with_context(|| format!("writing {}", path.display()))
+}
+
+/// Creates `dir` if needed and takes the group's and others' access to it
+/// away, so that other users of the Mac can't look inside: base images, VM
+/// disks and the seed files of a build hold what the provisioning scripts
+/// put there, secrets included.
+pub fn make_private(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mode = fs::metadata(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    if mode & 0o077 != 0 {
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode & !0o077))
+            .with_context(|| format!("restricting access to {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 /// Creates `dir` if needed and keeps it and everything in it out of Time
@@ -151,6 +170,24 @@ impl Drop for TempDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn makes_directories_private() {
+        let temp = TempDir::new("private");
+        let dir = temp.path().join("cache/sendit");
+        let mode = |dir: &Path| fs::metadata(dir).unwrap().permissions().mode() & 0o7777;
+
+        make_private(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        // Made by an older version, readable by everyone.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        make_private(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        // The owner's own bits stay as they are.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o1750)).unwrap();
+        make_private(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o1700);
+    }
 
     #[test]
     fn writes_files_atomically() {

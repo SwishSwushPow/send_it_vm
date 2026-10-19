@@ -42,8 +42,14 @@ fn sendit() -> Result<ExitCode> {
     sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
     // Every time, so that directories made by older versions, or deleted
-    // and made again, are excluded too.
+    // and made again, are private and excluded too.
     for dir in paths.rebuildable_dirs() {
+        if let Err(error) = util::make_private(&dir) {
+            eprintln!(
+                "warning: could not make {} private to you: {error:#}",
+                paths.display(&dir)
+            );
+        }
         if let Err(error) = util::exclude_from_backups(&dir) {
             eprintln!(
                 "warning: could not exclude {} from Time Machine backups: {error:#}",

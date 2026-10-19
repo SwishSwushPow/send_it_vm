@@ -710,6 +710,8 @@ mod tests {
         for (name, _) in script_files(&root.join("provision-scripts")).unwrap() {
             let expected: &[&str] = match name.as_str() {
                 "helix.sh" => &["rust.sh"],
+                "rex.sh" => &["tailscale.sh", "rex-secret.sh"],
+                "tailscale.sh" => &["tailscale-secret.sh"],
                 _ => &[],
             };
             assert_eq!(
