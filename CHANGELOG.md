@@ -9,6 +9,7 @@
 ### Changed
 
 - sendit makes `~/.cache/sendit/` and the VM directory (`~/.sendit/` or `$SENDIT_VM_DIR`) accessible only to you, on every run, so directories made by earlier versions are fixed too. Other users of the Mac could read them before: the base images, the VM disks, and the copies of the provisioning scripts that a build keeps, which hold whatever the scripts put there, secrets included.
+- VM disks go through the Mac's file cache (Virtualization's `Cached` caching mode) instead of the mode Virtualization picks itself. With that one, VMs under memory pressure on the Mac lost writes to their memory, which crashed programs and the kernel, showed up as I/O errors and froze `sendit provision`; with this one, none have so far. UTM does the same for every Linux VM. It takes effect the next time a VM starts.
 
 ## 0.8.0 - 2026-10-17
 

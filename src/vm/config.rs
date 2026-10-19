@@ -102,7 +102,8 @@ fn block_device(path: &Path, read_only: bool) -> Result<Retained<VZStorageDevice
                 VZDiskImageStorageDeviceAttachment::alloc(),
                 &*file_url(path)?,
                 read_only,
-                VZDiskImageCachingMode::Automatic,
+                // Not Automatic: it may hit a memory corruption bug.
+                VZDiskImageCachingMode::Cached,
                 VZDiskImageSynchronizationMode::Full,
             )
             .map_err(ns_error)
