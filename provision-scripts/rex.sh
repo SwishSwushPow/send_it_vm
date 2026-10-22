@@ -25,6 +25,12 @@
 # the mask over the project's .git. With other people on your tailnet,
 # replace "tailscale:*" below with "tailscale:<your login>".
 #
+# On Linux, Rex starts the shell of a new terminal as a non-login shell,
+# which never reads ~/.profile or /etc/profile.d: commands installed into
+# ~/.local/bin, such as claude, would be missing from the PATH, and the
+# shell would start in the home directory instead of the project. So those
+# shells start over as login shells, like the console and `sendit ssh`.
+#
 # Rex's package repository needs a token. On the Mac, save it as
 # ~/.secrets/superlogical/token, then write the script that carries it into
 # the build with
@@ -146,16 +152,32 @@ EOF
 sudo chmod 755 /usr/local/bin/sendit-rex-address
 
 # Shown below the login message, on the console and in `sendit ssh`, but
-# not for commands they run.
+# not for commands they run, nor in Rex itself.
 sudo tee /etc/profile.d/sendit-rex.sh > /dev/null <<'EOF'
 case $- in
 *i*)
-    if sendit_rex=$(sendit-rex-address 10 2>&1); then
-        printf '  Rex: %s (Add Remote Host… in Rex for Mac)\n\n' "$sendit_rex"
-    else
-        printf '  Rex: %s\n\n' "$sendit_rex"
+    if [ -z "${REX_SESSION-}" ]; then
+        if sendit_rex=$(sendit-rex-address 10 2>&1); then
+            printf '  Rex: %s (Add Remote Host… in Rex for Mac)\n\n' "$sendit_rex"
+        else
+            printf '  Rex: %s\n\n' "$sendit_rex"
+        fi
+        unset sendit_rex
     fi
-    unset sendit_rex
     ;;
 esac
+EOF
+
+# Every interactive bash that isn't a login shell reads /etc/bash.bashrc.
+# Only the shells Rex starts itself start over, not a bash started in one;
+# the login shell reads this file again, through /etc/profile, and goes on.
+sudo tee -a /etc/bash.bashrc > /dev/null <<'EOF'
+
+# Written by sendit's rex.sh: Rex starts the shell of a new terminal as a
+# non-login shell, so start over as a login shell.
+if ! shopt -q login_shell && read -r sendit_parent < /proc/$PPID/comm &&
+    [ "$sendit_parent" = rex ]; then
+    exec -l "$BASH"
+fi
+unset sendit_parent
 EOF
