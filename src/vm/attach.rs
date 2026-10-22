@@ -9,7 +9,7 @@
 //! the terminal detaches it.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 
-use super::console::{pipe, poll, pollfd, read, write_all};
+use super::console::{
+    RawMode, ScreenTracker, pipe, poll, pollfd, read, winch_pipe, window_size, write_all,
+};
+use super::{CatchSignals, clear_screen, signals};
 use crate::util;
 
 /// How long the attached client may take to accept output before it is
@@ -311,6 +314,120 @@ fn forward(frames: &mut Frames, guest_input: libc::c_int, size: &RemoteSize) -> 
     }
 }
 
+/// How attaching ended.
+#[derive(Debug)]
+pub enum Attached {
+    /// Another terminal is attached already.
+    Busy,
+    /// This terminal went away, or was told to (SIGHUP, SIGTERM, SIGINT).
+    Detached,
+    /// The VM stopped.
+    Stopped,
+}
+
+/// Attaches this terminal to the console of the VM in the background whose
+/// server listens on `socket`, until the VM stops or the terminal goes away.
+/// Every key goes to the guest. stdin and stdout must be the terminal.
+pub fn attach(socket: &Path) -> Result<Attached> {
+    let (Some(dir), Some(name)) = (socket.parent(), socket.file_name()) else {
+        anyhow::bail!("{} is no socket path", socket.display());
+    };
+    let mut stream = util::in_dir(dir, || UnixStream::connect(name))
+        .with_context(|| format!("connecting to {}", socket.display()))?;
+    let mut greeting = [0u8];
+    stream
+        .read_exact(&mut greeting)
+        .context("the VM's console closed before it let this terminal in")?;
+    match greeting[0] {
+        BUSY => return Ok(Attached::Busy),
+        ACCEPTED => {}
+        other => anyhow::bail!("unexpected greeting {other:#x} from the VM's console"),
+    }
+
+    let resized = winch_pipe()?;
+    let (first_signal, _) = signals();
+    let _signals = CatchSignals::new();
+    clear_screen();
+    let mut raw_mode = RawMode::enable(false)?;
+    let result = (|| {
+        if let Some((rows, cols)) = window_size() {
+            (&stream).write_all(&Message::Size { rows, cols }.encode())?;
+        }
+        relay(
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            &stream,
+            resized,
+            first_signal,
+        )
+    })();
+    if let (Some(raw_mode), Ok((_, alternate))) = (&mut raw_mode, &result) {
+        raw_mode.alternate_screen = *alternate;
+    }
+    result.map(|(ended, _)| ended)
+}
+
+/// Relays `input` (stdin) to the VM's console on `socket` and its output to
+/// `output` (stdout), and the terminal's size whenever `resized` is
+/// signalled, until either side ends or a signal comes after the first
+/// `first_signal`. Returns how it ended, and whether the output left the
+/// terminal on the alternate screen.
+fn relay(
+    input: libc::c_int,
+    output: libc::c_int,
+    socket: &UnixStream,
+    resized: libc::c_int,
+    first_signal: usize,
+) -> Result<(Attached, bool)> {
+    let mut to_vm = socket;
+    let mut screen = ScreenTracker::default();
+    let mut fds = [pollfd(input), pollfd(socket.as_raw_fd()), pollfd(resized)];
+    let mut buf = [0u8; 4096];
+    let ended = loop {
+        // Signals don't interrupt the wait, so it has a timeout.
+        if signals().0 > first_signal {
+            break Attached::Detached;
+        }
+        if poll(&mut fds, 200).context("waiting for the terminal")? == 0 {
+            continue;
+        }
+        // The VM's output first, up to its end.
+        if fds[1].revents != 0 {
+            match read(socket.as_raw_fd(), &mut buf) {
+                Ok(n @ 1..) => {
+                    screen.feed(&buf[..n]);
+                    if write_all(output, &buf[..n]).is_err() {
+                        break Attached::Detached;
+                    }
+                }
+                _ => break Attached::Stopped,
+            }
+        }
+        if fds[0].revents != 0 {
+            match read(input, &mut buf) {
+                Ok(n @ 1..) => {
+                    let message = Message::Input(buf[..n].to_vec());
+                    if to_vm.write_all(&message.encode()).is_err() {
+                        break Attached::Stopped;
+                    }
+                }
+                _ => break Attached::Detached,
+            }
+        }
+        if fds[2].revents != 0 {
+            let _ = read(resized, &mut buf);
+            if let Some((rows, cols)) = window_size()
+                && to_vm
+                    .write_all(&Message::Size { rows, cols }.encode())
+                    .is_err()
+            {
+                break Attached::Stopped;
+            }
+        }
+    };
+    Ok((ended, screen.alternate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +473,68 @@ mod tests {
         let mut too_long = Frames::default();
         too_long.push(b"i\x7f\0\0\0");
         assert!(too_long.next().is_err());
+    }
+
+    #[test]
+    fn relays_every_key_and_the_vms_output() {
+        let (input, typed) = pipe().unwrap();
+        let (shown, output) = pipe().unwrap();
+        let (socket, mut server) = UnixStream::pair().unwrap();
+        let (resized, _resize) = pipe().unwrap();
+        let (input_fd, output_fd) = (input.as_raw_fd(), output.as_raw_fd());
+        let thread = std::thread::spawn(move || {
+            let first_signal = signals().0;
+            let result = relay(
+                input_fd,
+                output_fd,
+                &socket,
+                resized.as_raw_fd(),
+                first_signal,
+            );
+            drop((input, output));
+            result.unwrap()
+        });
+
+        // No key detaches: Ctrl-C and Ctrl-] go to the guest too.
+        write_all(typed.as_raw_fd(), b"ls\r\x03\x1d").unwrap();
+        let mut frames = Frames::default();
+        let mut forwarded = Vec::new();
+        let mut buf = [0u8; 64];
+        while forwarded.len() < 5 {
+            let n = server.read(&mut buf).unwrap();
+            frames.push(&buf[..n]);
+            while let Some(message) = frames.next().unwrap() {
+                let Message::Input(data) = message else {
+                    panic!("{message:?}")
+                };
+                forwarded.extend(data);
+            }
+        }
+        assert_eq!(forwarded, b"ls\r\x03\x1d");
+
+        server.write_all(b"\x1b[?1049hhi").unwrap();
+        let mut got = [0u8; 10];
+        File::from(shown).read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"\x1b[?1049hhi");
+        // The VM stopped, on the alternate screen.
+        drop(server);
+        assert!(matches!(thread.join().unwrap(), (Attached::Stopped, true)));
+
+        // The terminal went away.
+        let (input, typed) = pipe().unwrap();
+        let (_shown, output) = pipe().unwrap();
+        let (socket, _server) = UnixStream::pair().unwrap();
+        let (resized, _resize) = pipe().unwrap();
+        drop(typed);
+        let ended = relay(
+            input.as_raw_fd(),
+            output.as_raw_fd(),
+            &socket,
+            resized.as_raw_fd(),
+            signals().0,
+        )
+        .unwrap();
+        assert!(matches!(ended, (Attached::Detached, false)));
     }
 
     /// Retries `f` for up to a second until it returns true.

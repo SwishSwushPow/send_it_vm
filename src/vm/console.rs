@@ -365,8 +365,8 @@ const ALTERNATE_SCREEN_OFF: [&[u8]; 3] = [b"\x1b[?1049l", b"\x1b[?1047l", b"\x1b
 /// the cursor back to where it was last saved, and later output overwrites
 /// what is shown there.
 #[derive(Default)]
-struct ScreenTracker {
-    alternate: bool,
+pub(super) struct ScreenTracker {
+    pub(super) alternate: bool,
     /// The end of the output so far, for sequences split across reads.
     tail: Vec<u8>,
 }
@@ -374,7 +374,7 @@ struct ScreenTracker {
 impl ScreenTracker {
     const LONGEST: usize = 8;
 
-    fn feed(&mut self, data: &[u8]) {
+    pub(super) fn feed(&mut self, data: &[u8]) {
         self.tail.extend_from_slice(data);
         // Sequences already seen in the kept tail are seen again, which
         // changes nothing: the last one wins either way.
@@ -461,7 +461,7 @@ fn terminal_port(
 
 /// The read end of the pipe `on_winch` writes to, created on first use.
 /// Only called on the main thread.
-fn winch_pipe() -> io::Result<libc::c_int> {
+pub(super) fn winch_pipe() -> io::Result<libc::c_int> {
     if let Some(winch) = WINCH_READ.get() {
         return Ok(winch.as_raw_fd());
     }
@@ -683,14 +683,14 @@ const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
 /// the guest unmodified, unless `keep_signals` leaves Ctrl-C raising SIGINT.
 /// On drop, resets what the guest may have changed and restores the previous
 /// mode.
-struct RawMode {
+pub(super) struct RawMode {
     original: libc::termios,
     /// Whether the guest left the terminal on the alternate screen.
-    alternate_screen: bool,
+    pub(super) alternate_screen: bool,
 }
 
 impl RawMode {
-    fn enable(keep_signals: bool) -> Result<Option<Self>> {
+    pub(super) fn enable(keep_signals: bool) -> Result<Option<Self>> {
         if !io::stdin().is_terminal() {
             return Ok(None);
         }

@@ -32,6 +32,7 @@ use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineDelegate};
 
 use crate::config::ByteSize;
 use crate::mounts::Share;
+pub use attach::{Attached, attach as attach_console};
 use console::Console;
 
 /// How long to wait for the guest to shut down after asking it to, or after
