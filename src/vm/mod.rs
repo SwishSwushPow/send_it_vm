@@ -153,7 +153,7 @@ impl VmDir {
     }
 
     /// State of the current run: the lock, the meta share and, for a VM
-    /// running in the background, its console log.
+    /// running in the background, its console log and socket.
     pub fn run_dir(&self) -> PathBuf {
         self.0.join("run")
     }
@@ -167,6 +167,12 @@ impl VmDir {
     /// login console wrote, since it last started.
     pub fn console_log(&self) -> PathBuf {
         self.run_dir().join("console.log")
+    }
+
+    /// Where the `sendit run` process of a VM in the background lets
+    /// `sendit attach` reach its console.
+    pub fn console_socket(&self) -> PathBuf {
+        self.run_dir().join("console.sock")
     }
 
     /// The host side of the `sendit-meta` share.
@@ -213,10 +219,12 @@ pub enum ConsoleMode {
     /// Nothing of the VM: another program has the terminal, e.g. `ssh`.
     /// Signals still shut the VM down.
     Hidden,
-    /// In the background, without a terminal: the login console gets no
-    /// input, which it would take an EOF from and log out, and its output
-    /// goes to stdout, a log file.
-    Detached,
+    /// In the background, without a terminal: the login console's output
+    /// goes to stdout, a log file. It gets input only from a terminal
+    /// attached through the socket at this path (`sendit attach`), which
+    /// gets its output too; the input stays open meanwhile, as the console
+    /// would take an EOF and log out.
+    Detached(PathBuf),
     /// Provisioning: show and log the guest's /dev/hvc1.
     Provision(ProvisionLog),
 }
@@ -329,7 +337,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
         ),
         ConsoleMode::Login => ("VM starting. Type exit to shut it down.", "Shutting down."),
         // Whatever has the terminal says what to do; detached, there is none.
-        ConsoleMode::Hidden | ConsoleMode::Detached => ("VM starting.", "Shutting down."),
+        ConsoleMode::Hidden | ConsoleMode::Detached(_) => ("VM starting.", "Shutting down."),
     };
     notice(started);
 

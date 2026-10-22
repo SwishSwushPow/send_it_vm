@@ -28,6 +28,7 @@ use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachment};
 
 use super::ConsoleMode;
+use super::attach::{ClientSlot, RemoteSize, Server};
 
 /// Ctrl-]
 const ESCAPE_KEY: u8 = 0x1d;
@@ -54,6 +55,8 @@ pub struct Console {
     /// Finished on drop, before the terminal is restored.
     output: Option<OutputCopy>,
     raw_mode: Option<RawMode>,
+    /// Detached, where a terminal can attach to the login console.
+    _server: Option<Server>,
 }
 
 impl Console {
@@ -65,23 +68,50 @@ impl Console {
     /// terminal. Nothing in the guest reads keystrokes then, so Ctrl-C keeps
     /// raising SIGINT instead of reaching the guest. Hidden, the terminal is
     /// left alone, apart from telling the guest its type and size. Detached,
-    /// the login console's output goes to stdout, and stdin isn't read.
+    /// stdin isn't read, and the login console's output goes to stdout; a
+    /// terminal can attach to it through the socket the mode names, which
+    /// then has it as a terminal of its own.
     pub fn attach(mode: &ConsoleMode) -> Result<Self> {
         let log = match mode {
             ConsoleMode::Provision(log) => Some(log),
-            ConsoleMode::Login | ConsoleMode::Hidden | ConsoleMode::Detached => None,
+            ConsoleMode::Login | ConsoleMode::Hidden | ConsoleMode::Detached(_) => None,
         };
         let provisioning = log.is_some();
         let hidden = matches!(mode, ConsoleMode::Hidden);
-        let detached = matches!(mode, ConsoleMode::Detached);
         let escapes = Arc::new(AtomicUsize::new(0));
         let (stop_read, stop) = pipe()?;
         let guest_stopping = Arc::new(AtomicBool::new(false));
-        let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?)?;
+        // First: binding the socket changes the working directory for a
+        // moment, which no other thread may see.
+        let (server, client, size, attached_input) = match mode {
+            ConsoleMode::Detached(socket) => {
+                let (read_end, write_end) = pipe()?;
+                let client = Arc::new(ClientSlot::default());
+                let size = Arc::new(RemoteSize::new()?);
+                let server = Server::start(
+                    socket,
+                    write_end,
+                    client.clone(),
+                    size.clone(),
+                    stop_read.try_clone()?,
+                )?;
+                (
+                    Some(server),
+                    Some(client),
+                    SizeSource::Remote(size),
+                    Some(read_end),
+                )
+            }
+            _ => (None, None, SizeSource::Local(winch_pipe()?), None),
+        };
+        let detached = server.is_some();
+        let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?, size)?;
         // Hidden, stdin belongs to the program that has the terminal;
-        // detached, there is no terminal.
-        let input = if hidden || detached {
+        // detached, there is no terminal, only the one attached, if any.
+        let input = if hidden {
             None
+        } else if let Some(read_end) = attached_input {
+            Some(file_handle(read_end))
         } else {
             let (read_end, write_end) = pipe()?;
             let counter = escapes.clone();
@@ -105,7 +135,7 @@ impl Console {
                 })
                 .transpose()?;
             let (output_read, output_write) = pipe()?;
-            let output = OutputCopy::start(output_read, shown, log)?;
+            let output = OutputCopy::start(output_read, shown, log, client)?;
             if provisioning {
                 (null_output()?, file_handle(output_write), Some(output))
             } else {
@@ -126,6 +156,7 @@ impl Console {
             } else {
                 RawMode::enable(provisioning)?
             },
+            _server: server,
         })
     }
 
@@ -197,10 +228,22 @@ struct OutputCopy {
 }
 
 impl OutputCopy {
-    fn start(from_guest: OwnedFd, shown: ShownOutput, log: Option<File>) -> Result<Self> {
+    fn start(
+        from_guest: OwnedFd,
+        shown: ShownOutput,
+        log: Option<File>,
+        client: Option<Arc<ClientSlot>>,
+    ) -> Result<Self> {
         let (finish_read, finish) = pipe()?;
         let thread = std::thread::spawn(move || {
-            copy_output(from_guest, libc::STDOUT_FILENO, shown, log, finish_read)
+            copy_output(
+                from_guest,
+                libc::STDOUT_FILENO,
+                shown,
+                log,
+                client,
+                finish_read,
+            )
         });
         Ok(Self { finish, thread })
     }
@@ -214,7 +257,8 @@ impl OutputCopy {
 }
 
 /// Copies guest output to `to` (stdout) as far as `shown` allows, and all
-/// of it to `log` if given, until the guest side closes, or `finish` closes
+/// of it to `log` and an attached `client` if given, until the guest side
+/// closes, or `finish` closes
 /// and no more output has come for `OUTPUT_GRACE_MS`. Returns whether the
 /// output left the terminal on the alternate screen.
 fn copy_output(
@@ -222,6 +266,7 @@ fn copy_output(
     to: libc::c_int,
     mut shown: ShownOutput,
     mut log: Option<File>,
+    client: Option<Arc<ClientSlot>>,
     finish: OwnedFd,
 ) -> bool {
     let mut fds = [pollfd(from_guest.as_raw_fd()), pollfd(finish.as_raw_fd())];
@@ -242,6 +287,9 @@ fn copy_output(
             let _ = write_all(to, show);
             if let Some(log) = &mut log {
                 let _ = log.write_all(&buf[..n]);
+            }
+            if let Some(client) = &client {
+                client.send(&buf[..n]);
             }
         } else if fds[1].revents != 0 {
             // poll() skips negative descriptors.
@@ -360,17 +408,51 @@ extern "C" fn on_winch(_: libc::c_int) {
     }
 }
 
+/// Where the size of the terminal the guest's console is on comes from.
+pub(super) enum SizeSource {
+    /// This process's terminal, resized when the `winch_pipe` descriptor
+    /// it holds becomes readable.
+    Local(libc::c_int),
+    /// The terminal attached to a VM in the background.
+    Remote(Arc<RemoteSize>),
+}
+
+impl SizeSource {
+    /// Readable when the terminal has been resized.
+    fn resized_fd(&self) -> libc::c_int {
+        match self {
+            Self::Local(winch) => *winch,
+            Self::Remote(size) => size.wake_fd(),
+        }
+    }
+
+    fn current(&self) -> Option<(u16, u16)> {
+        match self {
+            Self::Local(_) => window_size(),
+            Self::Remote(size) => size.current(),
+        }
+    }
+
+    /// The sizes to send after a resize, in order.
+    fn resizes(&self) -> Vec<(u16, u16)> {
+        match self {
+            Self::Local(_) => window_size().into_iter().collect(),
+            Self::Remote(size) => size.take_pending(),
+        }
+    }
+}
+
 /// Creates the port that carries the terminal's type and size to the guest,
 /// and starts sending them there until `stop` closes. `guest_stopping` is
 /// set once the guest says it is shutting down.
 fn terminal_port(
     guest_stopping: Arc<AtomicBool>,
     stop: OwnedFd,
+    size: SizeSource,
 ) -> Result<Retained<VZFileHandleSerialPortAttachment>> {
-    let winch = winch_pipe()?;
     let (guest_reads, to_guest) = pipe()?;
     let (from_guest, guest_writes) = pipe()?;
-    std::thread::spawn(move || send_terminal(to_guest, from_guest, winch, &guest_stopping, stop));
+    std::thread::spawn(move || send_terminal(to_guest, from_guest, size, &guest_stopping, stop));
     Ok(serial_port(
         Some(&file_handle(guest_reads)),
         &file_handle(guest_writes),
@@ -404,19 +486,20 @@ fn winch_pipe() -> io::Result<libc::c_int> {
 /// does once it is ready), the size goes as a "<rows> <cols>" line, followed
 /// by a "term <TERM> [<COLORTERM>]" line: the guest starts the login once it
 /// has the type, so the size must be there by then. The size alone goes
-/// again whenever `winch` is signalled. A "!" from the guest says that it has
-/// started shutting down, which sets `guest_stopping`. Ends when `stop`
-/// closes.
+/// again whenever `size` says that the terminal was resized. A "!" from the
+/// guest says that it has started shutting down, which sets
+/// `guest_stopping`. Ends when `stop` closes.
 fn send_terminal(
     to_guest: OwnedFd,
     from_guest: OwnedFd,
-    winch: libc::c_int,
+    size: SizeSource,
     guest_stopping: &AtomicBool,
     stop: OwnedFd,
 ) {
+    let resized_fd = size.resized_fd();
     let mut fds = [
         pollfd(stop.as_raw_fd()),
-        pollfd(winch),
+        pollfd(resized_fd),
         pollfd(from_guest.as_raw_fd()),
     ];
     let mut buf = [0u8; 64];
@@ -433,7 +516,7 @@ fn send_terminal(
             match read(pollfd.fd, &mut buf) {
                 // poll() skips negative descriptors.
                 Ok(0) | Err(_) => pollfd.fd = -1,
-                Ok(_) if pollfd.fd == winch => resized = true,
+                Ok(_) if pollfd.fd == resized_fd => resized = true,
                 Ok(n) => {
                     asked |= buf[..n].contains(&b'?');
                     if buf[..n].contains(&b'!') {
@@ -442,11 +525,20 @@ fn send_terminal(
                 }
             }
         }
+        // Asked, the current size is all the guest needs.
+        let sizes = match (asked, resized) {
+            (true, resized) => {
+                if resized {
+                    size.resizes();
+                }
+                size.current().into_iter().collect()
+            }
+            (false, true) => size.resizes(),
+            (false, false) => Vec::new(),
+        };
         let mut message = String::new();
-        if (asked || resized)
-            && let Some(size) = terminal_size()
-        {
-            message.push_str(&size);
+        for (rows, cols) in sizes {
+            message.push_str(&format!("{rows} {cols}\n"));
         }
         if asked {
             message.push_str(&terminal_type());
@@ -480,12 +572,6 @@ fn is_terminal_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
-}
-
-/// The terminal's size as a "<rows> <cols>" line, if stdout is a terminal.
-fn terminal_size() -> Option<String> {
-    let (rows, cols) = window_size()?;
-    Some(format!("{rows} {cols}\n"))
 }
 
 /// The terminal's rows and columns, if stdout is a terminal.
@@ -657,8 +743,96 @@ impl Drop for RawMode {
 mod tests {
     use super::*;
     use crate::util::TempDir;
-    use std::io::Read;
+    use crate::vm::attach::CLIENT_WRITE_TIMEOUT;
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn sends_the_attached_terminals_size() {
+        let (guest_reads, to_guest) = pipe().unwrap();
+        let (from_guest, guest_writes) = pipe().unwrap();
+        let (stop_read, stop) = pipe().unwrap();
+        let size = Arc::new(RemoteSize::new().unwrap());
+        let source = SizeSource::Remote(size.clone());
+        let thread = std::thread::spawn(move || {
+            send_terminal(
+                to_guest,
+                from_guest,
+                source,
+                &AtomicBool::new(false),
+                stop_read,
+            )
+        });
+        let mut guest = BufReader::new(File::from(guest_reads));
+        let mut line = || {
+            let mut line = String::new();
+            guest.read_line(&mut line).unwrap();
+            line
+        };
+
+        size.set(30, 100);
+        assert_eq!(line(), "30 100\n");
+        // Asked, the guest gets the size and the type.
+        write_all(guest_writes.as_raw_fd(), b"?").unwrap();
+        assert_eq!(line(), "30 100\n");
+        assert_eq!(line(), terminal_type());
+        drop(stop);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn copies_output_to_the_attached_client() {
+        let (from_guest, guest_writes) = pipe().unwrap();
+        let (shown, to) = pipe().unwrap();
+        let temp = TempDir::new("client-log");
+        let log_path = temp.path().join("console.log");
+        let log = File::create(&log_path).unwrap();
+        let (finish_read, finish) = pipe().unwrap();
+        let (attached, mut peer) = UnixStream::pair().unwrap();
+        let client = Arc::new(ClientSlot::default());
+        client.set(Some(attached));
+        let to_fd = to.as_raw_fd();
+        let copied = client.clone();
+        let thread = std::thread::spawn(move || {
+            let alternate = copy_output(
+                from_guest,
+                to_fd,
+                ShownOutput::new(None),
+                Some(log),
+                Some(copied),
+                finish_read,
+            );
+            drop(to);
+            alternate
+        });
+
+        write_all(guest_writes.as_raw_fd(), b"hello").unwrap();
+        let mut got = [0u8; 5];
+        peer.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hello");
+        OutputCopy { finish, thread }.finish();
+        assert_eq!(std::fs::read(&log_path).unwrap(), b"hello");
+        let mut out = Vec::new();
+        File::from(shown).read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"hello");
+        drop(guest_writes);
+    }
+
+    #[test]
+    fn drops_a_client_that_stops_reading() {
+        let (attached, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let client = ClientSlot::default();
+        client.set(Some(attached));
+        let start = Instant::now();
+        client.send(&vec![b'x'; 1 << 20]);
+        assert!(start.elapsed() < CLIENT_WRITE_TIMEOUT + Duration::from_secs(1));
+        // Detached: the client gets what fit, then the end.
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert!(got.len() < 1 << 20);
+    }
 
     #[test]
     fn forwards_input_until_stopped() {
@@ -739,6 +913,7 @@ mod tests {
                 to_fd,
                 ShownOutput::new(None),
                 Some(log),
+                None,
                 finish_read,
             );
             drop(to);

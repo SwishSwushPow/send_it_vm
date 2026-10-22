@@ -15,11 +15,16 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 
 use super::console::{pipe, poll, pollfd, read, write_all};
 use crate::util;
+
+/// How long the attached client may take to accept output before it is
+/// detached: the console's output, and with it the log, waits meanwhile.
+pub(super) const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The server's first byte: the client is attached.
 const ACCEPTED: u8 = b'+';
@@ -113,13 +118,33 @@ impl ClientSlot {
     pub(super) fn send(&self, data: &[u8]) {
         let mut slot = lock(&self.0);
         if let Some(stream) = slot.as_mut()
-            && stream.write_all(data).is_err()
+            && !send_within(stream, data, CLIENT_WRITE_TIMEOUT)
         {
             // The server reads from its own copy, and sees it end.
             let _ = stream.shutdown(Shutdown::Both);
             *slot = None;
         }
     }
+}
+
+/// Writes all of `data` to `stream` within `timeout`; false if it can't.
+/// A write timeout alone would apply to each write, and a partial one
+/// would start it over.
+fn send_within(stream: &mut UnixStream, mut data: &[u8], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !data.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_write_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match stream.write(data) {
+            Ok(0) => return false,
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 /// The attached client's terminal size, for the guest's console.
@@ -292,7 +317,6 @@ mod tests {
     use crate::util::TempDir;
     use std::fs::File;
     use std::io::Read;
-    use std::time::{Duration, Instant};
 
     #[test]
     fn frames_survive_split_reads() {

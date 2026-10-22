@@ -403,7 +403,7 @@ pub fn run(
         shares: mounts::prepare(settings, &dir.meta())?,
         seed: None,
         console: if detach == Detach::Background {
-            ConsoleMode::Detached
+            ConsoleMode::Detached(dir.console_socket())
         } else if command.is_empty() {
             ConsoleMode::Login
         } else {
