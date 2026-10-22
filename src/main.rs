@@ -143,6 +143,7 @@ fn sendit() -> Result<ExitCode> {
             }
             Ok(())
         }
+        Command::Attach => project_vm::attach(&paths, &project()?),
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),
         Command::Reset { yes } => {

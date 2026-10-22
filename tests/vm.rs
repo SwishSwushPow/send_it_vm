@@ -568,10 +568,25 @@ impl Project {
         rows: u16,
         cols: u16,
     ) -> Terminal {
+        let mut terminal = self.in_terminal(&["run"], term, colorterm, rows, cols);
+        terminal.expect("dev@sendit", BOOT_TIMEOUT);
+        terminal
+    }
+
+    /// Starts `sendit <args>` on a pseudo-terminal of `rows` and `cols` with
+    /// `TERM` and `COLORTERM` set as given.
+    fn in_terminal(
+        &self,
+        args: &[&str],
+        term: &str,
+        colorterm: Option<&str>,
+        rows: u16,
+        cols: u16,
+    ) -> Terminal {
         let (master, slave) = openpty(rows, cols);
         let log = self.next_log();
 
-        let mut cmd = self.command(&["run"]);
+        let mut cmd = self.command(args);
         cmd.env("TERM", term)
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
@@ -598,16 +613,14 @@ impl Project {
         });
 
         // From here on, a failure shuts the VM down.
-        let mut terminal = Terminal {
+        Terminal {
             child,
             master: File::from(master),
             slave,
             output,
             seen: 0,
             log,
-        };
-        terminal.expect("dev@sendit", BOOT_TIMEOUT);
-        terminal
+        }
     }
 }
 
@@ -1043,6 +1056,55 @@ fn runs_in_the_background() {
     assert_eq!(status.code(), Some(130), "{output}");
     assert!(output.contains("Shutting down the VM"), "{output}");
     assert!(project.ok(&["status"]).contains("stopped"));
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn attaches_to_the_background_console() {
+    let _slot = vm_slot();
+    let project = Project::new("attach");
+    let started = project.sendit(&["run", "-d"]);
+    assert!(started.status.success(), "{}", text(&started.stderr));
+    assert!(text(&started.stderr).contains("attach` attaches to its console"));
+    let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 40, 120);
+    term.expect("Attached to the VM's console.", COMMAND_TIMEOUT);
+    term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-40 120-END");
+    // Every key reaches the guest: Ctrl-C interrupts, Ctrl-] doesn't detach.
+    term.type_line(r#"echo "SLEEP-$((5 + 5))"; sleep 300"#);
+    term.expect("SLEEP-10", CONSOLE_TIMEOUT);
+    sleep(Duration::from_secs(1));
+    term.send(b"\x1d\x03");
+    term.type_line(r#"echo "ALIVE-$((3 + 3))""#);
+    term.expect("ALIVE-6", CONSOLE_TIMEOUT);
+
+    // One terminal at a time (checked on a terminal: without one, attach
+    // fails before it connects); `run` points here.
+    let mut second = project.in_terminal(&["attach"], "xterm-256color", None, 40, 120);
+    second.expect("attached in another terminal already", COMMAND_TIMEOUT);
+    assert!(
+        !wait_timeout(&mut second.child, COMMAND_TIMEOUT)
+            .unwrap()
+            .success()
+    );
+    assert_fails_with(&project.sendit(&["run"]), "attach` attaches to its console");
+
+    // Closing the window detaches; the VM keeps running.
+    // SAFETY: plain syscall; the child hasn't been waited for, so its PID
+    // is still its own.
+    unsafe { libc::kill(term.child.id() as libc::pid_t, libc::SIGHUP) };
+    let status = wait_timeout(&mut term.child, STOP_TIMEOUT).unwrap();
+    assert!(status.success(), "{status}");
+    assert_fails_with(&project.sendit(&["attach"]), "needs a terminal");
+    assert_eq!(project.ok(&["ssh", "echo", "up"]), "up\n");
+
+    // Attached again, at another size; `exit` shuts the VM down.
+    let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 30, 100);
+    term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-30 100-END");
+    term.type_line("exit");
+    term.expect("The VM has stopped.", STOP_TIMEOUT);
+    term.wait_for_exit();
+    assert!(project.ok(&["status"]).contains("stopped"));
+    assert!(!project.vm_dir().join("run/console.sock").exists());
 }
 
 #[test]

@@ -18,7 +18,8 @@
 //! `run --detach` runs the VM in a second `sendit run` process, which it
 //! starts in a session of its own, without a terminal, and leaves running
 //! once the VM answers over SSH. It is sendit run again rather than a fork:
-//! forking without exec isn't safe once Objective-C is loaded.
+//! forking without exec isn't safe once Objective-C is loaded. That process
+//! serves the VM's login console on `run/console.sock`, for `sendit attach`.
 
 use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
@@ -380,7 +381,7 @@ pub fn run(
         // the lock first, the process in the background fails at once, long before
         // the other VM could answer over SSH, and this one reports it.
         if try_lock(&dir)?.is_none() {
-            return Err(already_running(project, command));
+            return Err(already_running(&dir, project, command));
         }
         // Here, where it is seen; the disk grows in the background.
         warn_if_shrinking(paths, &dir, settings)?;
@@ -388,6 +389,13 @@ pub fn run(
         return run_in_background(paths, project, &dir);
     }
     let _lock = lock(&dir, project, command)?;
+    // Left over by a process in the background that was killed: a VM in
+    // the foreground can't be attached to.
+    if detach == Detach::No {
+        let socket = dir.console_socket();
+        util::if_exists(fs::remove_file(&socket))
+            .with_context(|| format!("removing {}", socket.display()))?;
+    }
     // The VM starts now: its boot and banner come first on the screen. A
     // command's output follows on from what is there, like any command's.
     if command.is_empty() && detach == Detach::No {
@@ -509,8 +517,9 @@ fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i3
         Ok(true) => {
             let sendit = sendit_for(project);
             say(&format!(
-                "The VM runs in the background: `{sendit} ssh` opens a shell in it, and \
-                 `{sendit} stop` shuts it down. Its console output goes to {}.",
+                "The VM runs in the background: `{sendit} attach` attaches to its console, \
+                 `{sendit} ssh` opens a shell in it, and `{sendit} stop` shuts it down. Its \
+                 console output goes to {}.",
                 paths.display(&log_path)
             ));
             Ok(0)
@@ -640,6 +649,53 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
         std::thread::sleep(Duration::from_millis(250));
     }
     eprintln!("Stopped.");
+    Ok(())
+}
+
+/// Attaches this terminal to the console of the project's VM running in the
+/// background, until the VM stops or the terminal goes away.
+pub fn attach(paths: &Paths, project: &Project) -> Result<()> {
+    let dir = dir(paths, project);
+    let sendit = sendit_for(project);
+    ensure!(
+        state(&dir)? != State::Stopped,
+        "the VM is not running; `{sendit} run -d` starts it in the background"
+    );
+    let socket = dir.console_socket();
+    ensure!(
+        socket.exists(),
+        "the VM runs attached to another terminal; `{sendit} ssh` opens another shell in it"
+    );
+    ensure!(
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        "attaching to the VM's console needs a terminal; `{sendit} ssh` runs commands without one"
+    );
+    say(
+        "Attached to the VM's console. Closing the terminal detaches it and leaves the VM \
+         running; `exit` shuts the VM down.",
+    );
+    match vm::attach_console(&socket)? {
+        vm::Attached::Busy => bail!(
+            "the VM's console is attached in another terminal already; closing that terminal \
+             detaches it, and `{sendit} ssh` opens another shell in the VM"
+        ),
+        // The console closes just before the VM's lock is released, or if
+        // its process stopped serving this terminal.
+        vm::Attached::Stopped => {
+            let start = Instant::now();
+            while state(&dir)? != State::Stopped {
+                ensure!(
+                    start.elapsed() < STOP_WAIT,
+                    "the VM's console closed, but the VM is still running; `{sendit} attach` \
+                     attaches to it again"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            say("The VM has stopped.");
+        }
+        // The terminal is usually gone.
+        vm::Attached::Detached => {}
+    }
     Ok(())
 }
 
@@ -1077,17 +1133,25 @@ fn warn_if_shrinking(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Resul
 /// run `command` there or else open a shell.
 fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<File> {
     let Some(mut file) = try_lock(dir)? else {
-        return Err(already_running(project, command));
+        return Err(already_running(dir, project, command));
     };
     write!(file, "{}", std::process::id())?;
     Ok(file)
 }
 
-/// The error for starting the project's VM while it runs, which says how
-/// to reach it, to run `command` there or else open a shell.
-fn already_running(project: &Project, command: &[String]) -> anyhow::Error {
-    let ssh = format!("{} ssh", sendit_for(project));
+/// The error for starting the project's VM in `dir` while it runs, which
+/// says how to reach it, to run `command` there or else open a shell, or
+/// attach to its console if it runs in the background.
+fn already_running(dir: &VmDir, project: &Project, command: &[String]) -> anyhow::Error {
+    let sendit = sendit_for(project);
+    let ssh = format!("{sendit} ssh");
     let (ssh, does) = if command.is_empty() {
+        if dir.console_socket().exists() {
+            return anyhow::anyhow!(
+                "this project's VM is already running in the background; `{sendit} attach` \
+                 attaches to its console, and `{ssh}` opens another shell in it"
+            );
+        }
         (ssh, "opens another shell in it")
     } else {
         (
@@ -1670,6 +1734,36 @@ mod tests {
             command.ends_with(&format!(
                 "`{ssh} cargo test 'it'\\''s'` runs the command there"
             )),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn points_to_attach_in_the_background() {
+        let temp = crate::util::TempDir::new("vm-background");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        fs::create_dir_all(vm.run_dir()).unwrap();
+        let _running = lock(&vm, &project, &[]).unwrap();
+        File::create(vm.console_socket()).unwrap();
+        let error = |command: &[&str]| {
+            let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+            lock(&vm, &project, &command).unwrap_err().to_string()
+        };
+        let sendit = format!("sendit -C {}", quote(&temp.path().to_string_lossy()));
+        let shell = error(&[]);
+        assert_eq!(
+            shell,
+            format!(
+                "this project's VM is already running in the background; `{sendit} attach` \
+                 attaches to its console, and `{sendit} ssh` opens another shell in it"
+            )
+        );
+        // With a command, attaching doesn't help.
+        let command = error(&["ls"]);
+        assert!(
+            command.ends_with(&format!("`{sendit} ssh ls` runs the command there")),
             "{command}"
         );
     }

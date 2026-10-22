@@ -5,6 +5,7 @@
 ### Added
 
 - `sendit run -d` (`--detach`) runs the VM in the background: sendit returns once the VM answers over SSH, `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. Ctrl-C before then, or the VM not answering within two minutes, shuts it down again. Its console output goes to `run/console.log` in the VM's directory.
+- `sendit attach` attaches the terminal to the console of the VM running in the background. Every key goes to the VM, Ctrl-C and Ctrl-] included; closing the terminal detaches it and leaves the VM running, and `exit` shuts the VM down. One terminal can be attached at a time.
 
 ### Changed
 

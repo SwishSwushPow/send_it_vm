@@ -41,6 +41,9 @@ pub enum Command {
     /// Boot the project's VM and attach to its console, run a command in it,
     /// or run it in the background
     Run(RunArgs),
+    /// Attach this terminal to the console of the project's VM running in
+    /// the background; closing the terminal detaches it
+    Attach,
     /// Open an SSH session to the project's running VM
     Ssh {
         /// Log in as root, e.g. to install packages; the VM's user has no
@@ -308,6 +311,13 @@ mod tests {
         };
         assert!(!args.detach);
         assert_eq!(args.command, ["ls", "-d"]);
+    }
+
+    #[test]
+    fn parses_attach() {
+        let cli = Cli::try_parse_from(["sendit", "attach"]).unwrap();
+        assert!(matches!(cli.command, Command::Attach));
+        assert!(Cli::try_parse_from(["sendit", "attach", "x"]).is_err());
     }
 
     #[test]

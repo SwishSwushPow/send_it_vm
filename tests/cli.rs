@@ -249,6 +249,11 @@ fn has_nothing_to_list_or_remove_without_vms() {
         &env.sendit(&["ssh", "--", "true"]),
         "the VM is not running; start it with `sendit run`",
     );
+    assert_fails_with(
+        &env.sendit(&["attach"]),
+        // Named with -C, as the test doesn't run in the project.
+        "run -d` starts it in the background",
+    );
 }
 
 #[test]
