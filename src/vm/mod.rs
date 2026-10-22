@@ -224,7 +224,9 @@ pub enum ConsoleMode {
     /// goes to stdout, a log file. It gets input only from a terminal
     /// attached through the socket at this path (`sendit attach`), which
     /// gets its output too; the input stays open meanwhile, as the console
-    /// would take an EOF and log out.
+    /// would take an EOF and log out. Logging out detaches the terminal
+    /// instead of shutting the VM down, if the guest was told it runs in
+    /// the background (see `mounts::prepare`).
     Detached(PathBuf),
     /// Provisioning: show and log the guest's /dev/hvc1.
     Provision(ProvisionLog),
@@ -294,7 +296,7 @@ impl VmDelegate {
 /// Boots the VM with the console attached to this terminal and blocks until
 /// it has stopped. Must be called on the main thread, the only one that
 /// drains the main dispatch queue the VM runs on. The guest powers off when
-/// its console user logs out. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
+/// its console user logs out, unless it runs in the background. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
 /// or SIGINT) asks the guest to shut down; doing it again, or the guest not
 /// reacting in time, stops the VM forcibly. So does a shutdown the guest
 /// started on its own that takes too long. Returns the signal that asked

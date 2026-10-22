@@ -54,9 +54,16 @@ echo '127.0.1.1 sendit' >> /etc/hosts
 # Logging out of the console shuts the VM down, so `exit` ends `sendit run`
 # instead of logging in again: the getty isn't restarted, and once it has
 # ended, the VM powers off unless it is already shutting down or rebooting.
+# In the background (`sendit run -d`, which sendit-mounts marks), it only
+# ends `sendit attach`: a "." on /dev/hvc2 tells sendit to detach the
+# terminal, and the console logs in again for the next one.
 cat > /usr/local/sbin/sendit-console-logout <<'EOF'
 #!/bin/sh
 [ "$(systemctl is-system-running)" = stopping ] && exit 0
+if [ -e /run/sendit/console-background ]; then
+    echo . > /dev/hvc2 || true
+    exec systemctl --no-block start serial-getty@hvc0.service
+fi
 echo 'Logged out; shutting down the VM.' > /dev/hvc0 || true
 exec systemctl --no-block --no-wall poweroff
 EOF

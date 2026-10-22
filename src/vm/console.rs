@@ -12,7 +12,8 @@
 //! sendit sends the terminal's size and type ($TERM and $COLORTERM), and it
 //! sends the size again whenever the terminal is resized (SIGWINCH). A
 //! service in the guest applies them to the console. The guest also says
-//! there when it starts shutting down.
+//! there when it starts shutting down, and, in the background, when the
+//! console's user has logged out, which detaches the attached terminal.
 
 use std::fs::File;
 use std::io::{self, IsTerminal, Write};
@@ -105,7 +106,12 @@ impl Console {
             _ => (None, None, SizeSource::Local(winch_pipe()?), None),
         };
         let detached = server.is_some();
-        let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?, size)?;
+        let terminal = terminal_port(
+            guest_stopping.clone(),
+            client.clone(),
+            stop_read.try_clone()?,
+            size,
+        )?;
         // Hidden, stdin belongs to the program that has the terminal;
         // detached, there is no terminal, only the one attached, if any.
         let input = if hidden {
@@ -444,15 +450,27 @@ impl SizeSource {
 
 /// Creates the port that carries the terminal's type and size to the guest,
 /// and starts sending them there until `stop` closes. `guest_stopping` is
-/// set once the guest says it is shutting down.
+/// set once the guest says it is shutting down, and the terminal attached
+/// to `client`, if any, is logged out when the guest says that the
+/// console's user has.
 fn terminal_port(
     guest_stopping: Arc<AtomicBool>,
+    client: Option<Arc<ClientSlot>>,
     stop: OwnedFd,
     size: SizeSource,
 ) -> Result<Retained<VZFileHandleSerialPortAttachment>> {
     let (guest_reads, to_guest) = pipe()?;
     let (from_guest, guest_writes) = pipe()?;
-    std::thread::spawn(move || send_terminal(to_guest, from_guest, size, &guest_stopping, stop));
+    std::thread::spawn(move || {
+        send_terminal(
+            to_guest,
+            from_guest,
+            size,
+            &guest_stopping,
+            client.as_deref(),
+            stop,
+        )
+    });
     Ok(serial_port(
         Some(&file_handle(guest_reads)),
         &file_handle(guest_writes),
@@ -488,12 +506,15 @@ pub(super) fn winch_pipe() -> io::Result<libc::c_int> {
 /// has the type, so the size must be there by then. The size alone goes
 /// again whenever `size` says that the terminal was resized. A "!" from the
 /// guest says that it has started shutting down, which sets
-/// `guest_stopping`. Ends when `stop` closes.
+/// `guest_stopping`; a "." that the console's user logged out while the VM
+/// runs in the background, which logs out the terminal attached to
+/// `client`. Ends when `stop` closes.
 fn send_terminal(
     to_guest: OwnedFd,
     from_guest: OwnedFd,
     size: SizeSource,
     guest_stopping: &AtomicBool,
+    client: Option<&ClientSlot>,
     stop: OwnedFd,
 ) {
     let resized_fd = size.resized_fd();
@@ -521,6 +542,11 @@ fn send_terminal(
                     asked |= buf[..n].contains(&b'?');
                     if buf[..n].contains(&b'!') {
                         guest_stopping.store(true, Ordering::Relaxed);
+                    }
+                    if let Some(client) = client
+                        && buf[..n].contains(&b'.')
+                    {
+                        client.log_out();
                     }
                 }
             }
@@ -743,7 +769,7 @@ impl Drop for RawMode {
 mod tests {
     use super::*;
     use crate::util::TempDir;
-    use crate::vm::attach::CLIENT_WRITE_TIMEOUT;
+    use crate::vm::attach::{CLIENT_WRITE_TIMEOUT, Message};
     use std::io::{BufRead, BufReader, Read};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
@@ -755,12 +781,16 @@ mod tests {
         let (stop_read, stop) = pipe().unwrap();
         let size = Arc::new(RemoteSize::new().unwrap());
         let source = SizeSource::Remote(size.clone());
+        let (attached, mut peer) = UnixStream::pair().unwrap();
+        let client = ClientSlot::default();
+        client.set(Some(attached));
         let thread = std::thread::spawn(move || {
             send_terminal(
                 to_guest,
                 from_guest,
                 source,
                 &AtomicBool::new(false),
+                Some(&client),
                 stop_read,
             )
         });
@@ -777,6 +807,12 @@ mod tests {
         write_all(guest_writes.as_raw_fd(), b"?").unwrap();
         assert_eq!(line(), "30 100\n");
         assert_eq!(line(), terminal_type());
+        // The console's user logged out: the attached terminal is told so,
+        // and detached.
+        write_all(guest_writes.as_raw_fd(), b".\n").unwrap();
+        let mut got = Vec::new();
+        peer.read_to_end(&mut got).unwrap();
+        assert_eq!(got, Message::LoggedOut.encode());
         drop(stop);
         thread.join().unwrap();
     }
@@ -808,9 +844,10 @@ mod tests {
         });
 
         write_all(guest_writes.as_raw_fd(), b"hello").unwrap();
-        let mut got = [0u8; 5];
+        let sent = Message::Output(b"hello".to_vec()).encode();
+        let mut got = vec![0u8; sent.len()];
         peer.read_exact(&mut got).unwrap();
-        assert_eq!(&got, b"hello");
+        assert_eq!(got, sent);
         OutputCopy { finish, thread }.finish();
         assert_eq!(std::fs::read(&log_path).unwrap(), b"hello");
         let mut out = Vec::new();

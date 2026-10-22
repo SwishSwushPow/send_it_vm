@@ -3,10 +3,11 @@
 //! The `sendit run` process of a VM in the background listens on a Unix
 //! socket in the VM's run directory, and `sendit attach` connects to it.
 //! The server's first byte says whether the client is let in: one client
-//! at a time. After that, the client sends messages (keystrokes, and the
-//! terminal's size), and the server sends the console's output as it is.
-//! There is no key to detach: every key goes to the guest, and closing
-//! the terminal detaches it.
+//! at a time. After that, both send messages: the client keystrokes and the
+//! terminal's size, the server the console's output, and that the console's
+//! user logged out. There is no key to detach: every key goes to the guest.
+//! Closing the terminal detaches it, and so does logging out, after which
+//! the guest logs in on the console again for the next client.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -30,13 +31,16 @@ use crate::util;
 pub(super) const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The server's first byte: the client is attached.
-const ACCEPTED: u8 = b'+';
+const ACCEPTED: u8 = b'=';
 /// The server's first byte: another client is attached already.
 const BUSY: u8 = b'-';
 
 /// Tags of the client's messages.
 const INPUT: u8 = b'i';
 const SIZE: u8 = b's';
+/// Tags of the server's messages.
+const OUTPUT: u8 = b'o';
+const LOGGED_OUT: u8 = b'l';
 
 /// A tag and a big-endian `u32` length precede each message's payload.
 const HEADER: usize = 5;
@@ -44,13 +48,17 @@ const HEADER: usize = 5;
 /// The longest payload a message may have.
 const MAX_FRAME: u32 = 64 * 1024;
 
-/// What the client sends.
+/// What the client and the server send each other.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Message {
-    /// Typed into the terminal.
+    /// To the server: typed into the terminal.
     Input(Vec<u8>),
-    /// The terminal's size.
+    /// To the server: the terminal's size.
     Size { rows: u16, cols: u16 },
+    /// To the client: the console's output.
+    Output(Vec<u8>),
+    /// To the client, last: the console's user logged out.
+    LoggedOut,
 }
 
 impl Message {
@@ -58,6 +66,8 @@ impl Message {
         let (tag, payload) = match self {
             Self::Input(data) => (INPUT, data.clone()),
             Self::Size { rows, cols } => (SIZE, [rows.to_be_bytes(), cols.to_be_bytes()].concat()),
+            Self::Output(data) => (OUTPUT, data.clone()),
+            Self::LoggedOut => (LOGGED_OUT, Vec::new()),
         };
         let mut bytes = vec![tag];
         bytes.extend((payload.len() as u32).to_be_bytes());
@@ -66,7 +76,7 @@ impl Message {
     }
 }
 
-/// Reassembles the client's messages from what arrives of them.
+/// Reassembles messages from what arrives of them.
 #[derive(Default)]
 pub(super) struct Frames {
     buf: Vec<u8>,
@@ -84,9 +94,13 @@ impl Frames {
         }
         let tag = self.buf[0];
         let len = u32::from_be_bytes([self.buf[1], self.buf[2], self.buf[3], self.buf[4]]);
-        ensure!(matches!(tag, INPUT | SIZE), "unknown message {tag:#x}");
+        ensure!(
+            matches!(tag, INPUT | SIZE | OUTPUT | LOGGED_OUT),
+            "unknown message {tag:#x}"
+        );
         ensure!(len <= MAX_FRAME, "message of {len} bytes");
         ensure!(tag != SIZE || len == 4, "size of {len} bytes");
+        ensure!(tag != LOGGED_OUT || len == 0, "logout of {len} bytes");
         let end = HEADER + len as usize;
         if self.buf.len() < end {
             return Ok(None);
@@ -95,10 +109,12 @@ impl Frames {
         self.buf.drain(..end);
         Ok(Some(match tag {
             INPUT => Message::Input(payload),
-            _ => Message::Size {
+            SIZE => Message::Size {
                 rows: u16::from_be_bytes([payload[0], payload[1]]),
                 cols: u16::from_be_bytes([payload[2], payload[3]]),
             },
+            OUTPUT => Message::Output(payload),
+            _ => Message::LoggedOut,
         }))
     }
 }
@@ -116,17 +132,37 @@ impl ClientSlot {
         *lock(&self.0) = stream;
     }
 
-    /// Sends `data` to the client, if one is attached. One that can't take
-    /// it is detached.
+    /// Sends the console's output `data` to the client, if one is
+    /// attached. One that can't take it is detached.
     pub(super) fn send(&self, data: &[u8]) {
         let mut slot = lock(&self.0);
         if let Some(stream) = slot.as_mut()
-            && !send_within(stream, data, CLIENT_WRITE_TIMEOUT)
+            && !send_within(
+                stream,
+                &Message::Output(data.to_vec()).encode(),
+                CLIENT_WRITE_TIMEOUT,
+            )
         {
-            // The server reads from its own copy, and sees it end.
-            let _ = stream.shutdown(Shutdown::Both);
-            *slot = None;
+            detach(&mut slot);
         }
+    }
+
+    /// Tells the client, if one is attached, that the console's user logged
+    /// out, and detaches it.
+    pub(super) fn log_out(&self) {
+        let mut slot = lock(&self.0);
+        if let Some(stream) = slot.as_mut() {
+            send_within(stream, &Message::LoggedOut.encode(), CLIENT_WRITE_TIMEOUT);
+            detach(&mut slot);
+        }
+    }
+}
+
+/// Ends the connection to the client in `slot`, if any.
+fn detach(slot: &mut Option<UnixStream>) {
+    if let Some(stream) = slot.take() {
+        // The server reads from its own copy, and sees it end.
+        let _ = stream.shutdown(Shutdown::Both);
     }
 }
 
@@ -334,7 +370,7 @@ fn forward(
                 *sized = true;
             }
             Ok(None) => return true,
-            Err(_) => return false,
+            Ok(Some(Message::Output(_) | Message::LoggedOut)) | Err(_) => return false,
         }
     }
 }
@@ -346,12 +382,15 @@ pub enum Attached {
     Busy,
     /// This terminal went away, or was told to (SIGHUP, SIGTERM, SIGINT).
     Detached,
-    /// The VM stopped.
+    /// The console's user logged out; the VM keeps running.
+    LoggedOut,
+    /// The VM stopped, or its console dropped this terminal.
     Stopped,
 }
 
 /// Attaches this terminal to the console of the VM in the background whose
-/// server listens on `socket`, until the VM stops or the terminal goes away.
+/// server listens on `socket`, until the VM stops, its console's user logs
+/// out, or the terminal goes away.
 /// Every key goes to the guest. stdin and stdout must be the terminal.
 /// Once it is let in, `notice` goes on top of the cleared screen.
 pub fn attach(socket: &Path, notice: &str) -> Result<Attached> {
@@ -367,7 +406,10 @@ pub fn attach(socket: &Path, notice: &str) -> Result<Attached> {
     match greeting[0] {
         BUSY => return Ok(Attached::Busy),
         ACCEPTED => {}
-        other => anyhow::bail!("unexpected greeting {other:#x} from the VM's console"),
+        other => anyhow::bail!(
+            "unexpected greeting {other:#x} from the VM's console; it may have been \
+             started by another version of sendit"
+        ),
     }
 
     let resized = winch_pipe()?;
@@ -396,9 +438,9 @@ pub fn attach(socket: &Path, notice: &str) -> Result<Attached> {
 
 /// Relays `input` (stdin) to the VM's console on `socket` and its output to
 /// `output` (stdout), and the terminal's size whenever `resized` is
-/// signalled, until either side ends or a signal comes after the first
-/// `first_signal`. Returns how it ended, and whether the output left the
-/// terminal on the alternate screen.
+/// signalled, until either side ends, the console's user logs out, or a
+/// signal comes after the first `first_signal`. Returns how it ended, and
+/// whether the output left the terminal on the alternate screen.
 fn relay(
     input: libc::c_int,
     output: libc::c_int,
@@ -408,6 +450,7 @@ fn relay(
 ) -> Result<(Attached, bool)> {
     let mut to_vm = socket;
     let mut screen = ScreenTracker::default();
+    let mut frames = Frames::default();
     let mut fds = [pollfd(input), pollfd(socket.as_raw_fd()), pollfd(resized)];
     let mut buf = [0u8; 4096];
     let ended = loop {
@@ -420,14 +463,12 @@ fn relay(
         }
         // The VM's output first, up to its end.
         if fds[1].revents != 0 {
-            match read(socket.as_raw_fd(), &mut buf) {
-                Ok(n @ 1..) => {
-                    screen.feed(&buf[..n]);
-                    if write_all(output, &buf[..n]).is_err() {
-                        break Attached::Detached;
-                    }
-                }
-                _ => break Attached::Stopped,
+            let Ok(n @ 1..) = read(socket.as_raw_fd(), &mut buf) else {
+                break Attached::Stopped;
+            };
+            frames.push(&buf[..n]);
+            if let Some(ended) = show(&mut frames, output, &mut screen)? {
+                break ended;
             }
         }
         if fds[0].revents != 0 {
@@ -455,6 +496,30 @@ fn relay(
     Ok((ended, screen.alternate))
 }
 
+/// Writes the console's output in `frames` to `output`, as far as it has
+/// arrived. Returns how attaching ended, if it has.
+fn show(
+    frames: &mut Frames,
+    output: libc::c_int,
+    screen: &mut ScreenTracker,
+) -> Result<Option<Attached>> {
+    while let Some(message) = frames.next().context("reading from the VM's console")? {
+        match message {
+            Message::Output(data) => {
+                screen.feed(&data);
+                if write_all(output, &data).is_err() {
+                    return Ok(Some(Attached::Detached));
+                }
+            }
+            Message::LoggedOut => return Ok(Some(Attached::LoggedOut)),
+            Message::Input(_) | Message::Size { .. } => {
+                anyhow::bail!("unexpected message from the VM's console")
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +537,8 @@ mod tests {
             }
             .encode(),
         );
+        bytes.extend(Message::Output(b"\x1b[?1049h".to_vec()).encode());
+        bytes.extend(Message::LoggedOut.encode());
         let mut frames = Frames::default();
         let mut got = Vec::new();
         for byte in bytes {
@@ -488,6 +555,8 @@ mod tests {
                     rows: 30,
                     cols: 100
                 },
+                Message::Output(b"\x1b[?1049h".to_vec()),
+                Message::LoggedOut,
             ]
         );
 
@@ -500,6 +569,9 @@ mod tests {
         let mut too_long = Frames::default();
         too_long.push(b"i\x7f\0\0\0");
         assert!(too_long.next().is_err());
+        let mut long_logout = Frames::default();
+        long_logout.push(b"l\0\0\0\x01x");
+        assert!(long_logout.next().is_err());
     }
 
     #[test]
@@ -539,13 +611,38 @@ mod tests {
         }
         assert_eq!(forwarded, b"ls\r\x03\x1d");
 
-        server.write_all(b"\x1b[?1049hhi").unwrap();
+        // Split across reads.
+        let sent = Message::Output(b"\x1b[?1049hhi".to_vec()).encode();
+        server.write_all(&sent[..3]).unwrap();
+        server.write_all(&sent[3..]).unwrap();
         let mut got = [0u8; 10];
         File::from(shown).read_exact(&mut got).unwrap();
         assert_eq!(&got, b"\x1b[?1049hhi");
         // The VM stopped, on the alternate screen.
         drop(server);
         assert!(matches!(thread.join().unwrap(), (Attached::Stopped, true)));
+
+        // The console's user logged out, after the last output.
+        let (input, _typed) = pipe().unwrap();
+        let (shown, output) = pipe().unwrap();
+        let (socket, mut server) = UnixStream::pair().unwrap();
+        let (resized, _resize) = pipe().unwrap();
+        let mut sent = Message::Output(b"logout\r\n".to_vec()).encode();
+        sent.extend(Message::LoggedOut.encode());
+        server.write_all(&sent).unwrap();
+        let ended = relay(
+            input.as_raw_fd(),
+            output.as_raw_fd(),
+            &socket,
+            resized.as_raw_fd(),
+            signals().0,
+        )
+        .unwrap();
+        assert!(matches!(ended, (Attached::LoggedOut, false)));
+        drop(output);
+        let mut out = Vec::new();
+        File::from(shown).read_to_end(&mut out).unwrap();
+        assert_eq!(out, b"logout\r\n");
 
         // The terminal went away.
         let (input, typed) = pipe().unwrap();
@@ -630,15 +727,40 @@ mod tests {
         assert!(eventually(|| size.current() == Some((30, 100))));
         // What the VM writes reaches the attached client.
         client.send(b"output");
-        let mut shown = [0u8; 6];
+        let sent = Message::Output(b"output".to_vec()).encode();
+        let mut shown = vec![0u8; sent.len()];
         first.read_exact(&mut shown).unwrap();
-        assert_eq!(&shown, b"output");
+        assert_eq!(shown, sent);
 
         let mut second = connect();
         assert_eq!(greeting(&mut second), Some(BUSY));
 
         // Once the first one has gone, the next one is let in.
         drop(first);
+        let mut third = None;
+        assert!(eventually(|| {
+            let mut stream = connect();
+            let accepted = greeting(&mut stream) == Some(ACCEPTED);
+            third = accepted.then_some(stream);
+            accepted
+        }));
+        let mut third = third.unwrap();
+        // Once its size has arrived, it is surely the client.
+        third
+            .write_all(
+                &Message::Size {
+                    rows: 31,
+                    cols: 101,
+                }
+                .encode(),
+            )
+            .unwrap();
+        assert!(eventually(|| size.current() == Some((31, 101))));
+        // Logged out, it is told so and detached, and the next is let in.
+        client.log_out();
+        let mut got = Vec::new();
+        third.read_to_end(&mut got).unwrap();
+        assert_eq!(got, Message::LoggedOut.encode());
         assert!(eventually(|| greeting(&mut connect()) == Some(ACCEPTED)));
 
         drop(stop);

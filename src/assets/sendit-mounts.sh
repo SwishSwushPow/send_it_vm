@@ -11,6 +11,8 @@
 #   hide <guest path>     (masks a directory or file with an empty read-only one)
 #   workdir <guest path>  (where interactive login shells start)
 #   timezone <name>       (the host's time zone, e.g. Europe/Berlin)
+#   console background    (the VM runs in the background: logging out of the
+#                          console only detaches the terminal attached to it)
 set -u
 
 user=dev
@@ -152,6 +154,16 @@ EOF
                 ln -sf "$zone" /etc/localtime || fail "could not set the time zone to $rest"
             else
                 fail "unknown time zone $rest; staying on $(readlink /etc/localtime)"
+            fi
+            ;;
+        console)
+            # Read by sendit-console-logout. /run starts out empty on every
+            # boot, so without the line, logging out shuts the VM down.
+            if [ "$rest" = background ]; then
+                mkdir -p /run/sendit && : > /run/sendit/console-background ||
+                    fail "could not mark the console as in the background"
+            else
+                fail "unknown console mode $rest"
             fi
             ;;
         '' | '#'*) ;;

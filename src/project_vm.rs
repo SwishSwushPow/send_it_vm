@@ -413,7 +413,7 @@ pub fn run(
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
-        shares: mounts::prepare(settings, &dir.meta())?,
+        shares: mounts::prepare(settings, &dir.meta(), detach == Detach::Background)?,
         seed: None,
         console: if detach == Detach::Background {
             ConsoleMode::Detached(dir.console_socket())
@@ -658,7 +658,8 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
 }
 
 /// Attaches this terminal to the console of the project's VM running in the
-/// background, until the VM stops or the terminal goes away.
+/// background, until the VM stops, the console's user logs out, or the
+/// terminal goes away.
 pub fn attach(paths: &Paths, project: &Project) -> Result<()> {
     let dir = dir(paths, project);
     let sendit = sendit_for(project);
@@ -675,13 +676,19 @@ pub fn attach(paths: &Paths, project: &Project) -> Result<()> {
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "attaching to the VM's console needs a terminal; `{sendit} ssh` runs commands without one"
     );
-    let notice = "Attached to the VM's console. Closing the terminal detaches it and leaves \
-                  the VM running; `exit` shuts the VM down.";
-    match vm::attach_console(&socket, notice)? {
+    let notice = format!(
+        "Attached to the VM's console. `exit` and closing the terminal detach it and leave \
+         the VM running; `{sendit} stop` shuts it down."
+    );
+    match vm::attach_console(&socket, &notice)? {
         vm::Attached::Busy => bail!(
             "the VM's console is attached in another terminal already; closing that terminal \
              detaches it, and `{sendit} ssh` opens another shell in the VM"
         ),
+        vm::Attached::LoggedOut => say(&format!(
+            "Logged out of the VM's console; the VM keeps running. `{sendit} attach` logs in \
+             again, and `{sendit} stop` shuts it down."
+        )),
         vm::Attached::Stopped => console_closed(&dir, &sendit)?,
         // The terminal is usually gone.
         vm::Attached::Detached => {}

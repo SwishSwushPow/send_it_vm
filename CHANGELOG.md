@@ -5,7 +5,7 @@
 ### Added
 
 - `sendit run -d` (`--detach`) runs the VM in the background: sendit returns once the VM answers over SSH, `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. Ctrl-C before then, or the VM not answering within two minutes, shuts it down again. Its console output goes to `run/console.log` in the VM's directory.
-- `sendit attach` attaches the terminal to the console of the VM running in the background. Every key goes to the VM, Ctrl-C and Ctrl-] included; closing the terminal detaches it and leaves the VM running, and `exit` shuts the VM down. One terminal can be attached at a time.
+- `sendit attach` attaches the terminal to the console of the VM running in the background. Every key goes to the VM, Ctrl-C and Ctrl-] included; closing the terminal detaches it and leaves the VM running. So does `exit` or Ctrl-D, which logs out of the console: the next `sendit attach` logs in again, and `sendit stop` shuts the VM down. One terminal can be attached at a time.
 
 ### Changed
 
@@ -15,6 +15,7 @@
 
 ### Base image
 
+- Logging out of the console of a VM in the background detaches `sendit attach` instead of shutting the VM down, as above. Images get it when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`; in others, `exit` there still shuts the VM down.
 - Base images boot the cloud image's kernel with 4 KiB pages again instead of Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`): the disk caching mode above takes its place against the lost writes. Images get it when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`. Images that still boot the 16 KiB kernel keep working.
 
 ## 0.8.0 - 2026-10-17

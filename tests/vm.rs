@@ -1113,8 +1113,23 @@ fn attaches_to_the_background_console() {
     term.expect("WINCH-2", CONSOLE_TIMEOUT);
     term.send(b"\x03");
     term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-40 120-END");
-    // `exit` shuts the VM down.
+    // `exit` logs out and detaches, and the VM keeps running.
     term.type_line("exit");
+    term.expect(
+        "Logged out of the VM's console; the VM keeps running.",
+        COMMAND_TIMEOUT,
+    );
+    term.wait_for_exit();
+    assert_eq!(project.ok(&["ssh", "echo", "up"]), "up\n");
+    let log = text(&fs::read(project.vm_dir().join("run/console.log")).unwrap());
+    assert!(log.contains("detaches the terminal"), "{log}");
+    assert!(!log.contains("shutting down the VM"), "{log}");
+
+    // The next terminal gets a new login, and `sendit stop` ends it.
+    let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 40, 120);
+    term.expect("Attached to the VM's console.", COMMAND_TIMEOUT);
+    term.type_until(r#"echo "AGAIN-$((2 + 2))""#, "AGAIN-4");
+    project.ok(&["stop"]);
     term.expect("The VM has stopped.", STOP_TIMEOUT);
     term.wait_for_exit();
     assert!(project.ok(&["status"]).contains("stopped"));
