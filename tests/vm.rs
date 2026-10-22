@@ -866,7 +866,7 @@ fn runs_commands_over_ssh() {
     let vm = project.run(&[]);
 
     assert_eq!(vm.ok("uname -m"), "aarch64");
-    assert_eq!(vm.ok("getconf PAGESIZE"), "16384");
+    assert_eq!(vm.ok("getconf PAGESIZE"), "4096");
     assert_eq!(vm.ok("id -un"), "dev");
     assert_eq!(vm.root_ok("id -u"), "0");
     // Through a login shell, which starts in the project.
