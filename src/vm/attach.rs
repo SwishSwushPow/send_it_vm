@@ -186,9 +186,22 @@ impl RemoteSize {
     }
 
     pub(super) fn set(&self, rows: u16, cols: u16) {
-        let mut sizes = lock(&self.sizes);
-        sizes.current = Some((rows, cols));
-        sizes.pending.push((rows, cols));
+        self.push(&[(rows, cols)]);
+    }
+
+    /// Sets the size so that programs on the console redraw, even if it
+    /// hasn't changed: they only learn of a change (SIGWINCH), so the size
+    /// is one row off for a moment first. For a terminal that attaches,
+    /// whose screen starts out empty.
+    pub(super) fn set_redrawing(&self, rows: u16, cols: u16) {
+        let off = if rows > 1 { rows - 1 } else { rows + 1 };
+        self.push(&[(off, cols), (rows, cols)]);
+    }
+
+    fn push(&self, sizes: &[(u16, u16)]) {
+        let mut state = lock(&self.sizes);
+        state.current = sizes.last().copied();
+        state.pending.extend_from_slice(sizes);
         let _ = write_all(self.wake_write.as_raw_fd(), &[0]);
     }
 
@@ -253,11 +266,13 @@ fn serve(
     size: &RemoteSize,
     stop: OwnedFd,
 ) {
-    let mut attached: Option<(UnixStream, Frames)> = None;
+    // The client, what it sent of its next message, and whether it has
+    // sent its terminal's size yet.
+    let mut attached: Option<(UnixStream, Frames, bool)> = None;
     let mut buf = [0u8; 4096];
     loop {
         let mut fds = vec![pollfd(stop.as_raw_fd()), pollfd(listener.as_raw_fd())];
-        if let Some((stream, _)) = &attached {
+        if let Some((stream, ..)) = &attached {
             fds.push(pollfd(stream.as_raw_fd()));
         }
         if poll(&mut fds, -1).is_err() || fds[0].revents != 0 {
@@ -265,13 +280,13 @@ fn serve(
         }
         // The attached client first: one that has gone makes room for the
         // next.
-        if let Some((stream, frames)) = &mut attached
+        if let Some((stream, frames, sized)) = &mut attached
             && fds[2].revents != 0
         {
             let still = match read(stream.as_raw_fd(), &mut buf) {
                 Ok(n @ 1..) => {
                     frames.push(&buf[..n]);
-                    forward(frames, guest_input.as_raw_fd(), size)
+                    forward(frames, guest_input.as_raw_fd(), size, sized)
                 }
                 _ => false,
             };
@@ -290,7 +305,7 @@ fn serve(
             {
                 // After the greeting: output must not come before it.
                 client.set(Some(copy));
-                attached = Some((stream, Frames::default()));
+                attached = Some((stream, Frames::default(), false));
             }
         }
     }
@@ -298,8 +313,14 @@ fn serve(
 }
 
 /// Passes on the complete messages in `frames`; false if the client sent
-/// something that isn't one, or the guest's console is gone.
-fn forward(frames: &mut Frames, guest_input: libc::c_int, size: &RemoteSize) -> bool {
+/// something that isn't one, or the guest's console is gone. The client's
+/// first size, once it has `sized`, makes the console redraw.
+fn forward(
+    frames: &mut Frames,
+    guest_input: libc::c_int,
+    size: &RemoteSize,
+    sized: &mut bool,
+) -> bool {
     loop {
         match frames.next() {
             Ok(Some(Message::Input(data))) => {
@@ -307,7 +328,11 @@ fn forward(frames: &mut Frames, guest_input: libc::c_int, size: &RemoteSize) -> 
                     return false;
                 }
             }
-            Ok(Some(Message::Size { rows, cols })) => size.set(rows, cols),
+            Ok(Some(Message::Size { rows, cols })) if *sized => size.set(rows, cols),
+            Ok(Some(Message::Size { rows, cols })) => {
+                size.set_redrawing(rows, cols);
+                *sized = true;
+            }
             Ok(None) => return true,
             Err(_) => return false,
         }
@@ -535,6 +560,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(ended, (Attached::Detached, false)));
+    }
+
+    #[test]
+    fn redraws_with_a_size_change() {
+        let size = RemoteSize::new().unwrap();
+        size.set_redrawing(30, 100);
+        assert_eq!(size.take_pending(), [(29, 100), (30, 100)]);
+        assert_eq!(size.current(), Some((30, 100)));
+        size.set_redrawing(1, 80);
+        assert_eq!(size.take_pending(), [(2, 80), (1, 80)]);
+        size.set(1, 81);
+        assert_eq!(size.take_pending(), [(1, 81)]);
     }
 
     /// Retries `f` for up to a second until it returns true.

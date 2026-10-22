@@ -1088,6 +1088,11 @@ fn attaches_to_the_background_console() {
     );
     assert_fails_with(&project.sendit(&["run"]), "attach` attaches to its console");
 
+    // A program that redraws when the terminal is resized. Not the shell
+    // itself: with job control, `sleep` would be the foreground process
+    // group, the only one the resize signals.
+    term.type_line(r#"bash -c 'trap "echo WINCH-\$((1 + 1))" WINCH; while :; do sleep 0.1; done'"#);
+    sleep(Duration::from_secs(1));
     // Closing the window detaches; the VM keeps running.
     // SAFETY: plain syscall; the child hasn't been waited for, so its PID
     // is still its own.
@@ -1097,9 +1102,12 @@ fn attaches_to_the_background_console() {
     assert_fails_with(&project.sendit(&["attach"]), "needs a terminal");
     assert_eq!(project.ok(&["ssh", "echo", "up"]), "up\n");
 
-    // Attached again, at another size; `exit` shuts the VM down.
-    let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 30, 100);
-    term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-30 100-END");
+    // Attached again at the same size, the program redraws all the same.
+    let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 40, 120);
+    term.expect("WINCH-2", CONSOLE_TIMEOUT);
+    term.send(b"\x03");
+    term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-40 120-END");
+    // `exit` shuts the VM down.
     term.type_line("exit");
     term.expect("The VM has stopped.", STOP_TIMEOUT);
     term.wait_for_exit();
