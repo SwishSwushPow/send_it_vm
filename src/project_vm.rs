@@ -47,6 +47,11 @@ use crate::worktree;
 /// the guest hasn't shut down after `vm::STOP_TIMEOUT`.
 const STOP_WAIT: Duration = Duration::from_secs(45);
 
+/// How long `attach` waits for the VM to stop once its console has closed:
+/// the console closes just before the VM's lock is released. A VM still
+/// running by then has dropped the terminal.
+const CONSOLE_CLOSE_WAIT: Duration = Duration::from_secs(5);
+
 /// How often taking a VM's lock is retried, 20 ms apart.
 const LOCK_RETRIES: u32 = 5;
 
@@ -670,32 +675,34 @@ pub fn attach(paths: &Paths, project: &Project) -> Result<()> {
         std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
         "attaching to the VM's console needs a terminal; `{sendit} ssh` runs commands without one"
     );
-    say(
-        "Attached to the VM's console. Closing the terminal detaches it and leaves the VM \
-         running; `exit` shuts the VM down.",
-    );
-    match vm::attach_console(&socket)? {
+    let notice = "Attached to the VM's console. Closing the terminal detaches it and leaves \
+                  the VM running; `exit` shuts the VM down.";
+    match vm::attach_console(&socket, notice)? {
         vm::Attached::Busy => bail!(
             "the VM's console is attached in another terminal already; closing that terminal \
              detaches it, and `{sendit} ssh` opens another shell in the VM"
         ),
-        // The console closes just before the VM's lock is released, or if
-        // its process stopped serving this terminal.
-        vm::Attached::Stopped => {
-            let start = Instant::now();
-            while state(&dir)? != State::Stopped {
-                ensure!(
-                    start.elapsed() < STOP_WAIT,
-                    "the VM's console closed, but the VM is still running; `{sendit} attach` \
-                     attaches to it again"
-                );
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            say("The VM has stopped.");
-        }
+        vm::Attached::Stopped => console_closed(&dir, &sendit)?,
         // The terminal is usually gone.
         vm::Attached::Detached => {}
     }
+    Ok(())
+}
+
+/// Says why the console of the VM in `dir` closed: the VM stopped, or it
+/// dropped this terminal for not taking its output in time. `sendit` is the
+/// command line that reaches the VM.
+fn console_closed(dir: &VmDir, sendit: &str) -> Result<()> {
+    let start = Instant::now();
+    while state(dir)? != State::Stopped {
+        ensure!(
+            start.elapsed() < CONSOLE_CLOSE_WAIT,
+            "this terminal was detached from the VM's console, as it didn't keep up with its \
+             output; the VM is still running, and `{sendit} attach` attaches again"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    say("The VM has stopped.");
     Ok(())
 }
 
@@ -1766,6 +1773,23 @@ mod tests {
             command.ends_with(&format!("`{sendit} ssh ls` runs the command there")),
             "{command}"
         );
+    }
+
+    #[test]
+    fn tells_a_terminal_the_vm_dropped_that_it_is_still_running() {
+        let temp = crate::util::TempDir::new("vm-dropped");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        fs::create_dir_all(vm.path()).unwrap();
+        let running = lock(&vm, &project, &[]).unwrap();
+        let start = Instant::now();
+        let error = console_closed(&vm, "sendit").unwrap_err().to_string();
+        assert!(start.elapsed() < CONSOLE_CLOSE_WAIT + Duration::from_secs(1));
+        assert!(error.contains("didn't keep up"), "{error}");
+        assert!(error.contains("`sendit attach` attaches again"), "{error}");
+        drop(running);
+        console_closed(&vm, "sendit").unwrap();
     }
 
     #[test]

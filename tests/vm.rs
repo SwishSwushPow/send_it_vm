@@ -1067,6 +1067,8 @@ fn attaches_to_the_background_console() {
     assert!(started.status.success(), "{}", text(&started.stderr));
     assert!(text(&started.stderr).contains("attach` attaches to its console"));
     let mut term = project.in_terminal(&["attach"], "xterm-256color", None, 40, 120);
+    // What to know comes after clearing the screen, where it is seen.
+    term.expect("\x1b[H", COMMAND_TIMEOUT);
     term.expect("Attached to the VM's console.", COMMAND_TIMEOUT);
     term.type_until(r#"echo "SIZE-$(stty size)-END""#, "SIZE-40 120-END");
     // Every key reaches the guest: Ctrl-C interrupts, Ctrl-] doesn't detach.
@@ -1085,6 +1087,10 @@ fn attaches_to_the_background_console() {
         !wait_timeout(&mut second.child, COMMAND_TIMEOUT)
             .unwrap()
             .success()
+    );
+    assert!(
+        !second.find("Attached"),
+        "a refused terminal says it's attached"
     );
     assert_fails_with(&project.sendit(&["run"]), "attach` attaches to its console");
 

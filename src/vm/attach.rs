@@ -353,7 +353,8 @@ pub enum Attached {
 /// Attaches this terminal to the console of the VM in the background whose
 /// server listens on `socket`, until the VM stops or the terminal goes away.
 /// Every key goes to the guest. stdin and stdout must be the terminal.
-pub fn attach(socket: &Path) -> Result<Attached> {
+/// Once it is let in, `notice` goes on top of the cleared screen.
+pub fn attach(socket: &Path, notice: &str) -> Result<Attached> {
     let (Some(dir), Some(name)) = (socket.parent(), socket.file_name()) else {
         anyhow::bail!("{} is no socket path", socket.display());
     };
@@ -373,6 +374,7 @@ pub fn attach(socket: &Path) -> Result<Attached> {
     let (first_signal, _) = signals();
     let _signals = CatchSignals::new();
     clear_screen();
+    let _ = writeln!(io::stderr(), "{notice}");
     let mut raw_mode = RawMode::enable(false)?;
     let result = (|| {
         if let Some((rows, cols)) = window_size() {
