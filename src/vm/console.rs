@@ -536,7 +536,7 @@ fn forward_input(from: libc::c_int, to_guest: OwnedFd, escapes: &AtomicUsize, st
     }
 }
 
-fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+pub(super) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let (read, write) = io::pipe()?;
     Ok((read.into(), write.into()))
 }
@@ -556,12 +556,12 @@ fn syscall(mut call: impl FnMut() -> isize) -> io::Result<usize> {
     }
 }
 
-fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+pub(super) fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY: `buf` is valid for writes of its length.
     syscall(|| unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) })
 }
 
-fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
+pub(super) fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
         // SAFETY: `data` is valid for reads of its length.
         let n = syscall(|| unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) })?;
@@ -571,12 +571,12 @@ fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
 }
 
 /// Waits for input on `fds`; returns how many have events, 0 on timeout.
-fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
+pub(super) fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
     // SAFETY: `fds` is valid for its length.
     syscall(|| unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } as isize)
 }
 
-fn pollfd(fd: libc::c_int) -> libc::pollfd {
+pub(super) fn pollfd(fd: libc::c_int) -> libc::pollfd {
     libc::pollfd {
         fd,
         events: libc::POLLIN,

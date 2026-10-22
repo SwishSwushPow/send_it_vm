@@ -47,6 +47,23 @@ pub fn fresh_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
 }
 
+/// Runs `f` with `dir` as the working directory, then changes back to the
+/// one before, even if that has been renamed meanwhile. For Unix sockets,
+/// whose path may be no longer than 103 bytes: a VM's directory can be
+/// longer, but a name relative to it isn't. The working directory is the
+/// whole process's, so this may only be used while no other thread uses
+/// relative paths.
+pub fn in_dir<R>(dir: &Path, f: impl FnOnce() -> io::Result<R>) -> Result<R> {
+    let here = fs::File::open(".").context("opening the working directory")?;
+    std::env::set_current_dir(dir).with_context(|| format!("changing to {}", dir.display()))?;
+    let result = f();
+    // SAFETY: plain syscall on a descriptor we own.
+    if unsafe { libc::fchdir(std::os::fd::AsRawFd::as_raw_fd(&here)) } != 0 {
+        return Err(io::Error::last_os_error()).context("changing back to the working directory");
+    }
+    Ok(result?)
+}
+
 /// Writes `contents` to `path` all at once: it is written to a temporary
 /// file next to it first, which then replaces `path`. A crash leaves the
 /// old file or the new one, never part of it.

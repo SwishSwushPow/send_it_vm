@@ -8,6 +8,7 @@
 //! comment says otherwise, the `unsafe` blocks here only call them with
 //! valid, retained objects on the main thread.
 
+mod attach;
 mod config;
 mod console;
 pub mod net;
