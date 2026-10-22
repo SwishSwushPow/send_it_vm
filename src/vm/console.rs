@@ -64,20 +64,23 @@ impl Console {
     /// port, so provisioning output can't be cut off by one hanging up the
     /// terminal. Nothing in the guest reads keystrokes then, so Ctrl-C keeps
     /// raising SIGINT instead of reaching the guest. Hidden, the terminal is
-    /// left alone, apart from telling the guest its type and size.
+    /// left alone, apart from telling the guest its type and size. Detached,
+    /// the login console's output goes to stdout, and stdin isn't read.
     pub fn attach(mode: &ConsoleMode) -> Result<Self> {
         let log = match mode {
             ConsoleMode::Provision(log) => Some(log),
-            ConsoleMode::Login | ConsoleMode::Hidden => None,
+            ConsoleMode::Login | ConsoleMode::Hidden | ConsoleMode::Detached => None,
         };
         let provisioning = log.is_some();
         let hidden = matches!(mode, ConsoleMode::Hidden);
+        let detached = matches!(mode, ConsoleMode::Detached);
         let escapes = Arc::new(AtomicUsize::new(0));
         let (stop_read, stop) = pipe()?;
         let guest_stopping = Arc::new(AtomicBool::new(false));
         let terminal = terminal_port(guest_stopping.clone(), stop_read.try_clone()?)?;
-        // Hidden, stdin belongs to the program that has the terminal.
-        let input = if hidden {
+        // Hidden, stdin belongs to the program that has the terminal;
+        // detached, there is no terminal.
+        let input = if hidden || detached {
             None
         } else {
             let (read_end, write_end) = pipe()?;
@@ -118,7 +121,7 @@ impl Console {
             guest_stopping,
             stop: Some(stop),
             output,
-            raw_mode: if hidden {
+            raw_mode: if hidden || detached {
                 None
             } else {
                 RawMode::enable(provisioning)?

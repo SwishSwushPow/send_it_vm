@@ -38,7 +38,8 @@ pub enum Command {
         #[command(flatten)]
         resources: Resources,
     },
-    /// Boot the project's VM and attach to its console, or run a command in it
+    /// Boot the project's VM and attach to its console, run a command in it,
+    /// or run it in the background
     Run(RunArgs),
     /// Open an SSH session to the project's running VM
     Ssh {
@@ -146,6 +147,12 @@ pub struct RunArgs {
     /// deleted first with `sendit reset`
     #[arg(long)]
     pub fresh: bool,
+
+    /// Run the VM in the background: sendit returns once it answers over
+    /// SSH, `sendit ssh` reaches it and `sendit stop` shuts it down. Its
+    /// console output goes to run/console.log in the VM's directory
+    #[arg(short, long, conflicts_with = "command")]
+    pub detach: bool,
 
     /// Command to run once the VM is up, instead of attaching its console:
     /// over SSH as `sendit ssh <COMMAND>` does, and the VM shuts down when
@@ -262,6 +269,27 @@ mod tests {
         };
         assert_eq!(args.settings().cpus, None);
         assert_eq!(args.command, ["ls", "--cpus", "2"]);
+    }
+
+    #[test]
+    fn parses_detach() {
+        for flag in ["-d", "--detach"] {
+            let cli = Cli::try_parse_from(["sendit", "run", flag, "--cpus", "2"]).unwrap();
+            let Command::Run(args) = cli.command else {
+                panic!("expected run")
+            };
+            assert!(args.detach);
+            assert!(args.command.is_empty());
+        }
+        // `sendit ssh` runs commands in a detached VM.
+        assert!(Cli::try_parse_from(["sendit", "run", "-d", "cargo", "test"]).is_err());
+        // After the command, it is the command's.
+        let cli = Cli::try_parse_from(["sendit", "run", "ls", "-d"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert!(!args.detach);
+        assert_eq!(args.command, ["ls", "-d"]);
     }
 
     #[test]

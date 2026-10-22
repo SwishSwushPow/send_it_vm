@@ -57,16 +57,24 @@ extern "C" fn on_signal(signal: libc::c_int) {
     SIGNALS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// How many `CAUGHT_SIGNALS` have arrived so far, and the last of them.
+pub fn signals() -> (usize, libc::c_int) {
+    (
+        SIGNALS.load(Ordering::Relaxed),
+        LAST_SIGNAL.load(Ordering::Relaxed),
+    )
+}
+
 /// Counts `CAUGHT_SIGNALS` in `SIGNALS` instead of letting them end the
 /// process, until dropped. Then they act as before again, so that between
 /// VMs, e.g. while `provision --all` prepares the next image, they don't
 /// pile up for the next VM.
-struct CatchSignals {
+pub struct CatchSignals {
     previous: [libc::sighandler_t; CAUGHT_SIGNALS.len()],
 }
 
 impl CatchSignals {
-    fn new() -> Self {
+    pub fn new() -> Self {
         // SAFETY: the handler only touches an atomic, which is signal-safe.
         let previous = CAUGHT_SIGNALS.map(|signal| unsafe {
             libc::signal(signal, on_signal as *const () as libc::sighandler_t)
@@ -143,7 +151,8 @@ impl VmDir {
         self.0.join("known_hosts")
     }
 
-    /// State of the current run: the lock and the meta share.
+    /// State of the current run: the lock, the meta share and, for a VM
+    /// running in the background, its console log.
     pub fn run_dir(&self) -> PathBuf {
         self.0.join("run")
     }
@@ -151,6 +160,12 @@ impl VmDir {
     /// Held by the `sendit run` process of a running VM, and holds its PID.
     pub fn lock(&self) -> PathBuf {
         self.run_dir().join("lock")
+    }
+
+    /// What the `sendit run` process of a VM in the background and its
+    /// login console wrote, since it last started.
+    pub fn console_log(&self) -> PathBuf {
+        self.run_dir().join("console.log")
     }
 
     /// The host side of the `sendit-meta` share.
@@ -197,6 +212,10 @@ pub enum ConsoleMode {
     /// Nothing of the VM: another program has the terminal, e.g. `ssh`.
     /// Signals still shut the VM down.
     Hidden,
+    /// In the background, without a terminal: the login console gets no
+    /// input, which it would take an EOF from and log out, and its output
+    /// goes to stdout, a log file.
+    Detached,
     /// Provisioning: show and log the guest's /dev/hvc1.
     Provision(ProvisionLog),
 }
@@ -308,8 +327,8 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
             "Shutting down. Press Ctrl-C again to force.",
         ),
         ConsoleMode::Login => ("VM starting. Type exit to shut it down.", "Shutting down."),
-        // Whatever has the terminal says what to do.
-        ConsoleMode::Hidden => ("VM starting.", "Shutting down."),
+        // Whatever has the terminal says what to do; detached, there is none.
+        ConsoleMode::Hidden | ConsoleMode::Detached => ("VM starting.", "Shutting down."),
     };
     notice(started);
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `sendit run -d` (`--detach`) runs the VM in the background: sendit returns once the VM answers over SSH, `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. Ctrl-C before then, or the VM not answering within two minutes, shuts it down again. Its console output goes to `run/console.log` in the VM's directory.
+
 ### Changed
 
 - sendit makes `~/.cache/sendit/` and the VM directory (`~/.sendit/` or `$SENDIT_VM_DIR`) accessible only to you, on every run, so directories made by earlier versions are fixed too. Other users of the Mac could read them before: the base images, the VM disks, and the copies of the provisioning scripts that a build keeps, which hold whatever the scripts put there, secrets included.

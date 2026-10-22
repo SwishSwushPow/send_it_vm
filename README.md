@@ -23,6 +23,7 @@ sendit provision          # download Debian and build this project's base image 
 sendit run                # boot this project's VM and attach to its console
 sendit run --worktree x   # ... of a git worktree on branch x, made if needed
 sendit run cargo test     # boot the VM, run a command in it, then shut it down
+sendit run -d             # boot the VM in the background
 sendit ssh                # open another shell in the running VM
 sendit ssh cargo test     # ... or run a command there
 sendit ssh --root         # ... as root, e.g. to install packages
@@ -40,6 +41,8 @@ sendit prune --all        # delete every VM that isn't running
 Commands act on the project in the current directory, or on `-C DIR`. `reset`, `prune` and `images --delete` ask first; `-y`/`--yes` skips that, and is needed without a terminal.
 
 A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, with `sendit ssh --root`) in a login shell in the project directory, so it gets the `PATH` your provisioning scripts set in `~/.profile`. Arguments arrive unchanged; use `sh -c '...'` for pipes and the like. It gets a terminal when sendit has one, so `sendit run claude` works, and its output can be piped otherwise. sendit exits with the command's exit code, or with 128 plus the signal's number if the VM stops first, e.g. through `sendit stop` or Ctrl-C. With a command, `sendit run` skips the console, waits for SSH, and shuts the VM down when the command ends.
+
+`sendit run -d` (`--detach`) runs the VM in the background, e.g. for a server in it that you reach from the Mac. sendit returns once the VM answers over SSH; then `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. If you press Ctrl-C before that, or the VM doesn't answer within two minutes, sendit shuts it down again. Its console output goes to `run/console.log` in the VM's directory. A VM in the background keeps all the memory it has used until it stops; `sendit list` shows which ones are still running.
 
 `sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
 

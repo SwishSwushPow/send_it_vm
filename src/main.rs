@@ -23,6 +23,7 @@ use crate::cli::{Cli, Command};
 use crate::commands::{Declined, PruneScope};
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
+use crate::project_vm::Detach;
 
 fn main() -> ExitCode {
     match sendit() {
@@ -70,17 +71,30 @@ fn sendit() -> Result<ExitCode> {
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
-            let project = match &args.worktree {
-                Some(branch) => Project::at(&worktree::open(
+            let background = project_vm::background_project();
+            let detach = if background.is_some() {
+                Detach::Background
+            } else if args.detach {
+                Detach::Start
+            } else {
+                Detach::No
+            };
+            let project = match (&background, &args.worktree) {
+                (Some(root), _) => Project::at(root)?,
+                (None, Some(branch)) => Project::at(&worktree::open(
                     cli.project.as_deref().unwrap_or(&cwd),
                     branch,
                     args.from.as_deref(),
                     args.worktree_path.as_deref(),
                 )?)?,
-                None => project()?,
+                (None, None) => project()?,
             };
             let mut settings = resolve(&project, &args.settings(), args.fresh)?;
-            commands::confirm_shares(&paths, &settings)?;
+            // In the background, the process that started this one has
+            // asked, and there is no terminal to ask on.
+            if detach != Detach::Background {
+                commands::confirm_shares(&paths, &settings)?;
+            }
             let created = project_vm::create_if_missing(
                 &paths,
                 &project,
@@ -95,8 +109,15 @@ fn sendit() -> Result<ExitCode> {
                 commands::confirm_shares(&paths, &settings)?;
             }
             let note = created.and_then(|created| created.note);
-            let code =
-                project_vm::run(&paths, &project, &settings, args.fresh, note, &args.command)?;
+            let code = project_vm::run(
+                &paths,
+                &project,
+                &settings,
+                args.fresh,
+                note,
+                &args.command,
+                detach,
+            )?;
             // Exit codes and 128 plus a signal number fit.
             return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }

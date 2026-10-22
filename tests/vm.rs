@@ -985,6 +985,68 @@ fn runs_a_command_instead_of_the_console() {
 
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn runs_in_the_background() {
+    let _slot = vm_slot();
+    let project = Project::new("detach");
+    let started = output(project.command(&["run", "--detach"]), BOOT_TIMEOUT).unwrap();
+    let stderr = text(&started.stderr);
+    assert!(started.status.success(), "{stderr}");
+    assert!(stderr.contains("runs in the background"), "{stderr}");
+    // sendit returned once the VM answered.
+    assert_eq!(project.ok(&["ssh", "echo", "up"]), "up\n");
+    assert!(project.ok(&["status"]).contains("running"));
+    // Its process leads a session of its own, without a terminal to hang
+    // it up.
+    let lock = project.vm_dir().join("run/lock");
+    let pid: libc::pid_t = fs::read_to_string(&lock).unwrap().trim().parse().unwrap();
+    // SAFETY: plain syscall.
+    assert_eq!(unsafe { libc::getsid(pid) }, pid);
+    assert_fails_with(&project.sendit(&["run", "-d"]), "already running");
+
+    project.ok(&["stop"]);
+    assert!(project.ok(&["status"]).contains("stopped"));
+    let log = text(&fs::read(project.vm_dir().join("run/console.log")).unwrap());
+    // The login console's output, and a clean shutdown.
+    assert!(log.contains("dev@sendit"), "{log}");
+    assert!(log.contains("Shutting down."), "{log}");
+    assert!(!log.contains("Forcing") && !log.contains("Error"), "{log}");
+
+    // Ctrl-C before the VM answers shuts it down again, and sendit exits
+    // as a shell reports a command killed by it.
+    let log = project.next_log();
+    let file = File::create(&log).unwrap();
+    let mut child = project
+        .command(&["run", "-d"])
+        .stdin(Stdio::null())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    // Once the process in the background has the lock, it is about to start
+    // the VM. It may not catch signals yet, and end at once on the SIGTERM
+    // it is passed.
+    let last_pid = pid.to_string();
+    let start = Instant::now();
+    while fs::read_to_string(&lock).is_ok_and(|pid| pid.is_empty() || pid == last_pid) {
+        assert!(
+            start.elapsed() < COMMAND_TIMEOUT,
+            "the VM didn't start; see {}",
+            log.display()
+        );
+        sleep(Duration::from_millis(100));
+    }
+    // SAFETY: plain syscall; the child hasn't been waited for, so its PID
+    // is still its own.
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    let status = wait_timeout(&mut child, STOP_TIMEOUT).unwrap();
+    let output = fs::read_to_string(&log).unwrap();
+    assert_eq!(status.code(), Some(130), "{output}");
+    assert!(output.contains("Shutting down the VM"), "{output}");
+    assert!(project.ok(&["status"]).contains("stopped"));
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn starts_worktree_vms_as_copies() {
     let _slot = vm_slot();
     let project = Project::new("trunk");

@@ -14,11 +14,16 @@
 //!
 //! While a VM runs, its `sendit run` process holds a lock on `run/lock` and
 //! has written its PID there; that is how the other commands find it.
+//!
+//! `run --detach` runs the VM in a second `sendit run` process, which it
+//! starts in a session of its own, without a terminal, and leaves running
+//! once the VM answers over SSH. It is sendit run again rather than a fork:
+//! forking without exec isn't safe once Objective-C is loaded.
 
 use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +48,35 @@ const STOP_WAIT: Duration = Duration::from_secs(45);
 
 /// How often taking a VM's lock is retried, 20 ms apart.
 const LOCK_RETRIES: u32 = 5;
+
+/// Set to the project's root for the `sendit run` process that `run
+/// --detach` starts in the background. That process has no terminal to
+/// ask questions on, and takes the project from here, as found by the
+/// process that started it: e.g. a new worktree exists by then, and opening
+/// it again with --from would fail.
+const DETACHED_ENV: &str = "SENDIT_DETACHED";
+
+/// How many lines at the end of the console log `run --detach` shows when
+/// the VM stops before it answers.
+const LOG_TAIL: usize = 15;
+
+/// Where `run` runs the VM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detach {
+    /// In this process, attached to the terminal.
+    No,
+    /// In a `sendit run` process in the background, which this one starts,
+    /// returning once the VM answers over SSH.
+    Start,
+    /// This is that process.
+    Background,
+}
+
+/// The project root for the `sendit run` process in the background, if
+/// this is it.
+pub fn background_project() -> Option<PathBuf> {
+    std::env::var_os(DETACHED_ENV).map(PathBuf::from)
+}
 
 /// Written into a project VM's directory when it is created.
 #[derive(Debug, Serialize, Deserialize)]
@@ -286,7 +320,8 @@ pub fn create_if_missing(
 /// `command`, the console is attached. With one, the
 /// command runs over SSH once the VM answers, as with `sendit ssh`, and the
 /// VM shuts down when it has ended. Returns its exit code, or if a signal
-/// stopped the VM first, 128 plus its number; else 0.
+/// stopped the VM first, 128 plus its number; else 0. `detach` says where
+/// the VM runs; in the background, it runs without a command.
 pub fn run(
     paths: &Paths,
     project: &Project,
@@ -294,6 +329,7 @@ pub fn run(
     fresh: bool,
     note: Option<String>,
     command: &[String],
+    detach: Detach,
 ) -> Result<i32> {
     let dir = dir(paths, project);
     let metadata = metadata(&dir)?;
@@ -322,35 +358,53 @@ pub fn run(
          the current base image",
         paths.display(dir.path())
     );
-    if !command.is_empty() {
+    if !command.is_empty() || detach == Detach::Start {
         // Rather now than after booting.
         login(paths, false)?;
+    }
+    let starting = |note: Option<String>| {
+        eprintln!(
+            "Starting {} ({} CPUs, {} memory, {} disk)",
+            paths.display(dir.path()),
+            settings.cpus,
+            settings.memory,
+            settings.disk_size
+        );
+        if let Some(note) = note {
+            eprintln!("{note}");
+        }
+    };
+    if detach == Detach::Start {
+        // The lock is for the process in the background; this only checks
+        // that the VM isn't running yet. Should another `sendit run` take
+        // the lock first, the process in the background fails at once, long before
+        // the other VM could answer over SSH, and this one reports it.
+        if try_lock(&dir)?.is_none() {
+            return Err(already_running(project, command));
+        }
+        // Here, where it is seen; the disk grows in the background.
+        warn_if_shrinking(paths, &dir, settings)?;
+        starting(note);
+        return run_in_background(paths, project, &dir);
     }
     let _lock = lock(&dir, project, command)?;
     // The VM starts now: its boot and banner come first on the screen. A
     // command's output follows on from what is there, like any command's.
-    if command.is_empty() {
+    if command.is_empty() && detach == Detach::No {
         vm::clear_screen();
     }
     resize_disk(paths, &dir, settings)?;
 
-    eprintln!(
-        "Starting {} ({} CPUs, {} memory, {} disk)",
-        paths.display(dir.path()),
-        settings.cpus,
-        settings.memory,
-        settings.disk_size
-    );
-    if let Some(note) = note {
-        eprintln!("{note}");
-    }
+    starting(note);
     let shutdown = Arc::new(AtomicBool::new(false));
     let spec = VmSpec {
         cpus: settings.cpus,
         memory: settings.memory,
         shares: mounts::prepare(settings, &dir.meta())?,
         seed: None,
-        console: if command.is_empty() {
+        console: if detach == Detach::Background {
+            ConsoleMode::Detached
+        } else if command.is_empty() {
             ConsoleMode::Login
         } else {
             ConsoleMode::Hidden
@@ -380,6 +434,181 @@ pub fn run(
         Ok(Some(signal)) if !command.is_empty() => Ok(128 + signal),
         Ok(_) => code,
     }
+}
+
+/// Starts the `sendit run` process that runs the VM in `dir` in the
+/// background, with its output going to the VM's console log, and waits
+/// until the VM answers over SSH. If a signal comes first, e.g. Ctrl-C, or
+/// the VM doesn't answer in time, the VM is shut down again. Returns 0, or
+/// 128 plus the number of that signal.
+fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i32> {
+    let log_path = dir.console_log();
+    let log =
+        File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
+    let exe = std::env::current_exe().context("finding the sendit executable")?;
+    let mut sendit = Command::new(exe);
+    sendit
+        .args(std::env::args_os().skip(1))
+        .env(DETACHED_ENV, &project.root)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // In a session of its own, it has no terminal: none going away hangs
+    // it up, and Ctrl-C in this one doesn't reach it. Descriptors that
+    // were handed to this process to pass on, e.g. a jobserver's pipe,
+    // would stay open while the VM runs, and whoever waits for them to
+    // close would wait as long. Those of std are closed on exec anyway, and
+    // it still needs them until then.
+    // SAFETY: setsid, getdtablesize, fcntl and close are async-signal-safe,
+    // so they may run between fork and exec.
+    unsafe {
+        sendit.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for fd in 3..libc::getdtablesize() {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags != -1 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::close(fd);
+                }
+            }
+            Ok(())
+        });
+    }
+    let (first_signal, _) = vm::signals();
+    let _signals = vm::CatchSignals::new();
+    let mut child = sendit
+        .spawn()
+        .context("starting sendit in the background")?;
+
+    let mut exited = None;
+    let answers = wait_until_answers(paths, dir, &mut || {
+        if exited.is_none() {
+            exited = child.try_wait().ok().flatten();
+        }
+        exited.is_some() || vm::signals().0 > first_signal
+    });
+    if let Some(status) = exited {
+        let tail = log_tail(&log_path);
+        if !tail.is_empty() {
+            say(&tail);
+        }
+        // E.g. after `sendit stop`, it exits successfully.
+        let status = if status.success() {
+            String::new()
+        } else {
+            format!(" ({status})")
+        };
+        bail!(
+            "the VM stopped before it answered over SSH{status}; its console \
+             output is in {}",
+            paths.display(&log_path)
+        );
+    }
+    match answers {
+        Ok(true) => {
+            let sendit = sendit_for(project);
+            say(&format!(
+                "The VM runs in the background: `{sendit} ssh` opens a shell in it, and \
+                 `{sendit} stop` shuts it down. Its console output goes to {}.",
+                paths.display(&log_path)
+            ));
+            Ok(0)
+        }
+        // Like a shell reports a command killed by the signal.
+        Ok(false) => {
+            stop_in_background(&mut child)?;
+            Ok(128 + vm::signals().1)
+        }
+        Err(e) => {
+            stop_in_background(&mut child)?;
+            Err(e)
+        }
+    }
+}
+
+/// Shuts down the VM that `child` runs in the background, as `sendit stop`
+/// does, and waits until it has ended. Each signal here meanwhile is passed
+/// on, so that a second one forces the VM off.
+fn stop_in_background(child: &mut Child) -> Result<()> {
+    let mut passed_on = None;
+    loop {
+        if child.try_wait().context("waiting for sendit")?.is_some() {
+            return Ok(());
+        }
+        let (signals, _) = vm::signals();
+        if passed_on != Some(signals) {
+            // SAFETY: plain syscall; the child hasn't been waited for, so
+            // its PID is still its own.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            if passed_on.is_none() {
+                say("Shutting down the VM…");
+            }
+            passed_on = Some(signals);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Prints `message` on stderr, ignoring errors: after a SIGHUP the terminal
+/// is gone, and the VM must still be shut down.
+fn say(message: &str) {
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
+/// The last `LOG_TAIL` lines of the console log at `path`, as plain text.
+fn log_tail(path: &Path) -> String {
+    let log = plain_text(&String::from_utf8_lossy(
+        &fs::read(path).unwrap_or_default(),
+    ));
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(LOG_TAIL)..].join("\n")
+}
+
+/// `text` without the escape sequences and other control characters of
+/// terminal output, apart from line breaks and tabs.
+fn plain_text(text: &str) -> String {
+    let mut plain = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // CSI, e.g. colours: parameters up to a final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC, e.g. the window title: up to BEL or ESC \.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next_if_eq(&'\\');
+                            break;
+                        }
+                    }
+                }
+                // Others, e.g. `ESC ( B` from `tput sgr0`: intermediate
+                // bytes, then a final one.
+                Some(mut c) => {
+                    while (' '..='/').contains(&c) {
+                        let Some(next) = chars.next() else { break };
+                        c = next;
+                    }
+                }
+                None => {}
+            },
+            '\n' | '\t' => plain.push(c),
+            c if c.is_control() => {}
+            c => plain.push(c),
+        }
+    }
+    plain
 }
 
 /// Asks the project's running VM to shut down and waits until it has.
@@ -555,36 +784,12 @@ fn run_command(
     stopped: &AtomicBool,
     shutdown: &AtomicBool,
 ) -> Result<i32> {
+    let stopped = &mut || stopped.load(Ordering::Relaxed);
     let result = (|| {
-        let start = Instant::now();
-        loop {
-            ensure!(
-                !stopped.load(Ordering::Relaxed),
-                "the VM stopped before the command could run"
-            );
-            let answers = match ssh_command(paths, dir, false, Remote::Probe) {
-                Ok(mut ssh) => {
-                    let probe = ssh
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .context("running ssh")?;
-                    wait_for_ssh(probe, stopped)?.is_some_and(|status| status.success())
-                }
-                // No IP address yet.
-                Err(_) => false,
-            };
-            if answers {
-                break;
-            }
-            ensure!(
-                start.elapsed() < SSH_WAIT,
-                "the VM didn't answer over SSH within {} seconds",
-                SSH_WAIT.as_secs()
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        ensure!(
+            wait_until_answers(paths, dir, stopped)?,
+            "the VM stopped before the command could run"
+        );
         let ssh = ssh_command(paths, dir, false, Remote::Login(command))?
             .spawn()
             .context("running ssh")?;
@@ -599,16 +804,54 @@ fn run_command(
     result
 }
 
+/// Waits until the VM in `dir` answers over SSH, for up to `SSH_WAIT`.
+/// False if `stopped` says first that the VM stopped, or that waiting
+/// should end.
+fn wait_until_answers(
+    paths: &Paths,
+    dir: &VmDir,
+    stopped: &mut dyn FnMut() -> bool,
+) -> Result<bool> {
+    let start = Instant::now();
+    loop {
+        if stopped() {
+            return Ok(false);
+        }
+        let answers = match ssh_command(paths, dir, false, Remote::Probe) {
+            Ok(mut ssh) => {
+                let probe = ssh
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .context("running ssh")?;
+                wait_for_ssh(probe, stopped)?.is_some_and(|status| status.success())
+            }
+            // No IP address yet.
+            Err(_) => false,
+        };
+        if answers {
+            return Ok(true);
+        }
+        ensure!(
+            start.elapsed() < SSH_WAIT,
+            "the VM didn't answer over SSH within {} seconds",
+            SSH_WAIT.as_secs()
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 /// Waits until the ssh process `child` exits and returns its status. Once
-/// `stopped` is set, it gets `SSH_GRACE` to exit, then is terminated, and
-/// the result is `None`.
-fn wait_for_ssh(mut child: Child, stopped: &AtomicBool) -> Result<Option<ExitStatus>> {
+/// `stopped` says that the VM stopped, it gets `SSH_GRACE` to exit, then is
+/// terminated, and the result is `None`.
+fn wait_for_ssh(mut child: Child, stopped: &mut dyn FnMut() -> bool) -> Result<Option<ExitStatus>> {
     let mut deadline = None;
     loop {
         if let Some(status) = child.try_wait().context("waiting for ssh")? {
             return Ok(Some(status));
         }
-        if stopped.load(Ordering::Relaxed)
+        if stopped()
             && Instant::now() >= *deadline.get_or_insert_with(|| Instant::now() + SSH_GRACE)
         {
             // Not SIGKILL: ssh gives the terminal back on SIGTERM.
@@ -807,6 +1050,13 @@ fn create(
 /// Grows the disk to the configured size; the guest grows its root
 /// filesystem to match on boot. Disks never shrink.
 fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> {
+    warn_if_shrinking(paths, dir, settings)?;
+    image::grow_disk(&dir.disk(), settings.disk_size)
+}
+
+/// Warns if the VM's disk is larger than `settings` ask for: disks only
+/// grow.
+fn warn_if_shrinking(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> {
     let current = fs::metadata(dir.disk())
         .with_context(|| format!("reading {}", dir.disk().display()))?
         .len();
@@ -818,7 +1068,7 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
             settings.disk_size
         );
     }
-    image::grow_disk(&dir.disk(), settings.disk_size)
+    Ok(())
 }
 
 /// Makes sure only one process runs a VM at a time; two would corrupt its
@@ -827,23 +1077,35 @@ fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> 
 /// run `command` there or else open a shell.
 fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<File> {
     let Some(mut file) = try_lock(dir)? else {
-        // Run elsewhere, e.g. with --worktree, `sendit ssh` needs the
-        // project too.
-        let here = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
-        let mut ssh = match here {
-            Ok(cwd) if cwd == project.root => "sendit ssh".to_string(),
-            _ => format!("sendit -C {} ssh", quote(&project.root.to_string_lossy())),
-        };
-        let does = if command.is_empty() {
-            "opens another shell in it"
-        } else {
-            ssh = format!("{ssh} {}", shell_command(command));
-            "runs the command there"
-        };
-        bail!("this project's VM is already running; `{ssh}` {does}");
+        return Err(already_running(project, command));
     };
     write!(file, "{}", std::process::id())?;
     Ok(file)
+}
+
+/// The error for starting the project's VM while it runs, which says how
+/// to reach it, to run `command` there or else open a shell.
+fn already_running(project: &Project, command: &[String]) -> anyhow::Error {
+    let ssh = format!("{} ssh", sendit_for(project));
+    let (ssh, does) = if command.is_empty() {
+        (ssh, "opens another shell in it")
+    } else {
+        (
+            format!("{ssh} {}", shell_command(command)),
+            "runs the command there",
+        )
+    };
+    anyhow::anyhow!("this project's VM is already running; `{ssh}` {does}")
+}
+
+/// The sendit command line for `project` from here. Run elsewhere, e.g.
+/// with --worktree, the project must be given.
+fn sendit_for(project: &Project) -> String {
+    let here = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
+    match here {
+        Ok(cwd) if cwd == project.root => "sendit".to_string(),
+        _ => format!("sendit -C {}", quote(&project.root.to_string_lossy())),
+    }
 }
 
 /// Takes the VM's lock without recording a PID; `None` if the VM is running.
@@ -1413,17 +1675,37 @@ mod tests {
     }
 
     #[test]
+    fn shows_the_end_of_the_console_log() {
+        let temp = crate::util::TempDir::new("log-tail");
+        let log = temp.path().join("console.log");
+        let lines: Vec<String> = (1..=LOG_TAIL + 5)
+            .map(|n| format!("\x1b[01;32mline\x1b[0m {n}\r"))
+            .collect();
+        fs::write(&log, lines.join("\n")).unwrap();
+        let tail = log_tail(&log);
+        assert_eq!(tail.lines().count(), LOG_TAIL);
+        assert!(tail.starts_with("line 6\nline 7\n"), "{tail:?}");
+        assert!(
+            tail.ends_with(&format!("line {}", LOG_TAIL + 5)),
+            "{tail:?}"
+        );
+        assert_eq!(log_tail(&temp.path().join("missing")), "");
+
+        // A prompt that sets the window title, ended by BEL or by ST.
+        let prompt = "\x1b]0;dev@sendit: ~\x07\x1b[?2004h\x1b]2;t\x1b\\$ \x1b>ok\x1b(B\tdone";
+        assert_eq!(plain_text(prompt), "$ ok\tdone");
+    }
+
+    #[test]
     fn ends_ssh_once_the_vm_has_stopped() {
-        let stopped = AtomicBool::new(false);
         let exits = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
-        let status = wait_for_ssh(exits, &stopped).unwrap();
+        let status = wait_for_ssh(exits, &mut || false).unwrap();
         assert_eq!(status.and_then(|s| s.code()), Some(3));
 
         // Like ssh to a VM that was forced off.
-        stopped.store(true, Ordering::Relaxed);
         let stuck = Command::new("sleep").arg("60").spawn().unwrap();
         let start = Instant::now();
-        assert_eq!(wait_for_ssh(stuck, &stopped).unwrap(), None);
+        assert_eq!(wait_for_ssh(stuck, &mut || true).unwrap(), None);
         assert!(start.elapsed() < SSH_GRACE + Duration::from_secs(5));
     }
 
