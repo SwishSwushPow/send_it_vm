@@ -537,6 +537,9 @@ fn rejects_bad_arguments() {
         &["run", "--image", "Rust"],
         &["provision", "rust", "--all"],
         &["no-such-command"],
+        // Not the command to run in the VM.
+        &["run", "--deatach"],
+        &["ssh", "--rot", "ls"],
     ] {
         let output = env.sendit(args);
         // clap's usage errors.

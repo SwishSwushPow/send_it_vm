@@ -51,12 +51,8 @@ pub enum Command {
         /// Command to run instead of an interactive shell: in a login shell
         /// in the project directory, on a terminal if this is one. Its
         /// arguments arrive unchanged; for pipes and the like, run
-        /// `sh -c '...'`
-        #[arg(
-            trailing_var_arg = true,
-            allow_hyphen_values = true,
-            value_name = "COMMAND"
-        )]
+        /// `sh -c '...'`. One that starts with - goes after --
+        #[arg(trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
     /// Show the project's VM and its effective settings
@@ -157,12 +153,9 @@ pub struct RunArgs {
     /// Command to run once the VM is up, instead of attaching its console:
     /// over SSH as `sendit ssh <COMMAND>` does, and the VM shuts down when
     /// it ends, with sendit exiting with its exit code. Its arguments
-    /// arrive unchanged; for pipes and the like, run `sh -c '...'`
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        value_name = "COMMAND"
-    )]
+    /// arrive unchanged; for pipes and the like, run `sh -c '...'`. One
+    /// that starts with - goes after --
+    #[arg(trailing_var_arg = true, value_name = "COMMAND")]
     pub command: Vec<String>,
 }
 
@@ -269,6 +262,31 @@ mod tests {
         };
         assert_eq!(args.settings().cpus, None);
         assert_eq!(args.command, ["ls", "--cpus", "2"]);
+    }
+
+    #[test]
+    fn rejects_unknown_flags_before_the_command() {
+        for args in [
+            &["sendit", "run", "--deatach"][..],
+            &["sendit", "run", "--cpus", "2", "-x", "ls"],
+            &["sendit", "ssh", "--rot", "ls"],
+            &["sendit", "ssh", "-x"],
+        ] {
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+        // A command that starts with - goes after --.
+        let cli = Cli::try_parse_from(["sendit", "run", "--", "-x", "--y"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.command, ["-x", "--y"]);
+        let cli = Cli::try_parse_from(["sendit", "ssh", "--root", "--", "-x"]).unwrap();
+        let Command::Ssh { root, command } = cli.command else {
+            panic!("expected ssh")
+        };
+        assert!(root);
+        assert_eq!(command, ["-x"]);
     }
 
     #[test]
