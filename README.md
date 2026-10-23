@@ -119,7 +119,19 @@ A script can ask for host directories to be shared with the image's VMs, in comm
 
 These take the same form as `--mount`, with host paths absolute or starting with `~`, and come after the top-level mounts and before the project's. A host directory that doesn't exist is left out with a notice. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. They are recorded when the image is built, and each VM keeps those of the build it was made from: a changed mount line takes effect with the next build, for the VMs made after it, so rebuild the image, then `sendit reset` the VMs that should have it. A worktree's VM that is a copy of its main worktree's VM keeps that VM's, also when made again; `sendit run --fresh` makes it from the image instead. `sendit provision` lists them and `sendit status` shows them. Read the mount lines of a script you copy: they give the VM access to files on the Mac.
 
-[`provision-scripts/`](provision-scripts) has example scripts for Rust, the Helix editor, Claude Code, the Pi coding agent, and a `CLAUDE.md` that tells Claude Code about the VM (installed as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it). [`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
+[`provision-scripts/`](provision-scripts) has example scripts:
+
+| Script | What it does |
+| --- | --- |
+| [`rust.sh`](provision-scripts/rust.sh) | Installs Rust with rustup, with clippy and rustfmt |
+| [`helix.sh`](provision-scripts/helix.sh) | Builds the Helix editor from source; calls `rust.sh` |
+| [`claude-code.sh`](provision-scripts/claude-code.sh) | Installs Claude Code with its native installer |
+| [`claude-md.sh`](provision-scripts/claude-md.sh) | Installs a `CLAUDE.md` that tells Claude Code about the VM, as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it |
+| [`pi.sh`](provision-scripts/pi.sh) | Installs Node.js and the Pi coding agent |
+| [`tailscale.sh`](provision-scripts/tailscale.sh) | Joins each VM to your tailnet on boot as `sendit-<project>`, so your other devices can reach it; needs setup in the Tailscale admin console, described in the script |
+| [`rex.sh`](provision-scripts/rex.sh) | Installs Rex and serves it over HTTPS through Tailscale Serve, so Rex on your other devices can reach the VM; calls `tailscale.sh` |
+
+[`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 
 ### Git worktrees
 

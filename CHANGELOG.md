@@ -5,6 +5,7 @@
 ### Added
 
 - `sendit run -d` (`--detach`) runs the VM in the background: sendit returns once the VM answers over SSH, `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. Ctrl-C before then, or the VM not answering within two minutes, shuts it down again. Its console output goes to `run/console.log` in the VM's directory.
+- Two example provisioning scripts: `provision-scripts/tailscale.sh` joins each VM to your tailnet on boot, as an ephemeral device named `sendit-<project>` with the tag `tag:sendit`, so your other devices can reach it, e.g. with Tailscale SSH as `dev`. It authenticates with an OAuth client secret that only root in the VM can read; the script describes the setup in the Tailscale admin console. `provision-scripts/rex.sh` installs Rex and serves it over HTTPS through Tailscale Serve, so Rex for Mac and the `rex` CLI on your other devices can reach the VM; logging in to the VM shows the address. It calls `tailscale.sh`.
 
 ### Changed
 
