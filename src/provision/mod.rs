@@ -41,18 +41,27 @@ pub const BASE_DISK_SIZE: ByteSize = ByteSize::gib(16);
 const USER_DATA: &str = include_str!("../assets/user-data.yaml");
 const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
 
-/// Bumped whenever the base image changes in a way the host code relies on.
+/// The oldest base image this version of sendit can run VMs from. Bumping it
+/// marks every older image outdated and refuses to run the VMs made from
+/// them until `sendit reset` deletes them, with everything in them outside
+/// the project. So it is bumped only when this sendit would misbehave with a
+/// VM made from an older image, because the host relies on the change, or
+/// when VMs made from older images are unsafe to keep running. Not for
+/// changes the host copes without, such as fixes in the guest alone, or
+/// features whose absence the host falls back from, however much a rebuilt
+/// image is wanted.
+///
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
-/// identifiable by MAC address, 4 shuts the VM down on console logout, 5
-/// applies the host terminal's size to the console, 6 its type, 7 takes
-/// the guest user's sudo rights and lets the host log in as root, 8 stops
-/// systemd from asking the terminal for its size, whose late replies ended
-/// up in the shell, 9 gives root's shell colours, a window title and a red
-/// prompt, tells the host when the guest starts shutting down, and drops
+/// identifiable by MAC address, and 7 took the guest user's sudo rights,
+/// which could unmask the project's .git, and let the host log in as root.
+/// The others went further than this: 4 shuts the VM down on console
+/// logout, 5 applies the host terminal's size to the console, 6 its type, 8
+/// stops systemd from asking the terminal for its size, whose late replies
+/// ended up in the shell, 9 gives root's shell colours, a window title and a
+/// red prompt, tells the host when the guest starts shutting down, and drops
 /// unattended-upgrades, which could hold up shutting down, 10 booted the
 /// kernel with 16 KiB pages. Images boot the cloud image's kernel with
-/// 4 KiB pages again since, without a new revision: the host doesn't rely
-/// on the kernel, and images with the 16 KiB kernel keep working.
+/// 4 KiB pages again since, without a new revision.
 pub const BASE_REVISION: u32 = 10;
 
 /// Printed by provision.sh as its last line when it succeeded, followed by
