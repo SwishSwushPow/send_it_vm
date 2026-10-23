@@ -128,8 +128,15 @@ write_env() {
 # The kernel forgets the size whenever nothing has the console open, e.g.
 # before the getty has started. Hold it open from a child: this script leads
 # its session, so opening the console would make it its controlling terminal,
-# and the getty couldn't have it anymore.
+# and the getty couldn't have it anymore. Ask only once the child has it open:
+# a size applied before then is lost when stty closes the console, and the
+# getty finds none and sets 24x80.
 sleep infinity < /dev/hvc0 &
+holder=$!
+while kill -0 "$holder" 2> /dev/null &&
+    [ "$(readlink "/proc/$holder/fd/0")" != /dev/hvc0 ]; do
+    sleep 0.01
+done
 stty -echo
 echo '?'
 # The getty waits for the type, so don't wait long for it.

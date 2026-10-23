@@ -16,6 +16,7 @@
 ### Base image
 
 - Base images boot the cloud image's kernel with 4 KiB pages again instead of Debian's kernel with 16 KiB pages (`linux-image-arm64-16k`): the disk caching mode above takes its place against the lost writes. Images get it when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`. Images that still boot the 16 KiB kernel keep working.
+- The console no longer sometimes starts at 24×80 instead of the size of your terminal, until the window is resized. It happened when the VM was busy while booting, e.g. with other VMs running. Images get the fix when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`.
 
 ## 0.8.0 - 2026-10-17
 
