@@ -25,12 +25,6 @@
 # the mask over the project's .git. With other people on your tailnet,
 # replace "tailscale:*" below with "tailscale:<your login>".
 #
-# On Linux, Rex starts the shell of a new terminal as a non-login shell,
-# which never reads ~/.profile or /etc/profile.d: commands installed into
-# ~/.local/bin, such as claude, would be missing from the PATH, and the
-# shell would start in the home directory instead of the project. So those
-# shells start over as login shells, like the console and `sendit ssh`.
-#
 # Rex's package repository needs a token. On the Mac, save it as
 # ~/.secrets/superlogical/token, then write the script that carries it into
 # the build with
@@ -166,18 +160,4 @@ case $- in
     fi
     ;;
 esac
-EOF
-
-# Every interactive bash that isn't a login shell reads /etc/bash.bashrc.
-# Only the shells Rex starts itself start over, not a bash started in one;
-# the login shell reads this file again, through /etc/profile, and goes on.
-sudo tee -a /etc/bash.bashrc > /dev/null <<'EOF'
-
-# Written by sendit's rex.sh: Rex starts the shell of a new terminal as a
-# non-login shell, so start over as a login shell.
-if ! shopt -q login_shell && read -r sendit_parent < /proc/$PPID/comm &&
-    [ "$sendit_parent" = rex ]; then
-    exec -l "$BASH"
-fi
-unset sendit_parent
 EOF
