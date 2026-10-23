@@ -49,8 +49,10 @@ const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
 /// systemd from asking the terminal for its size, whose late replies ended
 /// up in the shell, 9 gives root's shell colours, a window title and a red
 /// prompt, tells the host when the guest starts shutting down, and drops
-/// unattended-upgrades, which could hold up shutting down, 10 boots the
-/// kernel with 16 KiB pages.
+/// unattended-upgrades, which could hold up shutting down, 10 booted the
+/// kernel with 16 KiB pages. Images boot the cloud image's kernel with
+/// 4 KiB pages again since, without a new revision: the host doesn't rely
+/// on the kernel, and images with the 16 KiB kernel keep working.
 pub const BASE_REVISION: u32 = 10;
 
 /// Printed by provision.sh as its last line when it succeeded, followed by

@@ -8,7 +8,7 @@ I let Claude Code build this project based on my experiences with [vibe](https:/
 
 Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework, for running things like coding agents against a project without giving them the rest of the machine.
 
-You provision a Debian base image once, or several with different tools. Each project's VM starts as an APFS clone of one: instant, and taking no space until the guest writes. The project directory is shared read-write, with `.git` hidden behind an empty read-only mount so the VM can't touch the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
+You provision a Debian 13 (trixie, arm64) base image once, or several with different tools. Each project's VM starts as an APFS clone of one: instant, and taking no space until the guest writes. The project directory is shared read-write, with `.git` hidden behind an empty read-only mount so the VM can't touch the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
 
 ## Building
 
@@ -46,7 +46,7 @@ A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, 
 
 `sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
 
-Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable.
+Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable. The VM takes the Mac's time zone on every boot.
 
 In the console, `exit` or Ctrl-D shuts the VM down. Ctrl-] asks the guest to shut down, and a second press forces it off. Any shutdown that takes over 30 seconds, however it started, is forced too.
 
@@ -89,6 +89,8 @@ The VM swaps to compressed memory (zram) of up to half its `memory`, so a build 
 
 New VMs are made from the `default` image unless `image` or `--image` picks another, and keep using the image they were made from. If that setting later names a different image, `sendit run` refuses to start the VM until `sendit reset` deletes it. Rebuilding or deleting an image doesn't affect existing VMs.
 
+A new version of sendit may change the base image in a way it relies on; the changelog says when. Images built before that are then outdated: `sendit status` and `sendit images` say so, and `sendit provision NAME`, or `--all`, builds them again. VMs made from them don't start until `sendit reset` deletes them, so that the next run makes them again; `sendit status` and `sendit list` tell which they are, and `sendit prune --outdated` deletes them all.
+
 `sendit provision NAME` builds image `NAME`; without a name, the current project's image, and with `--all`, every image sendit knows of; `--cpus` and `--memory` override what the build gets. Names are up to 64 lowercase letters, digits and dashes, not starting with a dash.
 
 ### Image files
@@ -104,7 +106,7 @@ sendit-provision claude-code.sh
 
 The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file and the scripts run with `bash -e -o pipefail`: a failing command, pipelines included, stops the script it's in, and a failing script stops the build. A failed script fails the build even if the script that called it carries on, e.g. with `sendit-provision x.sh || true`. So does one that is still running when the image file ends, e.g. one started in the background with `&` and never waited for, and a call of a script that is still running fails.
 
-sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be a file name in `provision-scripts/` written out literally, and the only argument. The command must be the bare word `sendit-provision` too, not run through `eval`, `bash -c` or a full path, and that word anywhere outside quotes and comments counts as a call, so quote it in e.g. `command -v 'sendit-provision'`. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, mount lines it can't read, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` takes no shares from the scripts and doesn't fail on mistakes in them, so existing VMs keep working while you edit; it only stops while `provision-scripts/` has subfolders.
+sendit finds the scripts an image needs by reading the `sendit-provision NAME` calls, skipping comments, quotes and here-documents (a `$(...)` in double quotes counts), so `NAME` must be the name of a file in `provision-scripts/` written out literally, and the only argument. Only files whose names end in `.sh` and don't start with a dot count as scripts there. The command must be the bare word `sendit-provision` too, not run through `eval`, `bash -c` or a full path, and that word anywhere outside quotes and comments counts as a call, so quote it in e.g. `command -v 'sendit-provision'`. `sendit provision` refuses names it can't find, scripts that call each other in a cycle, mount lines it can't read, and image files that are dangling symlinks (symlinks into e.g. a dotfiles repository are fine). `run` takes no shares from the scripts and doesn't fail on mistakes in them, so existing VMs keep working while you edit; it only stops while `provision-scripts/` has subfolders.
 
 Each script runs as the VM's user in its own login shell from the home directory, as `bash FILE`, so its shebang line is ignored. `~/.profile` is read again after each `sendit-provision`, so later commands see what earlier scripts `export` in it, e.g. `PATH`. sudo is available only while provisioning. Trust the scripts, and whatever they download, as you would root in every VM made from the image: sendit takes sudo away afterwards, but not a setuid binary or root service they left behind.
 
