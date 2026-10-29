@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Result, bail, ensure};
 
 use crate::config::{ByteSize, Config, Mount, VmSettings};
-use crate::paths::{ImageName, Paths, Project};
+use crate::paths::{ImageName, Paths, Project, VmName};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState, ScriptMount};
 use crate::util::canonical;
@@ -178,7 +178,10 @@ pub fn reset(
         return Ok(());
     }
     if project_vm::state(&dir)? != State::Stopped {
-        bail!("the VM is running; stop it first with `sendit stop`");
+        bail!(
+            "the VM is running; stop it first with `{} stop`",
+            project_vm::sendit_for(&dir, project)
+        );
     }
     let parent = project_vm::parent_metadata(paths, project);
     let next = match &parent {
@@ -201,10 +204,13 @@ pub fn reset(
         ),
         _ => String::new(),
     };
+    let vm = match project_vm::metadata(&dir).ok().and_then(|m| m.name) {
+        Some(name) => format!("the VM {name} ({})", paths.display(dir.path())),
+        None => paths.display(dir.path()),
+    };
     let question = format!(
-        "Delete {} and everything stored in it? The next `run` starts from a fresh copy \
-         {next}{missing}.",
-        paths.display(dir.path())
+        "Delete {vm} and everything stored in it? The next `run` starts from a fresh copy \
+         {next}{missing}."
     );
     if !yes {
         confirmed(&question, PASS_YES)?;
@@ -215,6 +221,7 @@ pub fn reset(
 }
 
 pub fn list(paths: &Paths) -> Result<()> {
+    project_vm::name_vms(paths)?;
     let dirs = project_vm::all(paths)?;
     if dirs.is_empty() {
         eprintln!("No VMs in {}.", paths.display(&paths.vms_dir()));
@@ -228,6 +235,12 @@ pub fn list(paths: &Paths) -> Result<()> {
             State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
             State::Stopped => "stopped",
         };
+        let name = metadata
+            .as_ref()
+            .ok()
+            .and_then(|metadata| metadata.name.as_ref())
+            .map_or("?", VmName::as_str)
+            .to_string();
         let (image, project) = match metadata {
             Ok(metadata) => {
                 let path = metadata.project_path.display();
@@ -251,13 +264,17 @@ pub fn list(paths: &Paths) -> Result<()> {
                 format!("? ({})", paths.display(dir.path())),
             ),
         };
-        rows.push((state, allocated(&dir.disk()), image, project));
+        rows.push((name, state, allocated(&dir.disk()), image, project));
     }
-    let width = column_width("IMAGE", rows.iter().map(|row| &row.2));
-    println!("{:<8} {:>9}  {:<width$}  PROJECT", "STATE", "DISK", "IMAGE");
-    for (state, disk, image, project) in rows {
+    let names = column_width("NAME", rows.iter().map(|row| &row.0));
+    let images = column_width("IMAGE", rows.iter().map(|row| &row.3));
+    println!(
+        "{:<names$}  {:<8} {:>9}  {:<images$}  PROJECT",
+        "NAME", "STATE", "DISK", "IMAGE"
+    );
+    for (name, state, disk, image, project) in rows {
         println!(
-            "{state:<8} {:>9}  {image:<width$}  {project}",
+            "{name:<names$}  {state:<8} {:>9}  {image:<images$}  {project}",
             disk.approx()
         );
     }
@@ -400,12 +417,14 @@ pub enum PruneScope {
 }
 
 pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
+    project_vm::name_vms(paths)?;
     let mut orphans = Vec::new();
     let mut old = Vec::new();
     let mut others = Vec::new();
     for dir in project_vm::all(paths)? {
         let all = scope == PruneScope::All;
-        let (project, group) = match project_vm::metadata(&dir) {
+        // The project and, to list it, the VM's name and its project.
+        let (project, listed, group) = match project_vm::metadata(&dir) {
             Ok(metadata) => {
                 let path = &metadata.project_path;
                 let group = match project_dir(path) {
@@ -422,16 +441,21 @@ pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
                         continue;
                     }
                 };
-                (path.display().to_string(), group)
+                let project = path.display().to_string();
+                let listed = match &metadata.name {
+                    Some(name) => format!("{name}  {project}"),
+                    None => project.clone(),
+                };
+                (project, listed, group)
             }
-            Err(_) if all => ("?".to_string(), &mut others),
+            Err(_) if all => ("?".to_string(), "?".to_string(), &mut others),
             Err(_) => continue,
         };
         if project_vm::state(&dir)? != State::Stopped {
             eprintln!("Skipping {project}: it is still running.");
             continue;
         }
-        group.push((dir, project));
+        group.push((dir, listed));
     }
     if orphans.is_empty() && old.is_empty() && others.is_empty() {
         eprintln!(
@@ -455,8 +479,8 @@ pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
             continue;
         }
         eprintln!("{heading}");
-        for (dir, project) in vms {
-            eprintln!("  {project}  ({})", paths.display(dir.path()));
+        for (dir, listed) in vms {
+            eprintln!("  {listed}  ({})", paths.display(dir.path()));
         }
     }
     let count = match orphans.len() + old.len() + others.len() {
@@ -538,11 +562,13 @@ pub fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
 }
 
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
+    project_vm::name_vms(paths)?;
     let image = &project_vm::image(paths, project, settings.image.as_ref());
     let base_dir = paths.image_dir(image);
     let base_state = provision::base_state(paths, image)?.describe(image);
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
+    let sendit = project_vm::sendit_for(&vm_dir, project);
     // Whether the image's scripts asked for other shares in its latest
     // build, if it has one.
     let latest = provision::marker(paths, image);
@@ -563,13 +589,13 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         match parent {
             Some(m) if m.image == *image && !m.outdated() => {
                 let copy = format!(
-                    "not created; `sendit run` copies the VM of {}",
+                    "not created; `{sendit} run` copies the VM of {}",
                     paths.display(&m.project_path)
                 );
                 if new_vm_behind()? {
                     format!(
                         "{copy}, made from an earlier build of the {image} image; \
-                         `sendit run --fresh` makes it from the current one"
+                         `{sendit} run --fresh` makes it from the current one"
                     )
                 } else {
                     copy
@@ -588,11 +614,11 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         // Also while it runs: the config file may have changed since.
         match &metadata {
             Some(m) if m.image != *image => format!(
-                "{state}; made from the {} image, `sendit reset` recreates it from {image}",
+                "{state}; made from the {} image, `{sendit} reset` recreates it from {image}",
                 m.image
             ),
             Some(m) if m.outdated() => {
-                format!("{state}; made from an outdated base image, `sendit reset` recreates it")
+                format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
             }
             Some(_) => {
                 let shares = behind(project_vm::script_mounts(paths, project, image, false)?)?;
@@ -600,9 +626,11 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
                     // A worktree's VM made again is a copy of its parent VM,
                     // which may be behind too.
                     let how = if new_vm_behind()? {
-                        "`sendit reset` and `sendit run --fresh` recreate it"
+                        // Without the name, which goes with the VM.
+                        let again = project_vm::sendit_in(project);
+                        format!("`{sendit} reset` and `{again} run --fresh` recreate it")
                     } else {
-                        "`sendit reset` recreates it"
+                        format!("`{sendit} reset` recreates it")
                     };
                     let what = if shares {
                         format!("shares what an earlier build of the {image} image asked for")
@@ -623,8 +651,13 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     );
     println!("project  {}", project.root.display());
     println!("vm       {} ({state})", paths.display(vm_dir.path()));
-    if let Some(copy_of) = metadata.and_then(|m| m.copy_of) {
-        println!("copy of  the VM of {}", paths.display(&copy_of));
+    if let Some(metadata) = metadata {
+        if let Some(name) = metadata.name {
+            println!("name     {name}");
+        }
+        if let Some(copy_of) = metadata.copy_of {
+            println!("copy of  the VM of {}", paths.display(&copy_of));
+        }
     }
     println!("cpus     {}", settings.cpus);
     println!("memory   {}", settings.memory);

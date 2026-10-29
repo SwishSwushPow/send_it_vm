@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::error::ErrorKind;
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::config::{MountSpec, Resources, Settings};
-use crate::paths::ImageName;
+use crate::paths::{ImageName, VmName};
 
 /// Light and fast per-project Debian VMs on macOS.
 #[derive(Debug, Parser)]
@@ -13,8 +14,33 @@ pub struct Cli {
     #[arg(short = 'C', long = "project", global = true, value_name = "DIR")]
     pub project: Option<PathBuf>,
 
+    /// The project whose VM has this name (see `sendit list`), instead of
+    /// a project directory
+    #[arg(short = 'n', long = "name", global = true, value_name = "NAME")]
+    pub name: Option<VmName>,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Parses `args` like `try_parse_from`, and also rejects `-n` together
+    /// with `-C`: clap's `conflicts_with` misses them when they are given
+    /// on different levels, e.g. `sendit -n app stop -C dir`.
+    pub fn try_parse_checked_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::try_parse_from(args)?;
+        if cli.name.is_some() && cli.project.is_some() {
+            return Err(Self::command().error(
+                ErrorKind::ArgumentConflict,
+                "the argument '--name <NAME>' cannot be used with '--project <DIR>'",
+            ));
+        }
+        Ok(cli)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -59,6 +85,13 @@ pub enum Command {
     Status,
     /// Shut down the project's running VM
     Stop,
+    /// Rename the project's VM, e.g. `sendit -n old rename new`
+    Rename {
+        /// The new name: up to 64 lowercase letters, digits and dashes, not
+        /// starting with a dash
+        #[arg(value_name = "NEW_NAME")]
+        new_name: VmName,
+    },
     /// Delete the project's VM; the next `run` starts from a fresh copy of the base image,
     /// or for a git worktree, of its main worktree's VM
     Reset {
@@ -66,7 +99,7 @@ pub enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// List all project VMs
+    /// List all project VMs and their names
     List,
     /// List the base images and how many VMs were made from each
     Images {
@@ -325,6 +358,61 @@ mod tests {
         };
         assert!(root);
         assert_eq!(command, ["apt", "--help"]);
+    }
+
+    #[test]
+    fn parses_names() {
+        // Before or after the subcommand, and before a command to run.
+        for args in [
+            &["sendit", "-n", "app", "ssh", "ls"][..],
+            &["sendit", "ssh", "-n", "app", "ls"],
+            &["sendit", "ssh", "--name", "app", "ls"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.name, Some("app".parse().unwrap()), "{args:?}");
+            let Command::Ssh { command, .. } = cli.command else {
+                panic!("expected ssh")
+            };
+            assert_eq!(command, ["ls"]);
+        }
+        // After the command, it is the command's.
+        let cli = Cli::try_parse_from(["sendit", "ssh", "ls", "-n", "app"]).unwrap();
+        assert_eq!(cli.name, None);
+
+        // The new name is not the global one.
+        for (args, old) in [
+            (&["sendit", "-n", "old", "rename", "new"][..], Some("old")),
+            (&["sendit", "rename", "-n", "old", "new"], Some("old")),
+            (&["sendit", "rename", "new"], None),
+        ] {
+            let cli = Cli::try_parse_checked_from(args).unwrap();
+            assert_eq!(cli.name, old.map(|old| old.parse().unwrap()), "{args:?}");
+            let Command::Rename { new_name } = cli.command else {
+                panic!("expected rename")
+            };
+            assert_eq!(new_name, "new".parse().unwrap());
+        }
+        let cli = Cli::try_parse_checked_from(["sendit", "-C", "/p", "rename", "new"]).unwrap();
+        assert_eq!(cli.project, Some(PathBuf::from("/p")));
+        assert_eq!(cli.name, None);
+
+        for args in [
+            &["sendit", "stop", "-n", "App"][..],
+            &["sendit", "rename", "my_vm"],
+            &["sendit", "rename"],
+        ] {
+            assert!(Cli::try_parse_checked_from(args).is_err(), "{args:?}");
+        }
+        // Not both -n and -C, on any level.
+        for args in [
+            &["sendit", "-n", "app", "-C", "/p", "stop"][..],
+            &["sendit", "stop", "-n", "app", "-C", "/p"],
+            &["sendit", "-n", "app", "stop", "-C", "/p"],
+            &["sendit", "-C", "/p", "run", "-n", "app", "-d"],
+        ] {
+            let error = Cli::try_parse_checked_from(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
+        }
     }
 
     #[test]

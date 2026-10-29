@@ -1,7 +1,7 @@
 //! Tests that drive the sendit binary without booting VMs, so they run in
-//! CI: what it says in a home without images or VMs, how it lists them
-//! (made up for the test), how it reports bad configuration, which shares
-//! it refuses, and how it signs itself.
+//! CI: what it says in a home without images or VMs, how it lists, names
+//! and finds them (made up for the test), how it reports bad configuration,
+//! which shares it refuses, and how it signs itself.
 //!
 //! Each test gets a scratch home and project directory of its own in
 //! `target/tmp/cli-tests/<test>/`.
@@ -22,9 +22,13 @@ struct Env {
 
 impl Env {
     fn new(test: &str) -> Self {
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("cli-tests")
-            .join(test);
+        let tests = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli-tests");
+        // An empty `.git` ends the search for a repository here, so that
+        // the projects aren't in a linked worktree when the tests run in
+        // one, e.g. in `send_it.worktrees/x`: that would change their VMs'
+        // names.
+        fs::create_dir_all(tests.join(".git")).unwrap();
+        let root = tests.join(test);
         let _ = fs::remove_dir_all(&root);
         let env = Self {
             home: root.join("home"),
@@ -75,6 +79,26 @@ impl Env {
     /// The project directory as sendit shows it, with symlinks resolved.
     fn project_path(&self) -> String {
         self.project.canonicalize().unwrap().display().to_string()
+    }
+
+    /// The sendit command line that hints give for the project, run
+    /// elsewhere while its VM has no name.
+    fn sendit_in_project(&self) -> String {
+        format!("sendit -C {}", shell_quote(&self.project_path()))
+    }
+}
+
+/// `arg` quoted for a POSIX shell where it needs to be, as sendit quotes
+/// the arguments in the commands it suggests.
+fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"%+,-./:=@_".contains(&b));
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
     }
 }
 
@@ -185,7 +209,7 @@ fn tells_when_the_vm_is_from_an_earlier_build() {
     assert_eq!(
         vm_state(),
         "stopped; made from an earlier build of the default image, \
-         `sendit reset` recreates it from the current one"
+         `sendit -n project reset` recreates it from the current one"
     );
 
     // A linked worktree of the project, as `git worktree add` leaves it,
@@ -201,10 +225,11 @@ fn tells_when_the_vm_is_from_an_earlier_build() {
     fs::write(&dot_git, format!("gitdir: {}\n", gitdir.display())).unwrap();
     fs::write(gitdir.join("gitdir"), format!("{}\n", dot_git.display())).unwrap();
     let (status, _) = wt.ok(&["status"]);
+    let sendit = wt.sendit_in_project();
     assert!(
         status.contains(&format!(
-            "(not created; `sendit run` copies the VM of {}, made from an earlier build \
-             of the default image; `sendit run --fresh` makes it from the current one)",
+            "(not created; `{sendit} run` copies the VM of {}, made from an earlier build \
+             of the default image; `{sendit} run --fresh` makes it from the current one)",
             env.project.display()
         )),
         "{status}"
@@ -245,9 +270,13 @@ fn has_nothing_to_list_or_remove_without_vms() {
     assert_eq!(env.ok(&["stop"]).1, "The VM is not running.\n");
     assert_eq!(env.ok(&["prune"]).1, "No VMs of missing projects.\n");
     assert_eq!(env.ok(&["prune", "--all"]).1, "No stopped VMs.\n");
+    // Not run in the project directory, and the VM has no name yet.
     assert_fails_with(
         &env.sendit(&["ssh", "--", "true"]),
-        "the VM is not running; start it with `sendit run`",
+        &format!(
+            "the VM is not running; start it with `{} run`",
+            env.sendit_in_project()
+        ),
     );
 }
 
@@ -293,6 +322,8 @@ fn lists_vms_and_images() {
     vm("old", "c3", Some((&env.project, "default", 0)));
     vm("broken", "c4", None);
 
+    // Each gets a name when they are first listed: that of its project's
+    // folder, numbered if taken, in the order of their directories.
     let (list, _) = env.ok(&["list"]);
     let project = env.project.display().to_string();
     let gone = gone.display().to_string();
@@ -305,9 +336,10 @@ fn lists_vms_and_images() {
     assert_eq!(
         rows,
         [
-            vec!["STATE", "DISK", "IMAGE", "PROJECT"],
-            vec!["stopped", "0", "B", "rust", "<project>"],
+            vec!["NAME", "STATE", "DISK", "IMAGE", "PROJECT"],
+            vec!["project", "stopped", "0", "B", "rust", "<project>"],
             vec![
+                "?",
                 "stopped",
                 "0",
                 "B",
@@ -316,6 +348,7 @@ fn lists_vms_and_images() {
                 "(~/.sendit/broken_6ba7b811-9dad-11d1-80b4-00c04fd430c4)"
             ],
             vec![
+                "gone",
                 "stopped",
                 "0",
                 "B",
@@ -325,7 +358,7 @@ fn lists_vms_and_images() {
                 "<gone>",
                 "(missing)"
             ],
-            vec!["outdated", "0", "B", "default", "<project>"],
+            vec!["project-2", "outdated", "0", "B", "default", "<project>"],
         ],
         "{list}"
     );
@@ -356,12 +389,100 @@ fn lists_vms_and_images() {
     assert_fails_with(&output, "pass --yes");
     assert_fails_with(
         &output,
-        &format!("VMs whose project directory no longer exists:\n  {gone}  (~/.sendit/gone_"),
+        &format!("VMs whose project directory no longer exists:\n  gone  {gone}  (~/.sendit/gone_"),
     );
     let (_, deleted) = env.ok(&["prune", "--yes"]);
     assert!(deleted.ends_with("Deleted 1 VM.\n"), "{deleted}");
     let (list, _) = env.ok(&["list"]);
     assert!(!list.contains(&gone), "{list}");
+}
+
+#[test]
+fn finds_vms_by_name() {
+    let env = Env::new("names");
+    // Run elsewhere, without -C.
+    let sendit = |args: &[&str]| {
+        common::sendit(&env.home)
+            .current_dir(&env.home)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let ok = |args: &[&str]| {
+        let output = sendit(args);
+        assert!(
+            output.status.success(),
+            "sendit {} failed with {}:\n{}",
+            args.join(" "),
+            output.status,
+            text(&output.stderr)
+        );
+        (text(&output.stdout), text(&output.stderr))
+    };
+    // The project's VM, as `status` in the project directory shows it.
+    let (status, _) = env.ok(&["status"]);
+    let vm = status
+        .lines()
+        .find_map(|line| line.strip_prefix("vm")?.trim().strip_prefix("~/"))
+        .and_then(|line| line.split(' ').next())
+        .map(|vm| env.home.join(vm))
+        .unwrap();
+    fs::create_dir_all(&vm).unwrap();
+    // As made before sendit named VMs.
+    fs::write(
+        vm.join("project.toml"),
+        format!(
+            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n",
+            env.project_path()
+        ),
+    )
+    .unwrap();
+
+    // Looking it up names it.
+    let (status, _) = ok(&["-n", "project", "status"]);
+    let lines: Vec<_> = status.lines().collect();
+    assert_eq!(lines[1], format!("project  {}", env.project_path()));
+    assert!(
+        lines[2].starts_with("vm       ~/.sendit/project_"),
+        "{status}"
+    );
+    assert_eq!(lines[3], "name     project");
+    assert!(
+        fs::read_to_string(vm.join("project.toml"))
+            .unwrap()
+            .contains("name = \"project\""),
+    );
+    assert_eq!(ok(&["stop", "-n", "project"]).1, "The VM is not running.\n");
+    assert_fails_with(
+        &sendit(&["-n", "nope", "stop"]),
+        "no VM is named nope; `sendit list` shows the names",
+    );
+
+    assert_eq!(
+        ok(&["-n", "project", "rename", "web"]).1,
+        "Renamed the VM project to web.\n"
+    );
+    let (list, _) = ok(&["list"]);
+    assert!(list.lines().nth(1).unwrap().starts_with("web "), "{list}");
+    assert_fails_with(
+        &sendit(&["-n", "project", "status"]),
+        "no VM is named project",
+    );
+    // In the project directory, without -n.
+    assert_eq!(env.ok(&["rename", "app"]).1, "Renamed the VM web to app.\n");
+    // Hints name the VM, wherever sendit runs.
+    assert_fails_with(
+        &sendit(&["ssh", "-n", "app", "--", "true"]),
+        "the VM is not running; start it with `sendit -n app run`",
+    );
+    let (_, deleted) = ok(&["-n", "app", "reset", "--yes"]);
+    assert!(
+        deleted.starts_with("Deleted ~/.sendit/project_"),
+        "{deleted}"
+    );
+    assert!(!vm.exists());
+    assert_fails_with(&sendit(&["-n", "app", "status"]), "no VM is named app");
 }
 
 #[test]
@@ -540,6 +661,9 @@ fn rejects_bad_arguments() {
         // Not the command to run in the VM.
         &["run", "--deatach"],
         &["ssh", "--rot", "ls"],
+        // Not with -C, which these tests pass.
+        &["-n", "app", "status"],
+        &["rename", "My_App"],
     ] {
         let output = env.sendit(args);
         // clap's usage errors.

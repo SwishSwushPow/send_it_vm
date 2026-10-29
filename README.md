@@ -30,7 +30,9 @@ sendit ssh --root         # ... as root, e.g. to install packages
 sendit stop               # shut the running VM down
 sendit status             # show the VM and its effective settings
 sendit reset              # delete the VM; the next run starts from a fresh copy
-sendit list               # list all project VMs
+sendit rename web         # rename the VM to web
+sendit -n web ssh         # any of these for the VM named web, from anywhere
+sendit list               # list all project VMs and their names
 sendit images             # list the base images and how many VMs use each
 sendit images --delete go # delete the go image; its VMs keep working
 sendit prune              # delete VMs whose project directory is gone
@@ -38,7 +40,9 @@ sendit prune --outdated   # ... and VMs made from an outdated base image
 sendit prune --all        # delete every VM that isn't running
 ```
 
-Commands act on the project in the current directory, or on `-C DIR`. `reset`, `prune` and `images --delete` ask first; `-y`/`--yes` skips that, and is needed without a terminal.
+Commands act on the project in the current directory, on `-C DIR`, or on the project whose VM is named `-n NAME` (`--name`). `reset`, `prune` and `images --delete` ask first; `-y`/`--yes` skips that, and is needed without a terminal.
+
+Each VM has a name of its own, so that you can reach it from any directory: `sendit -n my-app ssh`, or `sendit stop -n my-app`. A new VM is named after its project's folder, lowercased, with anything but letters and digits turned into dashes (`My App` becomes `my-app`), and `-2`, `-3`, … added if another VM has that name already; a git worktree's VM is named as described [below](#git-worktrees). `sendit list` and `sendit status` show the names, and VMs made by earlier versions of sendit get theirs the first time a command shows or looks up names, or makes or runs a VM. `sendit rename NEW` renames the VM, also while it runs: up to 64 lowercase letters, digits and dashes, not starting with a dash. The name goes with the VM, so after `sendit reset`, the next VM is named after the folder again. Found by name, a VM's project directory may be gone, e.g. for `sendit -n old-app reset`; only `run` needs it. When sendit suggests a command for a VM, e.g. after `sendit run -d` or in `sendit status`, it gives one that works where you are: outside the project directory, with `-n` and the VM's name.
 
 A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, with `sendit ssh --root`) in a login shell in the project directory, so it gets the `PATH` your provisioning scripts set in `~/.profile`. Arguments arrive unchanged; use `sh -c '...'` for pipes and the like. Options before the command are sendit's, so a mistyped one is an error instead of the command; a command that starts with `-` goes after `--`. It gets a terminal when sendit has one, so `sendit run claude` works, and its output can be piped otherwise. sendit exits with the command's exit code, or with 128 plus the signal's number if the VM stops first, e.g. through `sendit stop` or Ctrl-C. With a command, `sendit run` skips the console, waits for SSH, and shuts the VM down when the command ends.
 
@@ -139,7 +143,7 @@ These take the same form as `--mount`, with host paths absolute or starting with
 
 `sendit run --worktree <branch>` checks the branch out in a worktree and boots that worktree's VM. The worktree goes to `<repo>.worktrees/<branch>`, with `/` replaced by `-` (e.g. `~/dev/repo.worktrees/feature-x` for `feature/x`), or to `--worktree-path`. A new branch starts at `HEAD` or `--from`; a branch only a remote has is tracked as with `git checkout`, and `--from <remote>/<branch>` picks among several remotes. If the branch has a worktree already, its VM boots, so the same command takes you back later. For a project in a subdirectory of the repository, it boots the VM of the same subdirectory of the worktree. Your shell's directory doesn't change, but the console starts in the worktree.
 
-Any linked worktree gets its own VM. If the main worktree has a stopped VM made from the same image, the worktree's VM starts as an instant copy of it, with everything installed, logged into and cached there, and the same SSH host keys and machine ID. A copy of a running VM could miss unwritten data, so while the main VM runs, `sendit run` asks whether to use the base image instead (default: no, stop the main VM first). `--fresh` starts from the base image, the main VM's unless `--image` or the config names another; for a worktree whose VM is a copy already, `sendit reset` it first. A worktree also uses its main worktree's `[projects."<path>"]` table unless it has its own. Subdirectories map to the same subdirectory of the main worktree for both. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
+Any linked worktree gets its own VM, named after the main worktree's VM (or folder, while that has none) and the worktree's folder: `my-app-feature-x` for the worktree in `my-app.worktrees/feature-x` of the project whose VM is `my-app`. If the main worktree has a stopped VM made from the same image, the worktree's VM starts as an instant copy of it, with everything installed, logged into and cached there, and the same SSH host keys and machine ID. A copy of a running VM could miss unwritten data, so while the main VM runs, `sendit run` asks whether to use the base image instead (default: no, stop the main VM first). `--fresh` starts from the base image, the main VM's unless `--image` or the config names another; for a worktree whose VM is a copy already, `sendit reset` it first. A worktree also uses its main worktree's `[projects."<path>"]` table unless it has its own. Subdirectories map to the same subdirectory of the main worktree for both. `sendit status` shows which VM a worktree's VM is, or will be, a copy of.
 
 ## Limits
 

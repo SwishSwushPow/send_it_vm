@@ -26,12 +26,19 @@ use crate::util;
 /// The most of a link file that is read; a VM could make `.git` huge.
 const MAX_LINK_FILE: u64 = 4096;
 
-/// The counterpart of `root`, a canonical path, in its main worktree, if
-/// `root` is in a linked worktree of a non-bare repository that isn't
-/// inside the main worktree: the main worktree itself for the linked one,
-/// and the same subdirectory for one of its subdirectories, as in a
-/// monorepo. That subdirectory needn't exist in the main worktree.
+/// The counterpart of `root` in its main worktree, as `linked_worktree`
+/// finds it.
 pub fn main_worktree(root: &Path) -> Option<PathBuf> {
+    linked_worktree(root).map(|(main, _)| main)
+}
+
+/// The counterpart of `root`, a canonical path, in its main worktree, and
+/// the top of the linked worktree `root` is in, if `root` is in a linked
+/// worktree of a non-bare repository that isn't inside the main worktree.
+/// The counterpart is the main worktree itself for the linked one, and the
+/// same subdirectory for one of its subdirectories, as in a monorepo. That
+/// subdirectory needn't exist in the main worktree.
+pub fn linked_worktree(root: &Path) -> Option<(PathBuf, &Path)> {
     // The innermost `.git` is the repository's, as for git.
     let top = root
         .ancestors()
@@ -49,11 +56,12 @@ pub fn main_worktree(root: &Path) -> Option<PathBuf> {
         return None;
     }
     let sub = root.strip_prefix(top).ok()?;
-    Some(if sub.as_os_str().is_empty() {
+    let main = if sub.as_os_str().is_empty() {
         main.to_path_buf()
     } else {
         main.join(sub)
-    })
+    };
+    Some((main, top))
 }
 
 /// The counterpart of `dir` in the worktree of `branch` in the git
@@ -169,7 +177,8 @@ fn open_worktree(
 }
 
 /// `<main>.worktrees/<branch>` next to the main worktree, with each `/` of
-/// the branch name replaced by `-`: the folder name also names the VM.
+/// the branch name replaced by `-`: the folder name also goes into the
+/// VM's name, e.g. `send-it-feature-x`.
 fn default_path(main: &Path, branch: &str) -> PathBuf {
     let name = main
         .file_name()
@@ -266,6 +275,10 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         // Whether or not the main worktree has it.
         assert_eq!(main_worktree(&sub), Some(main.join("apps/web")));
+        assert_eq!(
+            linked_worktree(&sub),
+            Some((main.join("apps/web"), wt.as_path()))
+        );
         fs::create_dir_all(main.join("apps/web")).unwrap();
         assert_eq!(main_worktree(&main.join("apps/web")), None);
 

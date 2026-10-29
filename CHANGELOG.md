@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Each VM has a name, so that you can reach it from any directory: `-n NAME` (`--name`) picks the project whose VM has that name, in place of `-C DIR`, e.g. `sendit -n my-app ssh` or `sendit stop -n my-app`, and works with every command that acts on a project. A new VM is named after its project's folder, lowercased with anything but letters and digits turned into dashes, and numbered (`my-app-2`) if another VM has that name; a git worktree's VM after its main worktree's VM and the worktree's folder, e.g. `my-app-feature-x`. VMs made by earlier versions get their name the first time a command shows or looks up names (`list`, `status`, `prune`, `-n`), or makes or runs a VM. By name, a VM is found even when its project directory is gone, e.g. for `sendit -n old-app reset`.
+- `sendit rename NEW` renames the project's VM, also while it runs: up to 64 lowercase letters, digits and dashes, not starting with a dash.
+
+### Changed
+
+- `sendit list` shows each VM's name in a new first column, `sendit status` in a `name` line, and `sendit prune` next to each VM it would delete. `sendit reset` names the VM it asks about.
+- The commands sendit suggests for a VM, e.g. after `run -d`, in `status` and in errors about the VM, work where you ran sendit: outside the project directory, they pick the VM with `-n NAME`, or with `-C <path>` before it has a name, instead of a plain `sendit …` that would act on the project in the current directory. `run` tells you how to stop a worktree's running main VM by its name, too.
+
 ## 0.9.0 - 2026-10-23
 
 ### Added

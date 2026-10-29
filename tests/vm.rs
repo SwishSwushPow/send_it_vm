@@ -358,7 +358,13 @@ impl Project {
     }
 
     fn in_env(env: &'static Env, name: &str) -> Self {
-        let dir = root().join("projects").join(name);
+        let projects = root().join("projects");
+        // An empty `.git` ends the search for a repository here, so that
+        // the projects aren't in a linked worktree when the tests run in
+        // one, e.g. in `send_it.worktrees/x`: that would change their VMs'
+        // names.
+        fs::create_dir_all(projects.join(".git")).unwrap();
+        let dir = projects.join(name);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let project = Self {
@@ -992,8 +998,19 @@ fn runs_in_the_background() {
     let stderr = text(&started.stderr);
     assert!(started.status.success(), "{stderr}");
     assert!(stderr.contains("runs in the background"), "{stderr}");
+    // Not run in the project directory, sendit names the VM to reach it,
+    // which works from anywhere.
+    assert!(
+        stderr.contains("`sendit -n detach ssh` opens a shell in it"),
+        "{stderr}"
+    );
+    let by_name = |args: &[&str]| {
+        let mut cmd = project.env.sendit();
+        cmd.args(["-n", "detach"]).args(args);
+        output(cmd, COMMAND_TIMEOUT).unwrap()
+    };
     // sendit returned once the VM answered.
-    assert_eq!(project.ok(&["ssh", "echo", "up"]), "up\n");
+    assert_eq!(text(&by_name(&["ssh", "echo", "up"]).stdout), "up\n");
     assert!(project.ok(&["status"]).contains("running"));
     // Its process leads a session of its own, without a terminal to hang
     // it up.
@@ -1003,7 +1020,8 @@ fn runs_in_the_background() {
     assert_eq!(unsafe { libc::getsid(pid) }, pid);
     assert_fails_with(&project.sendit(&["run", "-d"]), "already running");
 
-    project.ok(&["stop"]);
+    let stopped = by_name(&["stop"]);
+    assert!(stopped.status.success(), "{}", text(&stopped.stderr));
     assert!(project.ok(&["status"]).contains("stopped"));
     let log = text(&fs::read(project.vm_dir().join("run/console.log")).unwrap());
     // The login console's output, and a clean shutdown.
@@ -1093,7 +1111,7 @@ fn starts_worktree_vms_as_copies() {
     assert_fails_with(&refused, "is running");
     vm.stop();
     let status = text(&in_worktree(&["status"]).stdout);
-    assert!(status.contains("`sendit run` copies the VM of"), "{status}");
+    assert!(status.contains(" run` copies the VM of"), "{status}");
 
     let run = project.command(&[
         "run",
@@ -1116,6 +1134,8 @@ fn starts_worktree_vms_as_copies() {
     );
     let status = text(&in_worktree(&["status"]).stdout);
     assert!(status.contains("copy of  the VM of"), "{status}");
+    // Named after the main worktree's VM and the worktree's folder.
+    assert!(status.contains("name     trunk-feature-x\n"), "{status}");
 }
 
 #[test]

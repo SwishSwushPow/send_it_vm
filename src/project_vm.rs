@@ -19,7 +19,16 @@
 //! starts in a session of its own, without a terminal, and leaves running
 //! once the VM answers over SSH. It is sendit run again rather than a fork:
 //! forking without exec isn't safe once Objective-C is loaded.
+//!
+//! Each VM has a name of its own, kept in its metadata, by which `-n` finds
+//! it from anywhere: its folder's name, or for a linked git worktree, its
+//! main worktree's VM's name and the worktree's folder name, with a number
+//! added if another VM has that name already. VMs made before sendit named
+//! them get one when a command next shows or looks up names, or makes or
+//! runs a VM. Names are given out and changed while holding a lock, so no
+//! two VMs get the same.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{IsTerminal, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -36,7 +45,7 @@ use crate::commands;
 use crate::config::{ByteSize, GUEST_USER, VmSettings};
 use crate::image;
 use crate::mounts;
-use crate::paths::{ImageName, Paths, Project, is_project_id};
+use crate::paths::{ImageName, Paths, Project, VmName, is_project_id};
 use crate::provision::{self, BaseState, ScriptMount};
 use crate::util;
 use crate::vm::{self, ConsoleMode, VmDir, VmSpec, net};
@@ -78,7 +87,8 @@ pub fn background_project() -> Option<PathBuf> {
     std::env::var_os(DETACHED_ENV).map(PathBuf::from)
 }
 
-/// Written into a project VM's directory when it is created.
+/// Written into a project VM's directory when it is created, and again
+/// when it gets a name later or is renamed.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub project_path: PathBuf,
@@ -87,6 +97,10 @@ pub struct Metadata {
     /// The project whose VM this one was made as a copy of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<PathBuf>,
+    /// The name `-n` finds the VM by. Missing only for VMs made before
+    /// sendit named them, until `name_vms` gives them one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<VmName>,
 }
 
 impl Metadata {
@@ -232,6 +246,10 @@ pub fn metadata(dir: &VmDir) -> Result<Metadata> {
     util::read_toml(&path)?.with_context(|| format!("{} is missing", path.display()))
 }
 
+fn write_metadata(dir: &VmDir, metadata: &Metadata) -> Result<()> {
+    util::write_atomic(&dir.metadata(), toml::to_string(metadata)?.as_bytes())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Stopped,
@@ -276,6 +294,175 @@ pub fn all(paths: &Paths) -> Result<Vec<VmDir>> {
     Ok(dirs)
 }
 
+/// The project of the VM in `dir`, whose metadata is `metadata`. Its
+/// directory may be gone.
+fn project_of(dir: &VmDir, metadata: &Metadata) -> Project {
+    Project {
+        root: metadata.project_path.clone(),
+        id: dir
+            .path()
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
+    }
+}
+
+/// The project whose VM is named `name`.
+pub fn find(paths: &Paths, name: &VmName) -> Result<Project> {
+    name_vms(paths)?;
+    for dir in all(paths)? {
+        if let Ok(metadata) = metadata(&dir)
+            && metadata.name.as_ref() == Some(name)
+        {
+            return Ok(project_of(&dir, &metadata));
+        }
+    }
+    bail!("no VM is named {name}; `sendit list` shows the names")
+}
+
+/// Renames the project's VM to `name`, unless another VM has that name.
+pub fn rename(paths: &Paths, project: &Project, name: &VmName) -> Result<()> {
+    let dir = dir(paths, project);
+    ensure!(
+        dir.path().exists(),
+        "this project has no VM yet; `{} run` creates it",
+        sendit_for(&dir, project)
+    );
+    let _names = lock_names(paths)?;
+    let mut metadata = metadata(&dir)?;
+    if metadata.name.as_ref() == Some(name) {
+        eprintln!("The VM is named {name} already.");
+        return Ok(());
+    }
+    for other in all(paths)? {
+        if let Ok(other) = self::metadata(&other)
+            && other.name.as_ref() == Some(name)
+        {
+            bail!(
+                "the VM of {} is named {name} already",
+                paths.display(&other.project_path)
+            );
+        }
+    }
+    let old = metadata.name.replace(name.clone());
+    write_metadata(&dir, &metadata)?;
+    match old {
+        Some(old) => eprintln!("Renamed the VM {old} to {name}."),
+        None => eprintln!("Named the VM {name}."),
+    }
+    Ok(())
+}
+
+/// Gives each VM without a name, made before sendit named VMs, the name it
+/// would get if it were made now. Commands that show or look up names call
+/// this first.
+pub fn name_vms(paths: &Paths) -> Result<()> {
+    // Without taking the lock, which would leave its file behind, unless
+    // there is a VM to name.
+    let unnamed = all(paths)?
+        .iter()
+        .any(|dir| metadata(dir).is_ok_and(|metadata| metadata.name.is_none()));
+    if !unnamed {
+        return Ok(());
+    }
+    let _names = lock_names(paths)?;
+    name_unnamed(paths).map(drop)
+}
+
+/// What `name_vms` does, for a caller that holds the names lock. Returns
+/// the names the VMs have then. A VM whose metadata can't be written stays
+/// without a name, with a warning: that doesn't stop the command.
+fn name_unnamed(paths: &Paths) -> Result<BTreeSet<VmName>> {
+    let mut unnamed = Vec::new();
+    for dir in all(paths)? {
+        if let Ok(metadata) = metadata(&dir)
+            && metadata.name.is_none()
+        {
+            unnamed.push((dir, metadata));
+        }
+    }
+    let mut taken = names(paths)?;
+    // Main worktrees first: the names of linked worktrees' VMs start with
+    // theirs. The sort is stable, so the order is otherwise that of `all`.
+    unnamed.sort_by_key(|(_, metadata)| worktree::main_worktree(&metadata.project_path).is_some());
+    for (dir, mut metadata) in unnamed {
+        let name = unique_name(wanted_name(paths, &project_of(&dir, &metadata)), &taken);
+        metadata.name = Some(name.clone());
+        match write_metadata(&dir, &metadata) {
+            Ok(()) => {
+                taken.insert(name);
+            }
+            Err(error) => eprintln!(
+                "warning: could not name the VM in {}: {error:#}",
+                paths.display(dir.path())
+            ),
+        }
+    }
+    Ok(taken)
+}
+
+/// The names the VMs have.
+fn names(paths: &Paths) -> Result<BTreeSet<VmName>> {
+    Ok(all(paths)?
+        .iter()
+        .filter_map(|dir| metadata(dir).ok()?.name)
+        .collect())
+}
+
+/// Takes the lock that VM names are given out and changed under; it is
+/// released when the returned file is closed.
+fn lock_names(paths: &Paths) -> Result<File> {
+    let path = paths.names_lock();
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
+/// The name the VM of `project` gets, unless another VM has it: its
+/// folder's name, or in a linked git worktree, the name of the VM of its
+/// counterpart in the main worktree (see `parent`), or while that has none,
+/// the counterpart's folder name, followed by the linked worktree's folder
+/// name, e.g. `send-it-feature-x`, or for the subdirectory `apps/web` of
+/// that worktree, `web-feature-x`. `vm` if those names have no letters or
+/// digits.
+fn wanted_name(paths: &Paths, project: &Project) -> VmName {
+    let folder = |path: &Path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    let name = match worktree::linked_worktree(&project.root) {
+        Some((main, top)) => {
+            let main = parent_metadata(paths, project)
+                .and_then(|metadata| metadata.name)
+                .map(String::from)
+                .or_else(|| folder(&main))
+                .unwrap_or_default();
+            VmName::from_text(&format!("{main}-{}", folder(top).unwrap_or_default()))
+        }
+        None => folder(&project.root).and_then(|name| VmName::from_text(&name)),
+    };
+    name.unwrap_or_else(|| "vm".parse().expect("valid name"))
+}
+
+/// `wanted`, or if it is `taken`, the first of `wanted-2`, `wanted-3`, …
+/// that isn't.
+fn unique_name(wanted: VmName, taken: &BTreeSet<VmName>) -> VmName {
+    if !taken.contains(&wanted) {
+        return wanted;
+    }
+    (2..)
+        .map(|n| wanted.numbered(n))
+        .find(|name| !taken.contains(name))
+        .expect("a free number")
+}
+
 /// What `create_if_missing` did.
 pub struct Created {
     /// Why the VM isn't a copy of its parent VM, if it has one and needn't
@@ -301,6 +488,10 @@ pub fn create_if_missing(
 ) -> Result<Option<Created>> {
     let dir = dir(paths, project);
     if dir.path().exists() {
+        // Made before sendit named VMs: `-n` finds it from now on.
+        if metadata(&dir).is_ok_and(|metadata| metadata.name.is_none()) {
+            name_vms(paths)?;
+        }
         return Ok(None);
     }
     let image = image(paths, project, settings.image.as_ref());
@@ -333,19 +524,21 @@ pub fn run(
 ) -> Result<i32> {
     let dir = dir(paths, project);
     let metadata = metadata(&dir)?;
+    let sendit = sendit_for(&dir, project);
     if fresh && let Some(copy_of) = &metadata.copy_of {
         bail!(
-            "{} is a copy of the VM of {} already; `sendit reset` deletes it so \
-             that `run --fresh` starts it over from the {} image",
+            "{} is a copy of the VM of {} already; `{sendit} reset` deletes it so \
+             that `{} run --fresh` starts it over from the {} image",
             paths.display(dir.path()),
             paths.display(copy_of),
+            sendit_in(project),
             metadata.image,
         );
     }
     if let Some(image) = &settings.image {
         ensure!(
             metadata.image == *image,
-            "{} was created from the {} image, not {image}; `sendit reset` deletes \
+            "{} was created from the {} image, not {image}; `{sendit} reset` deletes \
              it so the next run starts over from the {image} image",
             paths.display(dir.path()),
             metadata.image,
@@ -354,7 +547,7 @@ pub fn run(
     ensure!(
         !metadata.outdated(),
         "{} was created from an older base image that this version of sendit \
-         can't run; `sendit reset` deletes it so the next run starts over from \
+         can't run; `{sendit} reset` deletes it so the next run starts over from \
          the current base image",
         paths.display(dir.path())
     );
@@ -380,10 +573,10 @@ pub fn run(
         // the lock first, the process in the background fails at once, long before
         // the other VM could answer over SSH, and this one reports it.
         if try_lock(&dir)?.is_none() {
-            return Err(already_running(project, command));
+            return Err(already_running(&dir, project, command));
         }
         // Here, where it is seen; the disk grows in the background.
-        warn_if_shrinking(paths, &dir, settings)?;
+        warn_if_shrinking(paths, &dir, project, settings)?;
         starting(note);
         return run_in_background(paths, project, &dir);
     }
@@ -393,7 +586,7 @@ pub fn run(
     if command.is_empty() && detach == Detach::No {
         vm::clear_screen();
     }
-    resize_disk(paths, &dir, settings)?;
+    resize_disk(paths, &dir, project, settings)?;
 
     starting(note);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -507,7 +700,7 @@ fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i3
     }
     match answers {
         Ok(true) => {
-            let sendit = sendit_for(project);
+            let sendit = sendit_for(dir, project);
             say(&format!(
                 "The VM runs in the background: `{sendit} ssh` opens a shell in it, and \
                  `{sendit} stop` shuts it down. Its console output goes to {}.",
@@ -649,7 +842,8 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
     let dir = dir(paths, project);
     ensure!(
         state(&dir)? != State::Stopped,
-        "the VM is not running; start it with `sendit run`"
+        "the VM is not running; start it with `{} run`",
+        sendit_for(&dir, project)
     );
     let error = ssh_command(paths, &dir, root, Remote::Login(command))?.exec();
     Err(error).context("running ssh")
@@ -930,9 +1124,11 @@ fn source(
                 if ask(&question, &no_terminal)? {
                     return Ok((Source::Base, None));
                 }
-                eprintln!(
-                    "Stop it (`sendit stop` in {main}), then run again to start from a copy."
-                );
+                let stop = match &metadata.name {
+                    Some(name) => format!("`sendit -n {name} stop`"),
+                    None => format!("`sendit stop` in {main}"),
+                };
+                eprintln!("Stop it ({stop}), then run again to start from a copy.");
                 return Err(commands::Declined.into());
             }
         },
@@ -1030,11 +1226,17 @@ fn create(
             fs::write(partial.image_marker(), copy)
                 .with_context(|| format!("copying {}", marker.display()))?;
         }
+        // Until the VM is in place, where the next one made finds its name.
+        let _names = lock_names(paths)?;
+        // Older VMs first, so that the new one doesn't take the name one of
+        // them would get.
+        let taken = name_unnamed(paths)?;
         let metadata = toml::to_string(&Metadata {
             project_path: project.root.clone(),
             image: image.clone(),
             base_revision,
             copy_of,
+            name: Some(unique_name(wanted_name(paths, project), &taken)),
         })?;
         fs::write(partial.metadata(), metadata)?;
         fs::rename(partial.path(), dir.path())
@@ -1049,23 +1251,29 @@ fn create(
 
 /// Grows the disk to the configured size; the guest grows its root
 /// filesystem to match on boot. Disks never shrink.
-fn resize_disk(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> {
-    warn_if_shrinking(paths, dir, settings)?;
+fn resize_disk(paths: &Paths, dir: &VmDir, project: &Project, settings: &VmSettings) -> Result<()> {
+    warn_if_shrinking(paths, dir, project, settings)?;
     image::grow_disk(&dir.disk(), settings.disk_size)
 }
 
-/// Warns if the VM's disk is larger than `settings` ask for: disks only
-/// grow.
-fn warn_if_shrinking(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Result<()> {
+/// Warns if the disk of the VM of `project`, in `dir`, is larger than
+/// `settings` ask for: disks only grow.
+fn warn_if_shrinking(
+    paths: &Paths,
+    dir: &VmDir,
+    project: &Project,
+    settings: &VmSettings,
+) -> Result<()> {
     let current = fs::metadata(dir.disk())
         .with_context(|| format!("reading {}", dir.disk().display()))?
         .len();
     if current > settings.disk_size.0 {
         eprintln!(
-            "warning: the disk of {} is already {} and can't shrink to {}; `sendit reset` recreates it",
+            "warning: the disk of {} is already {} and can't shrink to {}; `{} reset` recreates it",
             paths.display(dir.path()),
             ByteSize(current),
-            settings.disk_size
+            settings.disk_size,
+            sendit_for(dir, project)
         );
     }
     Ok(())
@@ -1077,16 +1285,16 @@ fn warn_if_shrinking(paths: &Paths, dir: &VmDir, settings: &VmSettings) -> Resul
 /// run `command` there or else open a shell.
 fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<File> {
     let Some(mut file) = try_lock(dir)? else {
-        return Err(already_running(project, command));
+        return Err(already_running(dir, project, command));
     };
     write!(file, "{}", std::process::id())?;
     Ok(file)
 }
 
-/// The error for starting the project's VM while it runs, which says how
-/// to reach it, to run `command` there or else open a shell.
-fn already_running(project: &Project, command: &[String]) -> anyhow::Error {
-    let ssh = format!("{} ssh", sendit_for(project));
+/// The error for starting the project's VM, in `dir`, while it runs, which
+/// says how to reach it, to run `command` there or else open a shell.
+fn already_running(dir: &VmDir, project: &Project, command: &[String]) -> anyhow::Error {
+    let ssh = format!("{} ssh", sendit_for(dir, project));
     let (ssh, does) = if command.is_empty() {
         (ssh, "opens another shell in it")
     } else {
@@ -1098,14 +1306,33 @@ fn already_running(project: &Project, command: &[String]) -> anyhow::Error {
     anyhow::anyhow!("this project's VM is already running; `{ssh}` {does}")
 }
 
-/// The sendit command line for `project` from here. Run elsewhere, e.g.
-/// with --worktree, the project must be given.
-fn sendit_for(project: &Project) -> String {
-    let here = std::env::current_dir().and_then(|cwd| cwd.canonicalize());
-    match here {
-        Ok(cwd) if cwd == project.root => "sendit".to_string(),
-        _ => format!("sendit -C {}", quote(&project.root.to_string_lossy())),
+/// The sendit command line for `project`, whose VM is in `dir`, from here,
+/// for hints on what to run next. Run elsewhere, e.g. with -n or
+/// --worktree, the VM must be given: by its name, or if it has none, e.g.
+/// before it is made, by the project directory. A step after `reset`
+/// takes `sendit_in` instead: the name goes with the VM.
+pub fn sendit_for(dir: &VmDir, project: &Project) -> String {
+    match metadata(dir).ok().and_then(|metadata| metadata.name) {
+        Some(name) if !in_project(project) => format!("sendit -n {name}"),
+        _ => sendit_in(project),
     }
+}
+
+/// The sendit command line for `project` from here, by its directory
+/// unless that is here.
+pub fn sendit_in(project: &Project) -> String {
+    if in_project(project) {
+        "sendit".to_string()
+    } else {
+        format!("sendit -C {}", quote(&project.root.to_string_lossy()))
+    }
+}
+
+/// Whether sendit runs in the directory of `project`.
+fn in_project(project: &Project) -> bool {
+    std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .is_ok_and(|cwd| cwd == project.root)
 }
 
 /// Takes the VM's lock without recording a PID; `None` if the VM is running.
@@ -1198,6 +1425,8 @@ mod tests {
             image: "rust".parse().unwrap(),
             base_revision: provision::BASE_REVISION,
             copy_of: None,
+            // As made before sendit named VMs.
+            name: None,
         };
         fs::write(parent.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
         fs::write(parent.disk(), "disk").unwrap();
@@ -1285,6 +1514,12 @@ mod tests {
         assert_eq!(metadata.image, rust);
         assert_eq!(metadata.copy_of.as_ref(), Some(&parent_project));
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
+        // Named after the parent, which got its name first.
+        assert_eq!(metadata.name, Some("main-wt".parse().unwrap()));
+        assert_eq!(
+            self::metadata(&parent).unwrap().name,
+            Some("main".parse().unwrap())
+        );
         // The parent can start again.
         assert_eq!(state_once_released(&parent), State::Stopped);
     }
@@ -1658,7 +1893,8 @@ mod tests {
             let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
             lock(&vm, &project, &command).unwrap_err().to_string()
         };
-        // Tests don't run in the project, so it is named.
+        // Tests don't run in the project, so it is named, by its directory
+        // while the VM has no name.
         let ssh = format!("sendit -C {} ssh", quote(&temp.path().to_string_lossy()));
         let shell = error(&[]);
         assert!(
@@ -1672,6 +1908,183 @@ mod tests {
             )),
             "{command}"
         );
+        write_vm(&vm, temp.path(), Some("app"));
+        let shell = error(&[]);
+        assert!(
+            shell.ends_with("`sendit -n app ssh` opens another shell in it"),
+            "{shell}"
+        );
+    }
+
+    /// Writes the metadata of a VM in `vm` for the project at `root`, with
+    /// `name` if given, else as made before sendit named VMs.
+    fn write_vm(vm: &VmDir, root: &Path, name: Option<&str>) {
+        fs::create_dir_all(vm.path()).unwrap();
+        let metadata = Metadata {
+            project_path: root.to_path_buf(),
+            image: ImageName::default(),
+            base_revision: provision::BASE_REVISION,
+            copy_of: None,
+            name: name.map(|name| name.parse().unwrap()),
+        };
+        fs::write(vm.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn names_vms_and_finds_them_by_name() {
+        let temp = crate::util::TempDir::new("vm-names");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = |path: &str| {
+            let root = temp.path().join(path);
+            fs::create_dir_all(&root).unwrap();
+            let project = Project::at(&root).unwrap();
+            (dir(&paths, &project), project)
+        };
+        let (a, app) = project("a/My App");
+        let (b, other_app) = project("b/my_app");
+        let (c, named) = project("c/web");
+        let (_, none) = project("d/none");
+        write_vm(&a, &app.root, None);
+        write_vm(&b, &other_app.root, None);
+        write_vm(&c, &named.root, Some("my-app"));
+        let name = |vm: &VmDir| metadata(vm).unwrap().name.unwrap().to_string();
+
+        // The names taken already stay; those made from the folder names
+        // get numbers, in the order of the VMs' directories.
+        name_vms(&paths).unwrap();
+        let (first, second) = if a.path() < b.path() {
+            (&a, &b)
+        } else {
+            (&b, &a)
+        };
+        assert_eq!(name(first), "my-app-2");
+        assert_eq!(name(second), "my-app-3");
+        assert_eq!(name(&c), "my-app");
+
+        let found = find(&paths, &name(&a).parse().unwrap()).unwrap();
+        assert_eq!((found.root, found.id), (app.root.clone(), app.id.clone()));
+        let error = find(&paths, &"web".parse().unwrap()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "no VM is named web; `sendit list` shows the names"
+        );
+        // Also once the project directory is gone.
+        fs::remove_dir(&app.root).unwrap();
+        assert_eq!(find(&paths, &name(&a).parse().unwrap()).unwrap().id, app.id);
+
+        let web: VmName = "web".parse().unwrap();
+        rename(&paths, &named, &web).unwrap();
+        assert_eq!(name(&c), "web");
+        assert_eq!(find(&paths, &web).unwrap().id, named.id);
+        rename(&paths, &named, &web).unwrap();
+        let error = rename(&paths, &other_app, &web).unwrap_err();
+        assert!(
+            error.to_string().ends_with("is named web already"),
+            "{error}"
+        );
+        assert_eq!(name(&c), "web");
+        let error = rename(&paths, &none, &web).unwrap_err();
+        assert!(error.to_string().contains("has no VM yet"), "{error}");
+        // The old name is free again, for the next VM made.
+        assert_eq!(
+            unique_name("my-app".parse().unwrap(), &names(&paths).unwrap()).as_str(),
+            "my-app"
+        );
+    }
+
+    #[test]
+    fn takes_the_names_lock_only_to_name_vms() {
+        let temp = crate::util::TempDir::new("vm-names-lock");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        write_vm(&dir(&paths, &project), temp.path(), Some("app"));
+        name_vms(&paths).unwrap();
+        assert!(!paths.names_lock().exists());
+    }
+
+    #[test]
+    fn gives_steps_after_reset_by_directory() {
+        let temp = crate::util::TempDir::new("vm-reset-hint");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        write_vm(&vm, temp.path(), Some("app-wt"));
+        let mut metadata = metadata(&vm).unwrap();
+        metadata.copy_of = Some(temp.path().join("main"));
+        write_metadata(&vm, &metadata).unwrap();
+        let settings = VmSettings {
+            cpus: 1,
+            memory: ByteSize::gib(1),
+            disk_size: ByteSize::gib(8),
+            mounts: Vec::new(),
+            expose_git: false,
+            banner: true,
+            image: None,
+        };
+        let error = run(&paths, &project, &settings, true, None, &[], Detach::No)
+            .unwrap_err()
+            .to_string();
+        // Tests don't run in the project. The name is gone after the reset.
+        let expected = format!(
+            "`sendit -n app-wt reset` deletes it so that `sendit -C {} run --fresh` starts \
+             it over",
+            quote(&temp.path().to_string_lossy())
+        );
+        assert!(error.contains(&expected), "{error}");
+    }
+
+    #[test]
+    fn names_what_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root writes into a read-only directory all the same.
+        // SAFETY: plain syscall.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let temp = crate::util::TempDir::new("vm-names-read-only");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        write_vm(&vm, temp.path(), None);
+        let mode = |mode| fs::set_permissions(vm.path(), fs::Permissions::from_mode(mode));
+
+        // A VM whose metadata can't be written stays without a name, with
+        // a warning, and the command carries on.
+        mode(0o555).unwrap();
+        let named = name_vms(&paths);
+        mode(0o755).unwrap();
+        named.unwrap();
+        assert_eq!(metadata(&vm).unwrap().name, None);
+        // Renaming it gives it a name.
+        let app: VmName = "app".parse().unwrap();
+        rename(&paths, &project, &app).unwrap();
+        assert_eq!(metadata(&vm).unwrap().name, Some(app));
+    }
+
+    #[test]
+    fn names_vms_of_worktrees_after_their_main_worktree() {
+        let temp = crate::util::TempDir::new("vm-names-worktrees");
+        let paths = Paths::new(temp.path().join("home"));
+        let (wt, parent) = subdirectory_with_parent(temp.path(), &paths, "apps/web");
+        let vm = dir(&paths, &wt);
+        write_vm(&vm, &wt.root, None);
+        let name = |vm: &VmDir| metadata(vm).unwrap().name.unwrap().to_string();
+
+        name_vms(&paths).unwrap();
+        assert_eq!(name(&parent), "web");
+        assert_eq!(name(&vm), "web-wt");
+
+        // After the name of the main worktree's VM, not its folder.
+        fs::remove_file(vm.metadata()).unwrap();
+        write_vm(&vm, &wt.root, None);
+        rename(
+            &paths,
+            &project_of(&parent, &metadata(&parent).unwrap()),
+            &"site".parse().unwrap(),
+        )
+        .unwrap();
+        name_vms(&paths).unwrap();
+        assert_eq!(name(&vm), "site-wt");
     }
 
     #[test]

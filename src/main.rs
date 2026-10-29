@@ -16,8 +16,7 @@ mod worktree;
 
 use std::process::ExitCode;
 
-use anyhow::Result;
-use clap::Parser;
+use anyhow::{Result, ensure};
 
 use crate::cli::{Cli, Command};
 use crate::commands::{Declined, PruneScope};
@@ -39,7 +38,7 @@ fn main() -> ExitCode {
 }
 
 fn sendit() -> Result<ExitCode> {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse_checked_from(std::env::args_os()).unwrap_or_else(|e| e.exit());
     sign::ensure_entitled()?;
     let paths = Paths::from_env()?;
     // Every time, so that directories made by older versions, or deleted
@@ -59,7 +58,10 @@ fn sendit() -> Result<ExitCode> {
         }
     }
     let cwd = std::env::current_dir()?;
-    let project = || Project::at(cli.project.as_deref().unwrap_or(&cwd));
+    let project = || match &cli.name {
+        Some(name) => project_vm::find(&paths, name),
+        None => Project::at(cli.project.as_deref().unwrap_or(&cwd)),
+    };
     let resolve = |project: &Project, cli: &Settings, fresh: bool| {
         Config::load(&paths)?.resolve(&paths, project, cli, &cwd, fresh)
     };
@@ -81,12 +83,32 @@ fn sendit() -> Result<ExitCode> {
             };
             let project = match (&background, &args.worktree) {
                 (Some(root), _) => Project::at(root)?,
-                (None, Some(branch)) => Project::at(&worktree::open(
-                    cli.project.as_deref().unwrap_or(&cwd),
-                    branch,
-                    args.from.as_deref(),
-                    args.worktree_path.as_deref(),
-                )?)?,
+                (None, Some(branch)) => {
+                    let dir = match &cli.name {
+                        Some(name) => project_vm::find(&paths, name)?.root,
+                        None => cli.project.clone().unwrap_or_else(|| cwd.clone()),
+                    };
+                    Project::at(&worktree::open(
+                        &dir,
+                        branch,
+                        args.from.as_deref(),
+                        args.worktree_path.as_deref(),
+                    )?)?
+                }
+                // Found by name, the project directory may be gone, but it
+                // must be there to run, and still lead to the same VM.
+                (None, None) if cli.name.is_some() => {
+                    let found = project()?;
+                    let project = Project::at(&found.root)?;
+                    ensure!(
+                        project.id == found.id,
+                        "the VM's project directory {} now resolves to {}, a project \
+                         of its own",
+                        found.root.display(),
+                        project.root.display()
+                    );
+                    project
+                }
                 (None, None) => project()?,
             };
             let mut settings = resolve(&project, &args.settings(), args.fresh)?;
@@ -145,6 +167,7 @@ fn sendit() -> Result<ExitCode> {
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
         Command::Stop => project_vm::stop(&paths, &project()?),
+        Command::Rename { new_name } => project_vm::rename(&paths, &project()?, new_name),
         Command::Reset { yes } => {
             let project = project()?;
             // Only for a hint: a config file sendit can't read doesn't stop it.
