@@ -25,49 +25,17 @@
 # the mask over the project's .git. With other people on your tailnet,
 # replace "tailscale:*" below with "tailscale:<your login>".
 #
-# Rex's package repository needs a token. On the Mac, save it as
-# ~/.secrets/superlogical/token, then write the script that carries it into
-# the build with
-#   f=~/.config/sendit/provision-scripts/rex-secret.sh
-#   (umask 077 && printf '%s\n' '#!/bin/bash' \
-#       "printf '%s\\n' '$(cat ~/.secrets/superlogical/token)' | sudo install -D -m 600 /dev/stdin /etc/sendit-rex/package-token" \
-#       > "$f") && chmod 600 "$f"
-# and never commit or share it. apt keeps the token for updates, readable
-# only by root, which this script checks. Updates come with a rebuilt image;
-# until Rex has a stable release, it installs from the preview channel.
-# After changing the token, run the command again: rex-secret.sh changes
-# with it, so `sendit status` then says the image needs rebuilding.
+# Rex installs from its public package repository, on the preview channel:
+# without --channel, install.sh would fall back to snapshot builds until Rex
+# has a stable release. Updates come with a rebuilt image.
 
 sendit-provision tailscale.sh
-sendit-provision rex-secret.sh
 
-# One line holding the token alone: anything else, e.g. a Windows line
-# ending, would only show as apt failing to log in.
-if ! sudo awk '!/^[A-Za-z0-9._~+\/=-]+$/ { bad = 1 } END { exit bad || NR != 1 }' \
-    /etc/sendit-rex/package-token; then
-    echo 'rex.sh: /etc/sendit-rex/package-token should hold one line with the' \
-        'package token; see rex-secret.sh' >&2
-    exit 1
-fi
-token=$(sudo cat /etc/sendit-rex/package-token)
-sudo rm -r /etc/sendit-rex
-# Nobody else is in the VM while it is built, so the token may be an
-# argument here.
-curl -fsSL -u "rex:$token" https://pkgs.superlogical.com/rex/install.sh |
-    sudo sh -s -- --token "$token"
-rex --help > /dev/null
-
-# install.sh decides where apt keeps the token; make sure only root can
-# read it there.
-readable=
-while IFS= read -r -d '' file; do
-    [ -z "$(sudo find "$file" -perm /044)" ] || readable="$readable $file"
-done < <(sudo grep -rlZF -- "$token" /etc)
-unset token
-if [ -n "$readable" ]; then
-    echo "rex.sh: the package token is readable by others in:$readable" >&2
-    exit 1
-fi
+curl -fsSL https://pkgs.superlogical.com/rex/install.sh |
+    sudo sh -s -- --channel preview
+# Debian has an unrelated package named rex, (R)?ex, which has no version
+# command, so this also makes sure apt installed Rex.
+rex version > /dev/null
 
 sudo tee /etc/rex/accounts.jsonc > /dev/null <<'EOF'
 // Written by sendit's rex.sh. Only dev, never root.

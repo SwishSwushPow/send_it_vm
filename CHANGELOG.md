@@ -9,6 +9,7 @@
 
 ### Changed
 
+- `provision-scripts/rex.sh` installs Rex from its now public package repository, without a token: its install script no longer accepts `--token`, so builds with the old `rex.sh` failed. `rex-secret.sh` is no longer needed; delete it from `~/.config/sendit/provision-scripts/`. It installs from the preview channel explicitly, since without one Rex's install script now falls back to snapshot builds, and checks that apt installed Rex rather than Debian's unrelated `rex` package.
 - `sendit list` shows each VM's name in a new first column, `sendit status` in a `name` line, and `sendit prune` next to each VM it would delete. `sendit reset` names the VM it asks about.
 - The commands sendit suggests for a VM, e.g. after `run -d`, in `status` and in errors about the VM, work where you ran sendit: outside the project directory, they pick the VM with `-n NAME`, or with `-C <path>` before it has a name, instead of a plain `sendit …` that would act on the project in the current directory. `run` tells you how to stop a worktree's running main VM by its name, too.
 
