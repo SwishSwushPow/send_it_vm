@@ -8,7 +8,7 @@ I let Claude Code build this project based on my experiences with [vibe](https:/
 
 Send it (`sendit`) gives every project its own light and fast Debian VM on macOS, built on Virtualization.framework, for running things like coding agents against a project without giving them the rest of the machine.
 
-You provision a Debian 13 (trixie, arm64) base image once, or several with different tools. Each project's VM starts as an APFS clone of one: instant, and taking no space until the guest writes. The project directory is shared read-write, with `.git` hidden behind an empty read-only mount so the VM can't touch the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root.
+You provision a Debian 13 (trixie, arm64) base image once, or several with different tools. Each project's VM starts as an APFS clone of one: instant, and taking no space until the guest writes. The project directory is shared read-write, with `.git` hidden behind an empty read-only mount so the VM can't touch the history, as long as nothing in it becomes root (see [Limits](#limits)). The VM's user has no sudo rights; only the host can become root. The VM reaches the internet, but not your local network, the Mac or other VMs, unless you [allow them](#network).
 
 ## Building
 
@@ -50,7 +50,7 @@ A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, 
 
 `sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
 
-Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable. The VM takes the Mac's time zone on every boot.
+Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable, and be allowed with `network-allow` (see [Network](#network)). The VM takes the Mac's time zone on every boot.
 
 In the console, `exit` or Ctrl-D shuts the VM down. Ctrl-] asks the guest to shut down, and a second press forces it off. Any shutdown that takes over 30 seconds, however it started, is forced too.
 
@@ -61,12 +61,13 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--read-only`: shares the project read-only. Builds that write into it, such as `target/` or `node_modules/`, must be pointed elsewhere.
 - `--expose-git`: lets the VM see and change `.git`, including the hooks and config git on the Mac runs.
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
+- `--network MODE` and `--network-allow DEST`: what the VM may connect to (see [Network](#network)). Repeatable for `--network-allow`.
 
 `run` asks before sharing a directory, read-only or not (reading the root SSH key is enough), that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), following symlinks, e.g. a provisioning script linked from a dotfiles repository: through those the VM could become root or run commands on the Mac. It checks when it sets up the shares, so a symlink made while a VM runs isn't caught until that VM's next run. sendit can't trace hard links, so link scripts and image files with symlinks.
 
 ## Configuration
 
-`~/.config/sendit/config.toml`. Top-level keys apply to all projects, `[images.<name>]` overrides CPUs and memory for an image and its VMs, and `[projects."<path>"]` overrides both for one project. Flags override everything; mounts from all layers are combined.
+`~/.config/sendit/config.toml`. Top-level keys apply to all projects, `[images.<name>]` overrides CPUs and memory for an image and its VMs, and `[projects."<path>"]` overrides both for one project. Flags override everything; mounts and `network-allow` entries from all layers are combined.
 
 ```toml
 cpus = 4                  # default 2
@@ -74,6 +75,8 @@ memory = "8G"             # default 4G
 disk-size = "128G"        # default 64G; the disk file is sparse and only grows
 mounts = ["~/.cargo/registry:/home/dev/.cargo/registry"]  # read-only unless :rw
 banner = false            # leave the "Send It" banner out of the login message
+network = "internet"      # the default; "none" blocks everything, "open" nothing
+network-allow = ["host:11434"]  # let VMs reach port 11434 on the Mac, e.g. Ollama
 
 image = "rust"            # the base image new VMs are made from; default "default"
 
@@ -85,9 +88,26 @@ expose-git = true
 
 [projects."~/Code/vendor"]
 read-only = true          # share the project directory read-only
+network = "none"          # no network at all
 ```
 
 The VM swaps to compressed memory (zram) of up to half its `memory`, so a build that briefly needs more memory than the VM has slows down instead of being killed. An image file can turn that off with `sudo ln -sf /dev/null /etc/systemd/zram-generator.conf`, or retune it with a drop-in in `/etc/systemd/zram-generator.conf.d/`.
+
+## Network
+
+`network` says what a VM may connect to:
+
+- `internet`, the default: the internet, but not the local network, the Mac or other VMs. DNS goes to the Mac.
+- `none`: nothing.
+- `open`: everything, as with earlier versions of sendit: the internet, the local network, every service on the Mac that listens on more than `127.0.0.1`, other VMs, and whatever the Mac reaches through a VPN or Tailscale.
+
+`network-allow` lets the VM connect to more, whatever `network` says, e.g. `["host:11434"]` for Ollama on the Mac. Its entries are `host[:PORT]` for the Mac (`host.sendit.internal`), `ADDR[/LEN][:PORT]` for IPv4, and `IPV6[/LEN]` or `[IPV6[/LEN]]:PORT` for IPv6; with a port, that port over TCP and UDP, and without one, every port. Entries from all layers of the config file are combined, and `--network-allow` adds more for one run, as `--network` picks the mode. `none` has no DNS either, so allow addresses, or the Mac as `host.sendit.internal`, which the VM resolves itself. `sendit status` shows both settings.
+
+`internet` blocks the private and special-purpose address ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (Tailscale's), link-local and multicast addresses and the like, and for IPv6, unique local (`fc00::/7`), link-local and multicast addresses. It also blocks the networks of the Mac's own interfaces when the VM boots, which covers a local network or VPN with public addresses and the Mac's own IPv6 addresses, and all of these IPv4 addresses through NAT64 (in `64:ff9b::/96`), as well as `64:ff9b:1::/48`. A blocked TCP connection fails at once with "Connection refused", and sending anything else with "Operation not permitted". Blocked attempts show up in the kernel log, e.g. `sendit ssh --root journalctl -k -g sendit-network`.
+
+The rules only filter connections that the VM, or a container in it, opens through its network card. Replies to connections from outside get through: `sendit ssh`, servers in the VM that the Mac reaches at the address `sendit status` shows, and devices on your tailnet reaching a VM that joined it with [`tailscale.sh`](provision-scripts/tailscale.sh). Traffic on other interfaces in the VM isn't filtered, such as Docker's bridges or Tailscale's `tailscale0`, where Tailscale's access controls decide what the VM reaches. Nor are connections into the VM: whatever reaches it, such as the Mac or another VM with `network = "open"`, can open one, and the VM answers over it.
+
+The VM applies the rules itself, as root, on every boot, so a change takes effect when the VM next starts. Until they apply, and if they fail to, nothing gets out of the VM but DHCP; should the VM get no IPv4 route within 30 seconds, DNS and the Mac stay out of reach until it starts again, and the console says so. Base images built by earlier versions of sendit can't apply them and are outdated, along with their VMs (see [Base images](#base-images)).
 
 ## Base images
 
@@ -153,7 +173,8 @@ The VM is a boundary, but not one that makes it safe to run anything in it and t
 - Only the top-level `.git` is hidden, and only if it exists at boot. The VM can plant a repository elsewhere: a `.git` in a subfolder, a submodule's `.git` swapped for its own, or a top-level one in a project that had none. Its config can run a command, e.g. through `core.fsmonitor`, as soon as git on the Mac looks inside: a `git status` in the project root is enough for a submodule, as is a shell prompt or editor showing git status in a subfolder.
 - More generally, anything the VM changes may run on the Mac later: `build.rs`, `.cargo/config.toml`, Makefiles, `package.json` scripts, `.vscode/tasks.json`, test suites. Review the changes before building or running them on the Mac.
 - Console output and `sendit ssh` sessions go straight to your terminal, escape sequences included. Depending on the terminal, these can set its title or, through OSC 52, the clipboard, so a later paste into a shell runs what the VM chose. Check your terminal's clipboard settings.
-- The VM has network access: the internet, the local network, and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
+- The VM reaches the internet, so it can send what it reads anywhere, through DNS too. `network = "internet"` only keeps it from the local network, the Mac and other VMs, and only as far as addresses tell: it doesn't block a VPN on the Mac that routes public addresses, networks the Mac joins after the VM booted, other IPv6 networks of your router than the Mac's (e.g. a guest network), or what your router's public address reaches, such as its admin page or ports it forwards. A proxy on the Mac that answers DNS with fake addresses in `198.18.0.0/15`, which `internet` leaves open for it, can carry the VM's connections to names it resolves on the local network. With `network = "open"`, the VM reaches the local network and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
+- Like the `.git` mask, the network rules hold only while root in the VM stays out of reach: root can lift them.
 
 ## Where things live
 

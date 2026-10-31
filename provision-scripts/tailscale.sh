@@ -146,7 +146,7 @@ Description=Join the tailnet
 Requires=tailscaled.service
 PartOf=tailscaled.service
 Wants=network-online.target
-After=network-online.target tailscaled.service sendit-mounts.service
+After=network-online.target tailscaled.service sendit-mounts.service sendit-network.service
 StartLimitIntervalSec=0
 
 [Service]

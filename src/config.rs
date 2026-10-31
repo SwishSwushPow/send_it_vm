@@ -5,8 +5,8 @@
 //! the config file, the `[images.<name>]` table of the VM's image along with
 //! the mounts its custom scripts ask for, the matching `[projects."<path>"]`
 //! table (for a linked git worktree without one, its main worktree's), CLI
-//! flags. Scalars are overridden by higher layers; mounts
-//! accumulate across layers.
+//! flags. Scalars are overridden by higher layers; mounts and the
+//! destinations `network-allow` lets through accumulate across layers.
 //! Provisioning a base image takes its CPUs and memory from the top-level
 //! keys, then the image's `[images.<name>]` table, then the flags of
 //! `sendit provision`.
@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::network::{Allow, Mode, Network};
 use crate::paths::{ImageName, Paths, Project};
 use crate::provision::ScriptMount;
 use crate::{project_vm, provision, util, worktree};
@@ -195,6 +196,11 @@ pub struct Settings {
     /// The base image a new VM is created from, and the one an existing VM
     /// must have been created from.
     pub image: Option<ImageName>,
+    /// What the VM may connect to.
+    pub network: Option<Mode>,
+    /// Destinations the VM may connect to whatever `network` says.
+    #[serde(default)]
+    pub network_allow: Vec<Allow>,
 }
 
 /// Optional CPUs and memory: the `[images.<name>]` tables, or the flags that
@@ -260,6 +266,7 @@ pub struct VmSettings {
     /// `None` unless a layer chooses one: the VM keeps its image, and a new
     /// one is created from `default`.
     pub image: Option<ImageName>,
+    pub network: Network,
 }
 
 impl Config {
@@ -343,6 +350,7 @@ impl Config {
         let mut read_only = false;
         let mut expose_git = false;
         let mut banner = true;
+        let mut network = Network::default();
         let mut mounts = vec![Mount {
             host: project.root.clone(),
             guest: project_guest_path(project),
@@ -357,6 +365,12 @@ impl Config {
             read_only = layer.read_only.unwrap_or(read_only);
             expose_git = layer.expose_git.unwrap_or(expose_git);
             banner = layer.banner.unwrap_or(banner);
+            network.mode = layer.network.unwrap_or(network.mode);
+            for allow in &layer.network_allow {
+                if !network.allow.contains(allow) {
+                    network.allow.push(*allow);
+                }
+            }
             for spec in &layer.mounts {
                 mounts.push(resolve_mount(paths, spec, base)?);
             }
@@ -371,6 +385,7 @@ impl Config {
             expose_git,
             banner,
             image: chosen,
+            network,
         };
         settings.validate()?;
         Ok(settings)
@@ -633,6 +648,7 @@ mod tests {
             cpus = 4
             memory = "8G"
             mounts = ["~/.cargo/registry:/home/dev/.cargo/registry:ro"]
+            network = "open"
 
             [images.rust]
             memory = "12G"
@@ -641,6 +657,8 @@ mod tests {
             cpus = 8
             expose-git = true
             image = "rust"
+            network = "none"
+            network-allow = ["host:11434", "[fd00::1]:80"]
             "#,
         )
         .unwrap();
@@ -651,11 +669,24 @@ mod tests {
         assert_eq!(project.cpus, Some(8));
         assert_eq!(project.expose_git, Some(true));
         assert_eq!(project.image, Some("rust".parse().unwrap()));
+        assert_eq!(config.defaults.network, Some(Mode::Open));
+        assert_eq!(project.network, Some(Mode::Offline));
+        assert_eq!(
+            project.network_allow,
+            [
+                "host:11434".parse().unwrap(),
+                "[fd00::1]:80".parse().unwrap()
+            ]
+        );
         let rust = "rust".parse().unwrap();
         assert_eq!(config.images[&rust].memory, Some(ByteSize::gib(12)));
 
         assert!(Config::parse("image = \"Rust\"").is_err());
         assert!(Config::parse("[images.\"../x\"]\ncpus = 1").is_err());
+        assert!(Config::parse("network = \"offline\"").is_err());
+        // Images only set resources.
+        assert!(Config::parse("[images.rust]\nnetwork = \"open\"").is_err());
+        assert!(Config::parse("network-allow = [\"example.com\"]").is_err());
     }
 
     #[test]
@@ -739,9 +770,13 @@ mod tests {
             mounts = ["~/extra"]
             read-only = true
 
+            network-allow = ["host:11434", "10.0.0.0/8"]
+
             [projects."{}"]
             memory = "3G"
             expose-git = true
+            network = "none"
+            network-allow = ["10.0.0.0/8", "host"]
             "#,
             fx.project.root.display()
         ))
@@ -749,6 +784,7 @@ mod tests {
         let cli = Settings {
             memory: Some(ByteSize::gib(1)),
             mounts: vec!["proj:/data:rw".parse().unwrap()],
+            network_allow: vec!["[fd00::1]:80".parse().unwrap()],
             ..Settings::default()
         };
 
@@ -760,6 +796,10 @@ mod tests {
         assert_eq!(vm.disk_size, DEFAULT_DISK_SIZE);
         assert!(vm.expose_git);
         assert_eq!(vm.image, None);
+        assert_eq!(vm.network.mode, Mode::Offline);
+        // In layer order, each once.
+        let allow: Vec<_> = vm.network.allow.iter().map(Allow::to_string).collect();
+        assert_eq!(allow, ["host:11434", "10.0.0.0/8", "host", "[fd00::1]:80"]);
         let mounts: Vec<_> = vm
             .mounts
             .iter()
@@ -925,7 +965,9 @@ mod tests {
                 .resolve(&fx.paths, &fx.project, &cli, &fx.dir, false)
         };
 
-        assert!(resolve("", Settings::default()).is_ok());
+        let defaults = resolve("", Settings::default()).unwrap();
+        assert_eq!(defaults.network.mode, Mode::Internet);
+        assert!(defaults.network.allow.is_empty());
         assert!(resolve("cpus = 0", Settings::default()).is_err());
         assert!(resolve("memory = \"256M\"", Settings::default()).is_err());
         assert!(resolve("disk-size = \"4G\"", Settings::default()).is_err());

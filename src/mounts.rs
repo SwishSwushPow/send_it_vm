@@ -2,9 +2,11 @@
 //! tells the guest where to mount them and which time zone to use.
 //!
 //! Every VM gets a read-only `sendit-meta` share holding the manifest, the
-//! script that applies it (`assets/sendit-mounts.sh`) and the login message.
-//! The base image only knows to mount that share and run the script, so the
-//! mount logic, the time zone and the message can change without
+//! script that applies it (`assets/sendit-mounts.sh`), the login message,
+//! and the VM's network rules with the script that applies them
+//! (`assets/sendit-network.sh`, see `network`). The base image only knows
+//! to mount that share and run the scripts, so the mount logic, the time
+//! zone, the message and the network rules can change without
 //! re-provisioning.
 //!
 //! Hiding `.git` keeps it out of reach of the guest user, which has no root
@@ -18,9 +20,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::VmSettings;
+use crate::network;
 
 pub const META_TAG: &str = "sendit-meta";
 const MOUNT_SCRIPT: &str = include_str!("assets/sendit-mounts.sh");
+const NETWORK_SCRIPT: &str = include_str!("assets/sendit-network.sh");
 const BANNER: &str = include_str!("assets/banner.txt");
 
 /// The login message below the banner.
@@ -38,8 +42,10 @@ pub struct Share {
     pub read_only: bool,
 }
 
-/// Writes the manifest, mount script and login message into `meta_dir` and
-/// returns all shares for the VM, the meta share first.
+/// Writes the manifest, mount script, login message, network rules and
+/// network script into `meta_dir` and returns all shares for the VM, the
+/// meta share first. The network rules block the Mac's networks as they
+/// are now (see `network::host_networks`).
 pub fn prepare(settings: &VmSettings, meta_dir: &Path) -> Result<Vec<Share>> {
     fs::create_dir_all(meta_dir).with_context(|| format!("creating {}", meta_dir.display()))?;
     fs::write(
@@ -48,6 +54,11 @@ pub fn prepare(settings: &VmSettings, meta_dir: &Path) -> Result<Vec<Share>> {
     )?;
     fs::write(meta_dir.join("mount.sh"), MOUNT_SCRIPT)?;
     fs::write(meta_dir.join("motd"), motd(settings))?;
+    fs::write(
+        meta_dir.join("network.nft"),
+        network::ruleset(&settings.network, &network::host_networks()),
+    )?;
+    fs::write(meta_dir.join("network.sh"), NETWORK_SCRIPT)?;
     Ok(shares(settings, meta_dir))
 }
 
@@ -157,6 +168,7 @@ mod tests {
             expose_git,
             banner: true,
             image: None,
+            network: network::Network::default(),
         }
     }
 

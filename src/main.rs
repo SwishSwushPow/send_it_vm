@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod image;
 mod mounts;
+mod network;
 mod paths;
 mod project_vm;
 mod provision;

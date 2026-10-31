@@ -1314,6 +1314,48 @@ impl Project {
     }
 }
 
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn restricts_the_network() {
+    let _slot = vm_slot();
+    let project = Project::new("network");
+    let port = serve_on_host();
+    let host = format!("curl -sS --max-time 10 http://host.sendit.internal:{port}/");
+    // curl's exit code when it can't connect, e.g. because the connection
+    // was reset: it fails at once instead of timing out.
+    let refused = |what: &str| format!("{what}; test $? -eq 7");
+
+    // By default, the internet, with DNS from the Mac, but not the Mac.
+    let vm = project.run(&[]);
+    vm.ok("getent hosts deb.debian.org");
+    vm.ok("curl -sS -o /dev/null --max-time 20 https://deb.debian.org/");
+    vm.ok(&refused(&host));
+    vm.ok(&refused("curl -sS --max-time 10 http://192.168.1.1/"));
+    assert!(
+        vm.root_ok("journalctl -k -b")
+            .contains("sendit-network: blocked")
+    );
+    assert!(project.ok(&["status"]).contains("network  internet ("));
+    vm.stop();
+
+    // Nothing but what --network-allow lets through, which lacks DNS.
+    let vm = project.run(&[
+        "--network",
+        "none",
+        "--network-allow",
+        &format!("host:{port}"),
+    ]);
+    assert_eq!(vm.ok(&host), "hello from the host");
+    vm.fails("getent hosts deb.debian.org");
+    vm.ok(&refused("curl -sS --max-time 10 http://1.1.1.1/"));
+    vm.stop();
+
+    // Everything.
+    let vm = project.run(&["--network", "open"]);
+    assert_eq!(vm.ok(&host), "hello from the host");
+    vm.stop();
+}
+
 /// Replaces the value of `key` in the TOML file at `path`.
 fn set_toml_value(path: &Path, key: &str, value: &str) {
     let text = fs::read_to_string(path).unwrap();
@@ -1454,13 +1496,10 @@ fn runs_custom_provisioning_scripts() {
     assert!(project.image_line("custom").contains("provisioned"));
 }
 
-#[test]
-#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
-fn reaches_the_host() {
-    let _slot = vm_slot();
-    let project = Project::new("host");
-    // A service on the Mac that listens on more than 127.0.0.1. With the
-    // macOS firewall on, it may need allowing.
+/// Serves "hello from the host" over HTTP on a port of the Mac that listens
+/// on more than 127.0.0.1, and returns the port. With the macOS firewall on,
+/// it may need allowing.
+fn serve_on_host() -> u16 {
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -1471,8 +1510,18 @@ fn reaches_the_host() {
             let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nhello from the host");
         }
     });
+    port
+}
 
-    let vm = project.run(&[]);
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn reaches_the_host() {
+    let _slot = vm_slot();
+    let project = Project::new("host");
+    let port = serve_on_host();
+
+    // By default, the Mac is out of reach; this lets its port through.
+    let vm = project.run(&["--network-allow", &format!("host:{port}")]);
     // host.sendit.internal is the default gateway, set once the network is
     // up, which may be after sshd is.
     let host = vm.ok("for _ in $(seq 30); do \

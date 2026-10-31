@@ -6,12 +6,20 @@
 
 - Each VM has a name, so that you can reach it from any directory: `-n NAME` (`--name`) picks the project whose VM has that name, in place of `-C DIR`, e.g. `sendit -n my-app ssh` or `sendit stop -n my-app`, and works with every command that acts on a project. A new VM is named after its project's folder, lowercased with anything but letters and digits turned into dashes, and numbered (`my-app-2`) if another VM has that name; a git worktree's VM after its main worktree's VM and the worktree's folder, e.g. `my-app-feature-x`. VMs made by earlier versions get their name the first time a command shows or looks up names (`list`, `status`, `prune`, `-n`), or makes or runs a VM. By name, a VM is found even when its project directory is gone, e.g. for `sendit -n old-app reset`.
 - `sendit rename NEW` renames the project's VM, also while it runs: up to 64 lowercase letters, digits and dashes, not starting with a dash.
+- `network` in the config file, or `sendit run --network`, says what a VM may connect to: `internet`, the default, lets it reach the internet but not the local network, the Mac or other VMs; `none` nothing; `open` everything, as before. It blocks the private and special-purpose address ranges, IPv6's included, and the networks of the Mac's interfaces when the VM boots, also through NAT64. `network-allow` (or `--network-allow`) lets the VM connect to more anyway: `host[:PORT]` for the Mac, `ADDR[/LEN][:PORT]`, or for IPv6, `IPV6[/LEN]` or `[IPV6[/LEN]]:PORT`, e.g. `network-allow = ["host:11434"]`; entries from all layers are combined. Blocked TCP connections fail at once with "Connection refused". The rules only filter connections that the VM, or a container in it, opens through its network card: `sendit ssh`, servers in the VM that the Mac reaches, and Tailscale connections to it keep working. The VM applies them as root on every boot; `sendit status` shows them.
 
 ### Changed
 
+- **Breaking:** VMs no longer reach the local network, the Mac or other VMs unless `network = "open"` or `network-allow` lets them; e.g. a service on the Mac at `host.sendit.internal` needs `network-allow = ["host:PORT"]`.
 - `provision-scripts/rex.sh` installs Rex from its now public package repository, without a token: its install script no longer accepts `--token`, so builds with the old `rex.sh` failed. `rex-secret.sh` is no longer needed; delete it from `~/.config/sendit/provision-scripts/`. It installs from the preview channel explicitly, since without one Rex's install script now falls back to snapshot builds, and checks that apt installed Rex rather than Debian's unrelated `rex` package.
 - `sendit list` shows each VM's name in a new first column, `sendit status` in a `name` line, and `sendit prune` next to each VM it would delete. `sendit reset` names the VM it asks about.
 - The commands sendit suggests for a VM, e.g. after `run -d`, in `status` and in errors about the VM, work where you ran sendit: outside the project directory, they pick the VM with `-n NAME`, or with `-C <path>` before it has a name, instead of a plain `sendit …` that would act on the project in the current directory. `run` tells you how to stop a worktree's running main VM by its name, too.
+
+### Base image
+
+The base revision is now 11: rebuild images from 0.9.0 and earlier with `sendit provision --all`, then delete their VMs with `sendit prune --outdated`. Until then, sendit can't make VMs from the old images or run the VMs made from them.
+
+- Base images install nftables and load rules that let nothing out of the VM but DHCP before its network comes up; once it is up, the VM applies its own rules from sendit, and keeps the first ones if that fails.
 
 ## 0.9.0 - 2026-10-23
 

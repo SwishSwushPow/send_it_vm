@@ -33,7 +33,7 @@ apt-get -y -o Dpkg::Options::=--force-confold full-upgrade
 apt-get -y install --no-install-recommends \
     git curl ca-certificates build-essential pkg-config cmake sudo \
     openssh-server cloud-guest-utils less vim-tiny \
-    unzip jq ripgrep fd-find htop systemd-zram-generator
+    unzip jq ripgrep fd-find htop systemd-zram-generator nftables
 # Updates come with a rebuilt base image, not in the background: an upgrade
 # running in the background holds up shutting down for up to 30 minutes, and
 # would be cut short when sendit forces the VM off.
@@ -535,6 +535,105 @@ if sudo -l -U "$user" true > /dev/null 2>&1; then
     echo "sendit: $user can still use sudo"
     exit 1
 fi
+
+# --- Network rules ----------------------------------------------------------
+# sendit shares the VM's network rules (network.nft) and the script that
+# applies them (network.sh) on the sendit-meta share, like the mounts. Until
+# they apply, once the network is up, the rules below allow nothing out of
+# the VM's network card but DHCP and IPv6's neighbour and router discovery:
+# should the VM's rules fail, or the share be missing, the VM stays without
+# a network rather than with an open one. networkd doesn't start without
+# them. Set up only now, after the custom scripts: a script that restarted
+# networkd would otherwise have cut the build off from the network.
+install -d /usr/local/lib/sendit
+cat > /usr/local/lib/sendit/network-base.nft <<'EOF'
+# Loaded before the network comes up, until sendit-network applies the
+# VM's own rules: no connections out of the VM's network card but DHCP and
+# IPv6's neighbour and router discovery. Replies to connections from
+# outside, such as sendit's over SSH, get through. TCP connections are
+# reset, so they fail at once; over IPv6, Linux takes an ICMP error for a
+# connection attempt as a hint and keeps trying for minutes.
+table inet sendit
+delete table inet sendit
+table inet sendit {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "en*" jump outbound
+	}
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		oifname "en*" jump outbound
+	}
+	chain outbound {
+		ct state established,related accept
+		udp sport 68 udp dport 67 accept
+		udp sport 546 udp dport 547 accept
+		icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld-listener-report, mld2-listener-report } accept
+		meta l4proto tcp reject with tcp reset
+		reject with icmpx admin-prohibited
+	}
+}
+EOF
+cat > /etc/systemd/system/sendit-network-base.service <<'EOF'
+[Unit]
+Description=Block the network until sendit's rules apply
+DefaultDependencies=no
+Wants=network-pre.target
+After=nftables.service
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /usr/local/lib/sendit/network-base.nft
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target
+EOF
+install -d /etc/systemd/system/systemd-networkd.service.d
+cat > /etc/systemd/system/systemd-networkd.service.d/sendit-network.conf <<'EOF'
+[Unit]
+Requires=sendit-network-base.service
+After=sendit-network-base.service
+EOF
+cat > /usr/local/sbin/sendit-network <<'EOF'
+#!/bin/sh
+set -eu
+meta=/run/sendit/meta
+mkdir -p "$meta"
+mountpoint -q "$meta" || mount -t virtiofs -o ro sendit-meta "$meta"
+if [ ! -e "$meta/network.sh" ]; then
+    echo "sendit-network: the sendit that started this VM sent no network rules, so" \
+        "nothing gets out of it; start it with the version of sendit that built its image" >&2
+    exit 1
+fi
+exec sh "$meta/network.sh" "$meta/network.nft"
+EOF
+chmod 755 /usr/local/sbin/sendit-network
+# Before ssh: sendit runs commands as soon as the VM answers over SSH, and
+# they shouldn't find the network still blocked, nor host.sendit.internal
+# missing, which `none` can't look up over DNS.
+cat > /etc/systemd/system/sendit-network.service <<'EOF'
+[Unit]
+Description=Apply sendit's network rules
+Wants=network-online.target
+After=network-online.target sendit-mounts.service sendit-network-base.service sendit-host-name.service
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/sendit-network
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable sendit-network-base.service sendit-network.service
 
 # cloud-init has done its job; later boots of copies must not re-run it.
 touch /etc/cloud/cloud-init.disabled

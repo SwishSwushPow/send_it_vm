@@ -4,6 +4,7 @@ use clap::error::ErrorKind;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use crate::config::{MountSpec, Resources, Settings};
+use crate::network::{Allow, Mode};
 use crate::paths::{ImageName, VmName};
 
 /// Light and fast per-project Debian VMs on macOS.
@@ -154,6 +155,18 @@ pub struct RunArgs {
     #[arg(long, value_name = "IMAGE")]
     pub image: Option<ImageName>,
 
+    /// What the VM may connect to [default: `network` from the config
+    /// file, else internet]
+    #[arg(long, value_name = "MODE")]
+    pub network: Option<Mode>,
+
+    /// Destination the VM may connect to whatever --network says:
+    /// host[:PORT] for the Mac, ADDR[/LEN][:PORT], or for IPv6,
+    /// IPV6[/LEN] or [IPV6[/LEN]]:PORT (repeatable). With a port, that
+    /// port over TCP and UDP
+    #[arg(long = "network-allow", value_name = "DEST")]
+    pub network_allow: Vec<Allow>,
+
     /// Check out BRANCH in a git worktree of the project and boot that
     /// worktree's VM instead. The worktree goes next to the main one, into
     /// <repo>.worktrees/<branch> with each / replaced by -, and the branch
@@ -203,6 +216,8 @@ impl RunArgs {
             expose_git: self.expose_git.then_some(true),
             banner: None,
             image: self.image.clone(),
+            network: self.network,
+            network_allow: self.network_allow.clone(),
         }
     }
 }
@@ -235,6 +250,12 @@ mod tests {
             "--expose-git",
             "--image",
             "rust",
+            "--network",
+            "none",
+            "--network-allow",
+            "host:11434",
+            "--network-allow",
+            "[fd00::1]:80",
         ])
         .unwrap();
         let Command::Run(args) = cli.command else {
@@ -247,6 +268,16 @@ mod tests {
         assert_eq!(settings.read_only, Some(true));
         assert_eq!(settings.expose_git, Some(true));
         assert_eq!(settings.image, Some("rust".parse().unwrap()));
+        assert_eq!(settings.network, Some(Mode::Offline));
+        assert_eq!(
+            settings.network_allow,
+            [
+                "host:11434".parse().unwrap(),
+                "[fd00::1]:80".parse().unwrap()
+            ]
+        );
+        assert!(Cli::try_parse_from(["sendit", "run", "--network", "offline"]).is_err());
+        assert!(Cli::try_parse_from(["sendit", "run", "--network-allow", "x.com"]).is_err());
     }
 
     #[test]

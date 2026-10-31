@@ -24,8 +24,13 @@ machine on the user's Mac, made for running coding agents against one project.
   Further tools from provisioning scripts are on the PATH of login shells;
   check with `command -v` before assuming one is missing.
 - Architecture is linux/arm64 (aarch64). Pick matching downloads.
-- Internet access works. `localhost` is this VM; the Mac is reachable as
-  `host.sendit.internal`, but only for services listening beyond 127.0.0.1.
+- Internet access usually works, but the local network, the Mac and other
+  VMs are blocked on purpose, unless the user allowed them (`network` and
+  `network-allow` in sendit's config); a blocked TCP connection fails with
+  "Connection refused". Don't look for a way around it; tell the user what
+  you need to reach. `localhost` is this VM; the Mac is
+  `host.sendit.internal`, reachable only where allowed, and only for services
+  listening beyond 127.0.0.1.
 - Extra host directories may be mounted under `/mnt/` or elsewhere, usually
   read-only.
 

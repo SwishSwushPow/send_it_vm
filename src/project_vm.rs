@@ -1379,6 +1379,7 @@ fn try_lock(dir: &VmDir) -> Result<Option<File>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::Network;
     use std::path::Path;
 
     #[test]
@@ -1542,6 +1543,7 @@ mod tests {
             expose_git: false,
             banner: true,
             image: None,
+            network: Network::default(),
         };
         let yes = |_: &str, _: &str| Ok(true);
         let vm = dir(&paths, &wt);
@@ -2020,6 +2022,7 @@ mod tests {
             expose_git: false,
             banner: true,
             image: None,
+            network: Network::default(),
         };
         let error = run(&paths, &project, &settings, true, None, &[], Detach::No)
             .unwrap_err()

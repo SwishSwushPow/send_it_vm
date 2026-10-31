@@ -140,9 +140,13 @@ fn explains_what_to_do_in_a_fresh_home() {
     );
     assert_eq!(
         lines[7],
+        "network  internet (the internet, but not the local network, the Mac or other VMs)"
+    );
+    assert_eq!(
+        lines[8],
         format!("mounts   {} -> /home/dev/project (rw)", env.project_path())
     );
-    assert_eq!(lines.len(), 8, "{status}");
+    assert_eq!(lines.len(), 9, "{status}");
 }
 
 #[test]

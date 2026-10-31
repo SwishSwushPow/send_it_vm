@@ -670,6 +670,7 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             "hidden"
         }
     );
+    println!("network  {}", settings.network.describe());
     for (i, mount) in settings.mounts.iter().enumerate() {
         println!(
             "{:<8} {} -> {} ({})",

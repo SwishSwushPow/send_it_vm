@@ -52,8 +52,9 @@ const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
 /// image is wanted.
 ///
 /// Revision 2 added the sendit-mounts service, 3 made DHCP leases
-/// identifiable by MAC address, and 7 took the guest user's sudo rights,
-/// which could unmask the project's .git, and let the host log in as root.
+/// identifiable by MAC address, 7 took the guest user's sudo rights, which
+/// could unmask the project's .git, and let the host log in as root, and 11
+/// restricts the network, which VMs made from older images can't.
 /// The others went further than this: 4 shuts the VM down on console
 /// logout, 5 applies the host terminal's size to the console, 6 its type, 8
 /// stops systemd from asking the terminal for its size, whose late replies
@@ -62,7 +63,7 @@ const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
 /// unattended-upgrades, which could hold up shutting down, 10 booted the
 /// kernel with 16 KiB pages. Images boot the cloud image's kernel with
 /// 4 KiB pages again since, without a new revision.
-pub const BASE_REVISION: u32 = 10;
+pub const BASE_REVISION: u32 = 11;
 
 /// Printed by provision.sh as its last line when it succeeded, followed by
 /// the build's token.
@@ -753,7 +754,11 @@ mod tests {
         assert!(changed());
         // And an image file that points to nothing, even for a build made
         // without one.
-        fs::write(marker_file(&base), "revision = 10\ncustom_scripts = []\n").unwrap();
+        fs::write(
+            marker_file(&base),
+            format!("revision = {BASE_REVISION}\ncustom_scripts = []\n"),
+        )
+        .unwrap();
         fs::remove_file(paths.image_file(&rust)).unwrap();
         assert!(!changed());
         std::os::unix::fs::symlink(home.path().join("gone.sh"), paths.image_file(&rust)).unwrap();
