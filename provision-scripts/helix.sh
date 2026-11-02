@@ -1,34 +1,23 @@
 #!/bin/bash
-# Builds the Helix editor from source with cargo, into ~/.cargo/bin, and
-# puts its runtime files and config in ~/.config/helix.
+# Installs the Helix editor from its official release build, as
+# /usr/local/bin/hx, and puts its runtime files, the tree-sitter grammars
+# already compiled, and config in ~/.config/helix.
 
-sendit-provision rust.sh
+version=25.07.1
+sha256=ce23fa8d395e633e3e54c052012f11965d91d8d5c2bfa659685f50430b4f8175
+name=helix-$version-aarch64-linux
 
-git clone https://github.com/helix-editor/helix.git
-cd helix
-git checkout a05c151
+tmp=$(mktemp -d)
+curl -fsSL -o "$tmp/helix.tar.xz" \
+  "https://github.com/helix-editor/helix/releases/download/$version/$name.tar.xz"
+echo "$sha256  $tmp/helix.tar.xz" | sha256sum -c -
+tar -xJf "$tmp/helix.tar.xz" -C "$tmp"
 
-# install helix
-HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo install --path helix-term --locked
-
-# copy over remaining runtime files
+sudo install -m 755 "$tmp/$name/hx" /usr/local/bin/hx
 mkdir -p ~/.config/helix
-cp -r runtime/ ~/.config/helix/runtime/
-
-# manually build grammars because there is an issue with go on this version
-echo 'use-grammars = { except = [ "go", "gomod", "gotmpl", "gowork" ] }' >> ~/.config/helix/languages.toml
-hx --grammar fetch
-hx --grammar build
+cp -r "$tmp/$name/runtime" ~/.config/helix/runtime
 
 # set default theme
 echo 'theme = "onedark"' >> ~/.config/helix/config.toml
 
-# remove downloaded repo
-cd ..
-rm -rf helix
-
-# remove tree sitter grammar sources
-rm -rf ~/.config/helix/runtime/grammars/sources
-
-# remove specific toolchain from this install
-rustup toolchain uninstall 1.82.0
+rm -rf "$tmp"

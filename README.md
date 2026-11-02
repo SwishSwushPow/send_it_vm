@@ -123,9 +123,10 @@ A new version of sendit may change the base image in a way it relies on; the cha
 
 ```bash
 sendit-provision rust.sh
-sendit-provision helix.sh    # calls rust.sh too, which runs only once
+sendit-provision helix.sh
 sudo apt-get install -y postgresql-client
-sendit-provision claude-code.sh
+sendit-provision tailscale.sh
+sendit-provision rex.sh    # calls tailscale.sh too, which runs only once
 ```
 
 The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file and the scripts run with `bash -e -o pipefail`: a failing command, pipelines included, stops the script it's in, and a failing script stops the build. A failed script fails the build even if the script that called it carries on, e.g. with `sendit-provision x.sh || true`. So does one that is still running when the image file ends, e.g. one started in the background with `&` and never waited for, and a call of a script that is still running fails.
@@ -150,7 +151,7 @@ These take the same form as `--mount`, with host paths absolute or starting with
 | Script | What it does |
 | --- | --- |
 | [`rust.sh`](provision-scripts/rust.sh) | Installs Rust with rustup, with clippy and rustfmt |
-| [`helix.sh`](provision-scripts/helix.sh) | Builds the Helix editor from source; calls `rust.sh` |
+| [`helix.sh`](provision-scripts/helix.sh) | Installs the Helix editor from its release build, grammars included |
 | [`claude-code.sh`](provision-scripts/claude-code.sh) | Installs Claude Code with its native installer |
 | [`claude-md.sh`](provision-scripts/claude-md.sh) | Installs a `CLAUDE.md` that tells Claude Code about the VM, as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it |
 | [`pi.sh`](provision-scripts/pi.sh) | Installs Node.js and the Pi coding agent |
