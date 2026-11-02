@@ -1350,7 +1350,10 @@ fn restricts_the_network() {
     vm.ok(&refused("curl -sS --max-time 10 http://1.1.1.1/"));
     // status shows the rules the VM runs with, and the configured ones.
     let status = project.ok(&["status"]);
-    assert!(status.contains("network  none (nothing; also allows host:"), "{status}");
+    assert!(
+        status.contains("network  none (nothing; also allows host:"),
+        "{status}"
+    );
     assert!(status.contains("configured: internet ("), "{status}");
     vm.stop();
     assert!(!project.ok(&["status"]).contains("configured:"));
