@@ -10,6 +10,18 @@
 # Usage: network.sh <ruleset>
 set -u
 
+# Tells of a failure on stderr, for the journal, and on the console:
+# systemd's "console" is /dev/console, which is tty0 here, not sendit's
+# console on hvc0. Its output is always read, if only to be discarded, so
+# writing to it doesn't block. Only if it exists, so as not to make a plain
+# file in its place.
+fail() {
+    printf 'sendit-network: %s\n' "$*" >&2
+    if [ -c /dev/hvc0 ]; then
+        printf 'sendit-network: %s\n' "$*" > /dev/hvc0 2> /dev/null || true
+    fi
+}
+
 # The address after "via" in the first default route of family $1.
 gateway() {
     ip "$1" route show default | awk '{
@@ -38,12 +50,12 @@ gw6=$(gateway -6)
         *) echo "add element inet sendit gateway6 { $gw6 }" ;;
     esac
 } | nft -f - || {
-    echo "sendit-network: could not apply the network rules; nothing gets out of the VM" >&2
+    fail "could not apply the network rules; nothing gets out of the VM"
     exit 1
 }
 sed -n '1s/^# sendit-network: /sendit-network: /p' "$1"
 if [ -z "$gw4" ]; then
-    echo "sendit-network: no IPv4 default route; DNS and the Mac are out of reach" \
-        "until the VM starts again" >&2
+    fail "no IPv4 default route; DNS and the Mac are out of reach until the VM" \
+        "starts again"
     exit 1
 fi

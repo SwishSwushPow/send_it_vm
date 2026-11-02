@@ -12,10 +12,12 @@
 //! anything goes wrong on the way.
 
 use std::fmt::{self, Write as _};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::ValueEnum;
 use serde::Deserialize;
 
@@ -140,6 +142,21 @@ impl FromStr for Allow {
     fn from_str(s: &str) -> Result<Self> {
         let expected = "expected host[:PORT], ADDR[/LEN][:PORT], or for IPv6, \
                         IPV6[/LEN] or [IPV6[/LEN]]:PORT";
+        // With an address, what is wrong with its prefix length, which a
+        // context would hide from clap and the config file's errors. That
+        // names the network, which is all of `s` unless it has a port.
+        let parse_net = |net: &str| -> Result<Net> {
+            net.parse().map_err(|e| {
+                let addr = net.split_once('/').map_or(net, |(addr, _)| addr);
+                if addr.parse::<IpAddr>().is_err() {
+                    anyhow!("invalid destination {s:?}: {expected}")
+                } else if net == s {
+                    e
+                } else {
+                    anyhow!("invalid destination {s:?}: {e}")
+                }
+            })
+        };
         let (target, port) = if let Some(rest) = s.strip_prefix('[') {
             let (net, port) = rest
                 .split_once(']')
@@ -150,9 +167,7 @@ impl FromStr for Allow {
                     format!("invalid destination {s:?}: expected :PORT after ]")
                 })?),
             };
-            let net: Net = net
-                .parse()
-                .with_context(|| format!("invalid destination {s:?}"))?;
+            let net = parse_net(net)?;
             ensure!(
                 matches!(net, Net::V6(..)),
                 "invalid destination {s:?}: only IPv6 addresses go in brackets"
@@ -170,10 +185,7 @@ impl FromStr for Allow {
             let target = match target {
                 "host" => Target::Host,
                 "" => bail!("invalid destination {s:?}: {expected}"),
-                net => Target::Net(
-                    net.parse()
-                        .with_context(|| format!("invalid destination {s:?}: {expected}"))?,
-                ),
+                net => Target::Net(parse_net(net)?),
             };
             (target, port)
         };
@@ -221,7 +233,10 @@ pub struct Network {
 }
 
 impl Network {
-    /// What the VM may connect to, in words, e.g. for `sendit status`.
+    /// What the VM may connect to, in words, e.g. for `sendit status`. Also
+    /// the ruleset's first line, which `status` compares with what the
+    /// config says now: new wording shows a VM started by an earlier
+    /// version as running with other settings.
     pub fn describe(&self) -> String {
         let what = match self.mode {
             Mode::Open => "everything, the local network and the Mac included",
@@ -288,6 +303,17 @@ const LOCAL_NAT64_V6: (Ipv6Addr, u8) = (Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 
 
 /// The first line of the ruleset, which `network.sh` prints on boot.
 const SUMMARY_PREFIX: &str = "# sendit-network: ";
+
+/// The ruleset's file in the VM's meta directory.
+pub const RULESET_FILE: &str = "network.nft";
+
+/// What the rules that sendit wrote into `meta_dir` for the VM's boot let
+/// it connect to, as `Network::describe` put it then, if they are there.
+pub fn applied(meta_dir: &Path) -> Option<String> {
+    let rules = fs::read_to_string(meta_dir.join(RULESET_FILE)).ok()?;
+    let summary = rules.lines().next()?.strip_prefix(SUMMARY_PREFIX)?;
+    Some(summary.to_string())
+}
 
 /// The nftables ruleset that applies `network` in the guest, given the
 /// networks of the Mac's own interfaces (see `host_networks`), which
@@ -637,6 +663,17 @@ mod tests {
             assert_eq!(allow(&parsed.to_string()), parsed, "{s}");
         }
         assert_eq!(allow("[fd00::1]").to_string(), "fd00::1");
+        // What is wrong with an address's prefix length shows.
+        for (bad, why) in [
+            ("10.0.0.1/8", "the network is 10.0.0.0/8"),
+            ("10.0.0.0/33:80", "expected 0 to 32"),
+            ("[fd00::1/8]:80", "the network is fd00::/8"),
+            ("example.com:443", "expected host[:PORT]"),
+            ("[example.com]:443", "expected host[:PORT]"),
+        ] {
+            let error = bad.parse::<Allow>().unwrap_err().to_string();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
         for bad in [
             "",
             ":80",
@@ -733,6 +770,20 @@ mod tests {
         );
         assert!(!open.contains("chain"));
         assert!(open.contains("set gateway4"));
+    }
+
+    #[test]
+    fn reads_back_what_the_rules_allow() {
+        let temp = crate::util::TempDir::new("network");
+        assert_eq!(applied(temp.path()), None);
+        let network = Network {
+            mode: Mode::Offline,
+            allow: vec![allow("host:11434")],
+        };
+        fs::write(temp.path().join(RULESET_FILE), ruleset(&network, &[])).unwrap();
+        assert_eq!(applied(temp.path()), Some(network.describe()));
+        fs::write(temp.path().join(RULESET_FILE), "table inet sendit {}\n").unwrap();
+        assert_eq!(applied(temp.path()), None);
     }
 
     #[test]

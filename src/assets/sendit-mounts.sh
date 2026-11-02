@@ -20,8 +20,15 @@ profile=/etc/profile.d/sendit-workdir.sh
 # e.g. for a git worktree, knows those of the VM it was copied from.
 points=/var/lib/sendit/mount-points
 
+# Also on the console: systemd's "console" is /dev/console, which is tty0
+# here, not sendit's console on hvc0. Its output is always read, if only to
+# be discarded, so writing to it doesn't block. Only once it exists: this
+# runs early, and writing would otherwise make a plain file in its place.
 fail() {
-    echo "sendit-mounts: $*" >&2
+    printf 'sendit-mounts: %s\n' "$*" >&2
+    if [ -c /dev/hvc0 ]; then
+        printf 'sendit-mounts: %s\n' "$*" > /dev/hvc0 2> /dev/null || true
+    fi
     status=1
 }
 

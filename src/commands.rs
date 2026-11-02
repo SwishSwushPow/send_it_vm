@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Result, bail, ensure};
 
 use crate::config::{ByteSize, Config, Mount, VmSettings};
+use crate::network;
 use crate::paths::{ImageName, Paths, Project, VmName};
 use crate::project_vm::{self, State};
 use crate::provision::{self, BaseState, ScriptMount};
@@ -584,6 +585,10 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
                 || project_vm::new_vm_from_earlier_build(paths, project, image, false)?,
         )
     };
+    // What the rules of the running VM let it connect to, which flags of
+    // `sendit run` or a later change to the config file may have made
+    // different from `settings`.
+    let mut applied = None;
     let state = if !vm_dir.path().exists() {
         let parent = project_vm::parent_metadata(paths, project);
         match parent {
@@ -606,10 +611,13 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     } else {
         let state = match project_vm::state(&vm_dir)? {
             State::Stopped => "stopped".to_string(),
-            State::Running(_) => match vm::net::vm_ip(&vm_dir)? {
-                Some(ip) => format!("running at {ip}"),
-                None => "running".to_string(),
-            },
+            State::Running(_) => {
+                applied = network::applied(&vm_dir.meta());
+                match vm::net::vm_ip(&vm_dir)? {
+                    Some(ip) => format!("running at {ip}"),
+                    None => "running".to_string(),
+                }
+            }
         };
         // Also while it runs: the config file may have changed since.
         match &metadata {
@@ -670,7 +678,14 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             "hidden"
         }
     );
-    println!("network  {}", settings.network.describe());
+    let network = settings.network.describe();
+    match applied {
+        Some(applied) if applied != network => {
+            println!("network  {applied}");
+            println!("         configured: {network}, from the VM's next start");
+        }
+        _ => println!("network  {network}"),
+    }
     for (i, mount) in settings.mounts.iter().enumerate() {
         println!(
             "{:<8} {} -> {} ({})",

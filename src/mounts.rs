@@ -55,7 +55,7 @@ pub fn prepare(settings: &VmSettings, meta_dir: &Path) -> Result<Vec<Share>> {
     fs::write(meta_dir.join("mount.sh"), MOUNT_SCRIPT)?;
     fs::write(meta_dir.join("motd"), motd(settings))?;
     fs::write(
-        meta_dir.join("network.nft"),
+        meta_dir.join(network::RULESET_FILE),
         network::ruleset(&settings.network, &network::host_networks()),
     )?;
     fs::write(meta_dir.join("network.sh"), NETWORK_SCRIPT)?;

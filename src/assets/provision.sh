@@ -606,8 +606,13 @@ meta=/run/sendit/meta
 mkdir -p "$meta"
 mountpoint -q "$meta" || mount -t virtiofs -o ro sendit-meta "$meta"
 if [ ! -e "$meta/network.sh" ]; then
-    echo "sendit-network: the sendit that started this VM sent no network rules, so" \
-        "nothing gets out of it; start it with the version of sendit that built its image" >&2
+    # Also on sendit's console, which systemd's "console" (tty0) isn't.
+    msg="sendit-network: the sendit that started this VM sent no network rules, so"
+    msg="$msg nothing gets out of it; start it with the version of sendit that built its image"
+    echo "$msg" >&2
+    if [ -c /dev/hvc0 ]; then
+        echo "$msg" > /dev/hvc0 2> /dev/null || true
+    fi
     exit 1
 fi
 exec sh "$meta/network.sh" "$meta/network.nft"
