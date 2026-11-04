@@ -349,6 +349,7 @@ pub fn provision(
             last_line: token.clone(),
         }),
         shutdown: None,
+        forward: None,
     };
 
     let partial = VmDir::new(paths.image_partial_dir(name));

@@ -153,6 +153,10 @@ pub fn run(
             ConsoleMode::Hidden
         },
         shutdown: Some(shutdown.clone()),
+        forward: settings
+            .forward_changes
+            .then(|| forward_changes(settings))
+            .transpose()?,
     };
     let stopped = Arc::new(AtomicBool::new(false));
     let runner = (!command.is_empty()).then(|| {
@@ -177,6 +181,20 @@ pub fn run(
         Ok(Some(signal)) if !command.is_empty() => Ok(128 + signal),
         Ok(_) => code,
     }
+}
+
+/// What to forward the host's changes from: the project, at its real path,
+/// since FSEvents reports real paths.
+fn forward_changes(settings: &VmSettings) -> Result<vm::Forward> {
+    let project = settings.project();
+    Ok(vm::Forward {
+        host_root: project
+            .host
+            .canonicalize()
+            .with_context(|| format!("resolving {}", project.host.display()))?,
+        guest_root: project.guest.clone(),
+        hide_git: !settings.expose_git,
+    })
 }
 
 /// Starts the `sendit run` process that runs the VM in `dir` in the

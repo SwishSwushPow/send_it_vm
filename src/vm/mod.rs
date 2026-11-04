@@ -8,9 +8,9 @@
 //! comment says otherwise, the `unsafe` blocks here only call them with
 //! valid, retained objects on the main thread.
 
+mod changes;
 mod config;
 mod console;
-#[allow(dead_code)] // used by the forwarder (next commit)
 mod fsevents;
 pub mod net;
 
@@ -33,6 +33,8 @@ use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineDelegate};
 
 use crate::config::ByteSize;
 use crate::mounts::Share;
+pub use changes::Forward;
+use changes::Forwarder;
 use console::Console;
 
 /// How long to wait for the guest to shut down after asking it to, or after
@@ -209,6 +211,9 @@ pub struct VmSpec {
     /// Set from another thread to shut the VM down, as if Ctrl-] had been
     /// pressed once: setting it again doesn't force the VM off.
     pub shutdown: Option<Arc<AtomicBool>>,
+    /// Forward the host's changes to this directory to the guest's
+    /// watchers, over /dev/hvc3.
+    pub forward: Option<Forward>,
 }
 
 /// What the terminal is used for while the VM runs.
@@ -308,7 +313,11 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
     let mut stopped_by = None;
     let _signals = CatchSignals::new();
     let console = Console::attach(&spec.console)?;
-    let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
+    let forwarder = spec.forward.as_ref().map(Forwarder::start).transpose()?;
+    let mut ports = console.ports();
+    // Last, so it is /dev/hvc3.
+    ports.extend(forwarder.as_ref().map(Forwarder::port));
+    let configuration = catch_objc(|| config::build(dir, spec, &ports))??;
     let state = Rc::new(VmState::default());
     let delegate = VmDelegate::new(state.clone());
     let vm = unsafe {
@@ -410,6 +419,7 @@ pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
         };
     };
     drop(console);
+    drop(forwarder);
     if std::io::stderr().is_terminal() {
         let _ = writeln!(std::io::stderr());
     }

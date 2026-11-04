@@ -160,7 +160,7 @@ impl Drop for Console {
     }
 }
 
-fn serial_port(
+pub(super) fn serial_port(
     input: Option<&NSFileHandle>,
     output: &NSFileHandle,
 ) -> Retained<VZFileHandleSerialPortAttachment> {
@@ -181,7 +181,7 @@ fn null_output() -> Result<Retained<NSFileHandle>> {
 }
 
 /// Wraps `fd` in an `NSFileHandle` that closes it when released.
-fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
+pub(super) fn file_handle(fd: OwnedFd) -> Retained<NSFileHandle> {
     NSFileHandle::initWithFileDescriptor_closeOnDealloc(
         NSFileHandle::alloc(),
         fd.into_raw_fd(),
@@ -536,7 +536,7 @@ fn forward_input(from: libc::c_int, to_guest: OwnedFd, escapes: &AtomicUsize, st
     }
 }
 
-fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+pub(super) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let (read, write) = io::pipe()?;
     Ok((read.into(), write.into()))
 }
@@ -556,27 +556,32 @@ fn syscall(mut call: impl FnMut() -> isize) -> io::Result<usize> {
     }
 }
 
-fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+pub(super) fn read(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY: `buf` is valid for writes of its length.
     syscall(|| unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) })
 }
 
+/// Writes some of `data`; returns how much.
+pub(super) fn write(fd: i32, data: &[u8]) -> io::Result<usize> {
+    // SAFETY: `data` is valid for reads of its length.
+    syscall(|| unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) })
+}
+
 fn write_all(fd: i32, mut data: &[u8]) -> io::Result<()> {
     while !data.is_empty() {
-        // SAFETY: `data` is valid for reads of its length.
-        let n = syscall(|| unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) })?;
+        let n = write(fd, data)?;
         data = &data[n..];
     }
     Ok(())
 }
 
 /// Waits for input on `fds`; returns how many have events, 0 on timeout.
-fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
+pub(super) fn poll(fds: &mut [libc::pollfd], timeout: libc::c_int) -> io::Result<usize> {
     // SAFETY: `fds` is valid for its length.
     syscall(|| unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) } as isize)
 }
 
-fn pollfd(fd: libc::c_int) -> libc::pollfd {
+pub(super) fn pollfd(fd: libc::c_int) -> libc::pollfd {
     libc::pollfd {
         fd,
         events: libc::POLLIN,
