@@ -41,8 +41,8 @@ use std::time::{Duration, Instant};
 
 use common::{assert_fails_with, text};
 use harness::{
-    BOOT_TIMEOUT, COMMAND_TIMEOUT, Project, STOP_TIMEOUT, custom_env, env, output, root, vm_slot,
-    wait_timeout,
+    BOOT_TIMEOUT, COMMAND_TIMEOUT, Project, STOP_TIMEOUT, Vm, custom_env, env, output, root,
+    vm_slot, wait_timeout,
 };
 use terminal::{CONSOLE_TIMEOUT, LEAVE_ALTERNATE_SCREEN, TERMINAL_RESET};
 
@@ -399,6 +399,160 @@ fn shares_the_project_and_mounts() {
     vm.fails("touch ~/shares/hello.txt");
     vm.fails("touch ~/shares/new.txt");
     vm.fails("touch ~/shares/.git/HEAD");
+    vm.stop();
+}
+
+/// Starts `inotifywait` on the project in the guest, logging to `/tmp/iw.log`
+/// (emptied first), and waits for its watches to be set.
+fn watch_in_guest(vm: &Vm, name: &str) {
+    vm.ok(&format!(
+        "rm -f /tmp/iw.log; setsid nohup inotifywait -m -r \
+         -e modify,close_write,create,delete,attrib --format '%e %w%f' ~/{name} \
+         > /tmp/iw.log 2>/dev/null < /dev/null &"
+    ));
+    let start = Instant::now();
+    while !vm.ssh(false, "test -e /tmp/iw.log").status.success() {
+        assert!(start.elapsed() < Duration::from_secs(10), "no /tmp/iw.log");
+        sleep(Duration::from_millis(200));
+    }
+    // inotifywait sets up its watches right after it starts.
+    sleep(Duration::from_secs(1));
+}
+
+/// Polls the guest's `/tmp/iw.log` for up to `timeout` until `done` accepts
+/// it, and returns the last content.
+fn wait_for_log(vm: &Vm, timeout: Duration, done: impl Fn(&str) -> bool) -> String {
+    let start = Instant::now();
+    loop {
+        let log = vm.ok("cat /tmp/iw.log");
+        if done(&log) || start.elapsed() >= timeout {
+            return log;
+        }
+        sleep(Duration::from_millis(250));
+    }
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn forwards_host_changes() {
+    let _slot = vm_slot();
+    let project = Project::new("forwards");
+    fs::write(project.dir.join("a.txt"), "first\n").unwrap();
+    fs::write(project.dir.join("m.txt"), "mode\n").unwrap();
+    let made = Instant::now();
+    let vm = project.run(&[]);
+    watch_in_guest(&vm, "forwards");
+
+    let dir = &project.dir;
+    // FSEvents reports a path once per batch, in its final state: a file
+    // created and removed within a moment is never seen to exist. So each
+    // step gets a pause.
+    let step = || sleep(Duration::from_millis(500));
+    // FSEvents keeps reporting a file as created for a good while (more than
+    // 9 s, less than 20 s were seen), which would hide the attribute change.
+    sleep(Duration::from_secs(25).saturating_sub(made.elapsed()));
+    fs::set_permissions(dir.join("m.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+    step();
+    fs::write(dir.join("a.txt"), "second\n").unwrap();
+    step();
+    fs::write(dir.join("b.txt"), "b\n").unwrap();
+    step();
+    fs::create_dir(dir.join("d")).unwrap();
+    step();
+    fs::write(dir.join("d/c.txt"), "c\n").unwrap();
+    step();
+    fs::remove_file(dir.join("b.txt")).unwrap();
+    step();
+    fs::rename(dir.join("a.txt"), dir.join("e.txt")).unwrap();
+    step();
+    fs::write(dir.join("odd name\n.txt"), "odd\n").unwrap();
+
+    let g = "/home/dev/forwards";
+    let wanted = [
+        format!("MODIFY {g}/a.txt"),
+        format!("CREATE {g}/b.txt"),
+        format!("CREATE,ISDIR {g}/d"),
+        format!("CREATE {g}/d/c.txt"),
+        format!("DELETE {g}/b.txt"),
+        format!("DELETE {g}/a.txt"),
+        format!("CREATE {g}/e.txt"),
+        format!("ATTRIB {g}/m.txt"),
+        // The newline in the name splits the line.
+        format!("CREATE {g}/odd name"),
+    ];
+    let has_all = |log: &str| wanted.iter().all(|w| log.lines().any(|l| l == w));
+    let log = wait_for_log(&vm, Duration::from_secs(10), has_all);
+    for w in &wanted {
+        assert!(
+            log.lines().any(|l| l == w),
+            "the guest didn't see `{w}`; its log:\n{log}"
+        );
+    }
+
+    // The guest's own writes are not echoed back from the Mac.
+    vm.ok("echo x > ~/forwards/g.txt");
+    sleep(Duration::from_secs(3));
+    let log = vm.ok("cat /tmp/iw.log");
+    let creates = log
+        .lines()
+        .filter(|l| *l == format!("CREATE {g}/g.txt"))
+        .count();
+    assert_eq!(creates, 1, "the guest's log:\n{log}");
+    let echoes: u64 = vm
+        .root_ok("cat /sys/module/sendit_notify/parameters/n_echo")
+        .parse()
+        .unwrap();
+    assert!(echoes > 0, "no echo was suppressed");
+    vm.stop();
+
+    // Without forwarding, the service doesn't run and nothing arrives.
+    let vm = project.run(&["--no-forward-changes"]);
+    assert_eq!(
+        vm.ok("systemctl is-active sendit-changes || true"),
+        "inactive"
+    );
+    watch_in_guest(&vm, "forwards");
+    fs::write(dir.join("e.txt"), "third\n").unwrap();
+    sleep(Duration::from_secs(3));
+    let log = vm.ok("cat /tmp/iw.log");
+    assert!(!log.contains("MODIFY"), "the guest's log:\n{log}");
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn forwards_a_burst() {
+    let _slot = vm_slot();
+    let project = Project::new("burst");
+    let vm = project.run(&[]);
+    watch_in_guest(&vm, "burst");
+
+    let make = |sub: &str| {
+        let dir = project.dir.join(sub);
+        fs::create_dir(&dir).unwrap();
+        for i in 0..3000 {
+            fs::write(dir.join(format!("f{i}.txt")), "x\n").unwrap();
+        }
+    };
+    make("one");
+    let count = |log: &str| {
+        log.lines()
+            .filter(|l| l.starts_with("CREATE /home/dev/burst/one/f"))
+            .count()
+    };
+    let log = wait_for_log(&vm, Duration::from_secs(60), |log| count(log) >= 3000);
+    if count(&log) < 3000 {
+        // Tell slow from lost.
+        let later = wait_for_log(&vm, Duration::from_secs(60), |log| count(log) >= 3000);
+        panic!(
+            "only {} of 3000 creates arrived within 60 s, {} within 120 s",
+            count(&log),
+            count(&later)
+        );
+    }
+
+    // Stopping with a burst in flight must not hang.
+    make("two");
     vm.stop();
 }
 

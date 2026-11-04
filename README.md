@@ -80,6 +80,7 @@ memory = "8G"             # default 4G
 disk-size = "128G"        # default 64G; the disk file is sparse and only grows
 mounts = ["~/.cargo/registry:/home/dev/.cargo/registry"]  # read-only unless :rw
 banner = false            # leave the "Send It" banner out of the login message
+forward-changes = false   # don't forward the Mac's file changes into the VM; default true
 network = "internet"      # the default; "none" blocks everything, "open" nothing
 network-allow = ["host:11434"]  # let VMs reach port 11434 on the Mac, e.g. Ollama
 
@@ -113,6 +114,14 @@ The VM swaps to compressed memory (zram) of up to half its `memory`, so a build 
 The rules filter only connections that the VM, or a container in it, opens through its network card. Connections into the VM get answers, e.g. `sendit ssh`, or the Mac reaching a server in it at the address `sendit status` shows. Traffic on other interfaces in the VM isn't filtered, such as Docker's bridges or Tailscale's `tailscale0`, where Tailscale's access controls decide. On macOS 27, other VMs can't reach it; on earlier versions, one with `network = "open"` may.
 
 The VM applies the rules itself, as root, on every boot, so a change takes effect at its next start. Until they apply, and if they fail to, nothing but DHCP gets out, and the console says so.
+
+## File changes
+
+virtiofs gives programs in the VM no inotify events for files changed on the Mac, so watchers there (`inotifywait`, file watchers in dev servers, editors' language servers) would miss every edit made on the Mac. `sendit run` therefore watches the project directory with FSEvents and sends what changed to the VM, where a kernel module (`sendit_notify`, built into the base image with DKMS) raises the matching events: create, modify, close-write, delete and attrib. A rename on the Mac arrives as a delete of the old name and a create of the new one. Changes usually arrive within a quarter of a second. A path that changes again within a moment may be reported once, as its final state, and an event can arrive twice, but none should be lost.
+
+Only the project directory is forwarded, not extra `--mount`s, and `.git` only with `--expose-git`. Changes the VM makes itself already have their events, so the ones that come back from the Mac a moment later are dropped; a watcher in the VM sees its own writes once. When a directory is removed on the Mac, the VM is told about the directory, not necessarily about each file in it.
+
+`forward-changes = false` in the config file, or `sendit run --no-forward-changes`, turns it off; `sendit status` shows the setting as `changes`. It needs an image built by this version, so rebuild older ones with `sendit provision`; until then, the VM runs without it.
 
 ## Base images
 

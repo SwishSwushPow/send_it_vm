@@ -468,7 +468,7 @@ pub struct Vm<'a> {
 
 impl Vm<'_> {
     /// Runs `script` in the guest with `sh -c`, as root if `root`.
-    fn ssh(&self, root: bool, script: &str) -> Output {
+    pub fn ssh(&self, root: bool, script: &str) -> Output {
         let mut args = vec!["ssh"];
         if root {
             args.push("--root");

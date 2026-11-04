@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Changes you make to the project on the Mac now reach programs watching files in the VM. virtiofs gave them no inotify events, so watchers in the VM, e.g. a dev server's, never saw an edit from the Mac. `sendit run` watches the project directory with FSEvents and sends the changes to the VM, where a kernel module raises create, modify, close-write, delete and attrib events; a rename arrives as a delete and a create, and the VM's own writes aren't reported twice. Extra mounts aren't watched, and `.git` only with `--expose-git`. `forward-changes = false` in the config file, or `sendit run --no-forward-changes`, turns it off, and `sendit status` shows a `changes` line. Images need rebuilding with `sendit provision` to get it.
+
 ## 0.11.0 - 2026-11-12
 
 ### Added
