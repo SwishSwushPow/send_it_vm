@@ -30,6 +30,7 @@ mod common;
 mod harness;
 mod terminal;
 
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -470,6 +471,7 @@ fn forwards_host_changes() {
     let g = "/home/dev/forwards";
     let wanted = [
         format!("MODIFY {g}/a.txt"),
+        format!("CLOSE_WRITE,CLOSE {g}/a.txt"),
         format!("CREATE {g}/b.txt"),
         format!("CREATE,ISDIR {g}/d"),
         format!("CREATE {g}/d/c.txt"),
@@ -519,33 +521,43 @@ fn forwards_host_changes() {
     vm.stop();
 }
 
+/// The distinct paths with an event `kind` (e.g. `CREATE`) in a guest's
+/// `inotifywait` log that start with `prefix`. Under load, an event can come
+/// twice.
+fn paths_with<'a>(log: &'a str, kind: &str, prefix: &str) -> HashSet<&'a str> {
+    (log.lines())
+        .filter_map(|line| line.strip_prefix(kind)?.strip_prefix(' '))
+        .filter(|path| path.starts_with(prefix))
+        .collect()
+}
+
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn forwards_a_burst() {
     let _slot = vm_slot();
     let project = Project::new("burst");
+    // There before the watcher starts: one that only hears of a new
+    // directory can miss what is created in it right away, as it would
+    // without sendit.
+    fs::create_dir(project.dir.join("one")).unwrap();
     let vm = project.run(&[]);
     watch_in_guest(&vm, "burst");
 
     let make = |sub: &str| {
         let dir = project.dir.join(sub);
-        fs::create_dir(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         for i in 0..3000 {
             fs::write(dir.join(format!("f{i}.txt")), "x\n").unwrap();
         }
     };
     make("one");
-    let count = |log: &str| {
-        log.lines()
-            .filter(|l| l.starts_with("CREATE /home/dev/burst/one/f"))
-            .count()
-    };
+    let count = |log: &str| paths_with(log, "CREATE", "/home/dev/burst/one/f").len();
     let log = wait_for_log(&vm, Duration::from_secs(60), |log| count(log) >= 3000);
     if count(&log) < 3000 {
         // Tell slow from lost.
         let later = wait_for_log(&vm, Duration::from_secs(60), |log| count(log) >= 3000);
         panic!(
-            "only {} of 3000 creates arrived within 60 s, {} within 120 s",
+            "only {} of 3000 files were created within 60 s, {} within 120 s",
             count(&log),
             count(&later)
         );
@@ -553,6 +565,99 @@ fn forwards_a_burst() {
 
     // Stopping with a burst in flight must not hang.
     make("two");
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn forwards_directory_removal() {
+    let _slot = vm_slot();
+    let project = Project::new("removal");
+    let tree = project.dir.join("tree");
+    fs::create_dir_all(tree.join("sub/deeper")).unwrap();
+    for file in ["a.txt", "b.txt", "sub/c.txt", "sub/deeper/d.txt"] {
+        fs::write(tree.join(file), "x\n").unwrap();
+    }
+    let vm = project.run(&[]);
+    watch_in_guest(&vm, "removal");
+
+    fs::remove_dir_all(&tree).unwrap();
+    let g = "/home/dev/removal/tree";
+    // Each in the order it must come: what was in a directory before it.
+    let wanted = [
+        format!("DELETE {g}/sub/deeper/d.txt"),
+        format!("DELETE,ISDIR {g}/sub/deeper"),
+        format!("DELETE {g}/sub/c.txt"),
+        format!("DELETE,ISDIR {g}/sub"),
+        format!("DELETE {g}/a.txt"),
+        format!("DELETE {g}/b.txt"),
+        format!("DELETE,ISDIR {g}"),
+    ];
+    let has_all = |log: &str| wanted.iter().all(|w| log.lines().any(|l| l == w));
+    let log = wait_for_log(&vm, Duration::from_secs(10), has_all);
+    for w in &wanted {
+        assert!(
+            log.lines().any(|l| l == w),
+            "the guest didn't see `{w}`; its log:\n{log}"
+        );
+    }
+    let at = |w: &str| log.lines().position(|l| l == w).unwrap();
+    for (inner, dir) in [(0, 1), (1, 3), (2, 3), (3, 6), (4, 6), (5, 6)] {
+        assert!(
+            at(&wanted[inner]) < at(&wanted[dir]),
+            "`{}` came after `{}`; the guest's log:\n{log}",
+            wanted[inner],
+            wanted[dir]
+        );
+    }
+    vm.stop();
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn forwards_what_a_stopped_service_missed() {
+    let _slot = vm_slot();
+    let project = Project::new("stopped");
+    let dir = project.dir.join("d");
+    fs::create_dir(&dir).unwrap();
+    for i in 0..100 {
+        fs::write(dir.join(format!("old{i}.txt")), "x\n").unwrap();
+    }
+    let vm = project.run(&[]);
+    watch_in_guest(&vm, "stopped");
+
+    // Nothing reads what the Mac sends meanwhile: it piles up on the way,
+    // and the service discards it when it starts again.
+    vm.root_ok("systemctl stop sendit-changes");
+    for i in 0..400 {
+        fs::write(dir.join(format!("new{i}.txt")), "x\n").unwrap();
+    }
+    for i in 0..100 {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(format!("old{i}.txt")))
+            .unwrap();
+        file.write_all(b"more\n").unwrap();
+    }
+    sleep(Duration::from_secs(2));
+    vm.root_ok("systemctl start sendit-changes");
+
+    let g = "/home/dev/stopped/d";
+    let counts = |log: &str| {
+        (
+            paths_with(log, "CREATE", &format!("{g}/new")).len(),
+            paths_with(log, "MODIFY", &format!("{g}/old")).len(),
+        )
+    };
+    let log = wait_for_log(&vm, Duration::from_secs(60), |log| {
+        counts(log) == (400, 100)
+    });
+    let (created, modified) = counts(&log);
+    assert_eq!(
+        (created, modified),
+        (400, 100),
+        "of 400 files created and 100 changed, {created} and {modified} arrived"
+    );
     vm.stop();
 }
 

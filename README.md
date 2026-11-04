@@ -117,11 +117,21 @@ The VM applies the rules itself, as root, on every boot, so a change takes effec
 
 ## File changes
 
-virtiofs gives programs in the VM no inotify events for files changed on the Mac, so watchers there (`inotifywait`, file watchers in dev servers, editors' language servers) would miss every edit made on the Mac. `sendit run` therefore watches the project directory with FSEvents and sends what changed to the VM, where a kernel module (`sendit_notify`, built into the base image with DKMS) raises the matching events: create, modify, close-write, delete and attrib. A rename on the Mac arrives as a delete of the old name and a create of the new one. Changes usually arrive within a quarter of a second. A path that changes again within a moment may be reported once, as its final state, and an event can arrive twice, but none should be lost.
+virtiofs gives programs in the VM no inotify events for files changed on the Mac, so watchers there (`inotifywait`, file watchers in dev servers, editors' language servers) would miss every edit made on the Mac. `sendit run` therefore watches the project directory with FSEvents and sends what changed to the VM, where a kernel module (`sendit_notify`, built into the base image with DKMS) raises the matching events: create, modify, close-write, delete and attrib. A rename on the Mac arrives as a delete of the old name and a create of the new one. A directory removed on the Mac arrives as a delete for each file and directory in it, then for the directory itself. Changes usually arrive within a quarter of a second.
 
-Only the project directory is forwarded, not extra `--mount`s, and `.git` only with `--expose-git`. Changes the VM makes itself already have their events, so the ones that come back from the Mac a moment later are dropped; a watcher in the VM sees its own writes once. When a directory is removed on the Mac, the VM is told about the directory, not necessarily about each file in it.
+Events are the Mac's changes as sendit sees them, not one for each write:
 
-`forward-changes = false` in the config file, or `sendit run --no-forward-changes`, turns it off; `sendit status` shows the setting as `changes`. It needs an image built by this version, so rebuild older ones with `sendit provision`; until then, the VM runs without it.
+- A path that changes again within a moment is reported once, as its final state, and an event can arrive twice.
+- A file edited or chmod'ed within about 10 to 20 seconds of being created on the Mac can arrive as a create and a modify, since FSEvents keeps reporting it as created for that long.
+- When the Mac is busy, FSEvents can drop events and only say where. sendit then compares that part of the project with what it last told the VM, and reports the differences as creates, modifies and deletes.
+- If the VM stops reading for a while, e.g. while it is very busy or its service restarts, the changes wait until it reads again.
+- Changes made before `sendit run` started aren't sent. Those made while the VM boots arrive once it is up.
+- Watchers that don't look into a directory when they hear of it, such as `inotifywait -r`, can miss files created right after it, as they would without sendit.
+- The events reach inotify and fanotify listeners that use file handles, not fanotify listeners that ask for file descriptors.
+
+Only the project directory is forwarded, not extra `--mount`s, and `.git` only with `--expose-git`. Changes the VM makes itself already have their events, so the ones that come back from the Mac a moment later are dropped; a watcher in the VM sees its own writes once. A change on the Mac within a tenth of a second of the VM's own change to the same file can be taken for that one's echo, and dropped too.
+
+`forward-changes = false` in the config file, or `sendit run --no-forward-changes`, turns it off; `sendit status` shows the setting as `changes`, also for a VM whose image doesn't have it. It needs an image built by this version: rebuild older ones with `sendit provision`, and make VMs from them again with `sendit reset`. Until then, the VM runs without it.
 
 ## Base images
 
@@ -191,6 +201,7 @@ The VM is a boundary, but not one that makes it safe to run anything in it and t
 - Console output and `sendit ssh` sessions go straight to your terminal, escape sequences included. Depending on the terminal, these can set its title or, through OSC 52, the clipboard, so a later paste into a shell runs what the VM chose. Check your terminal's clipboard settings.
 - The VM reaches the internet, so it can send what it reads anywhere, through DNS too. `network = "internet"` keeps it from the local network, the Mac and other VMs only as far as addresses tell: not from a VPN on the Mac that routes public addresses, networks the Mac joins after the VM booted, your router's other IPv6 networks (e.g. a guest network), what your router's public address reaches (its admin page, forwarded ports), or local names that a proxy on the Mac answering DNS with fake addresses in `198.18.0.0/15` resolves. With `network = "open"`, the VM reaches the local network and every service on the Mac that listens on more than `127.0.0.1`, such as Remote Login or File Sharing.
 - Like the `.git` mask, the network rules hold only while root in the VM stays out of reach: root can lift them.
+- If you harden a VM by setting `kernel.modules_disabled=1`, do it after `sendit-changes.service` has started, which loads the `sendit_notify` module at boot; otherwise file changes from the Mac no longer arrive. The module isn't signed with a key the kernel trusts, so `lockdown=` on the kernel command line keeps it from loading, too.
 
 ## Where things live
 
