@@ -10,6 +10,8 @@
 
 mod config;
 mod console;
+#[allow(dead_code)] // used by the forwarder (next commit)
+mod fsevents;
 pub mod net;
 
 use std::cell::RefCell;
