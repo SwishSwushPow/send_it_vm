@@ -38,6 +38,19 @@ pub const BASE_DISK_SIZE: ByteSize = ByteSize::gib(16);
 
 const USER_DATA: &str = include_str!("../assets/user-data.yaml");
 const PROVISION_SCRIPT: &str = include_str!("../assets/provision.sh");
+/// The guest kernel module that turns host changes into fsnotify events,
+/// as (file name, content) pairs for provision.sh to build with DKMS.
+const NOTIFY_SOURCE: [(&str, &str); 3] = [
+    (
+        "sendit_notify.c",
+        include_str!("../assets/sendit-notify/sendit_notify.c"),
+    ),
+    ("Makefile", include_str!("../assets/sendit-notify/Makefile")),
+    (
+        "dkms.conf",
+        include_str!("../assets/sendit-notify/dkms.conf"),
+    ),
+];
 
 /// The oldest base image this version of sendit can run VMs from. Bumping it
 /// marks every older image outdated and refuses to run the VMs made from
@@ -461,7 +474,29 @@ fn build_seed_iso(
     token: &str,
 ) -> Result<PathBuf> {
     let dir = work.join("seed");
-    fs::create_dir_all(&dir)?;
+    write_seed_files(&dir, public_key, root_public_key, scripts, token)?;
+
+    let iso = work.join("seed.iso");
+    util::run_output(
+        Command::new("hdiutil")
+            .args(["makehybrid", "-quiet", "-iso", "-joliet"])
+            .args(["-default-volume-name", "cidata", "-o"])
+            .arg(&iso)
+            .arg(&dir),
+    )
+    .context("creating the seed ISO")?;
+    Ok(iso)
+}
+
+/// Writes the files of the seed ISO into `dir`, apart from packing them.
+fn write_seed_files(
+    dir: &Path,
+    public_key: &str,
+    root_public_key: &str,
+    scripts: &[CustomScript],
+    token: &str,
+) -> Result<()> {
+    fs::create_dir_all(dir)?;
     fs::write(
         dir.join("meta-data"),
         format!("instance-id: sendit-{token}\nlocal-hostname: sendit\n"),
@@ -474,17 +509,13 @@ fn build_seed_iso(
     fs::write(dir.join("provision.sh"), PROVISION_SCRIPT)?;
     fs::write(dir.join("token"), format!("{token}\n"))?;
     write_custom_scripts(&dir.join("custom"), scripts)?;
-
-    let iso = work.join("seed.iso");
-    util::run_output(
-        Command::new("hdiutil")
-            .args(["makehybrid", "-quiet", "-iso", "-joliet"])
-            .args(["-default-volume-name", "cidata", "-o"])
-            .arg(&iso)
-            .arg(&dir),
-    )
-    .context("creating the seed ISO")?;
-    Ok(iso)
+    // provision.sh builds this with DKMS.
+    let module = dir.join("sendit-notify");
+    fs::create_dir_all(&module)?;
+    for (file, content) in NOTIFY_SOURCE {
+        fs::write(module.join(file), content)?;
+    }
+    Ok(())
 }
 
 /// Writes `scripts`, as `custom_scripts` returns them, into the seed's
@@ -676,6 +707,23 @@ mod tests {
         let path = paths.config_dir().join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn seed_carries_the_module_source() {
+        let home = TempDir::new("seed-module");
+        let dir = home.path().join("seed");
+        write_seed_files(&dir, "ssh-ed25519 AAAA", "ssh-ed25519 BBBB", &[], "tok").unwrap();
+        for (file, content) in NOTIFY_SOURCE {
+            assert_eq!(
+                fs::read_to_string(dir.join("sendit-notify").join(file)).unwrap(),
+                content
+            );
+        }
+        let files: Vec<_> = NOTIFY_SOURCE.iter().map(|(file, _)| *file).collect();
+        assert_eq!(files, ["sendit_notify.c", "Makefile", "dkms.conf"]);
+        assert!(PROVISION_SCRIPT.contains("BindsTo=dev-hvc3.device"));
+        assert!(PROVISION_SCRIPT.contains("dkms install -m sendit-notify"));
     }
 
     #[test]

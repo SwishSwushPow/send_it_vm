@@ -4,10 +4,11 @@
 //! Every VM gets a read-only `sendit-meta` share holding the manifest, the
 //! script that applies it (`assets/sendit-mounts.sh`), the login message,
 //! and the VM's network rules with the script that applies them
-//! (`assets/sendit-network.sh`, see `network`). The base image only knows
-//! to mount that share and run the scripts, so the mount logic, the time
-//! zone, the message and the network rules can change without
-//! re-provisioning.
+//! (`assets/sendit-network.sh`, see `network`), and the script that passes
+//! host file changes to the guest's watchers (`assets/sendit-changes.sh`).
+//! The base image only knows to mount that share and run the scripts, so the
+//! mount logic, the time zone, the message, the network rules and the change
+//! forwarding can change without re-provisioning.
 //!
 //! Hiding `.git` keeps it out of reach of the guest user, which has no root
 //! rights to unmount the mask. Only the host can become root in the guest
@@ -25,6 +26,7 @@ use crate::network;
 pub const META_TAG: &str = "sendit-meta";
 const MOUNT_SCRIPT: &str = include_str!("assets/sendit-mounts.sh");
 const NETWORK_SCRIPT: &str = include_str!("assets/sendit-network.sh");
+const CHANGES_SCRIPT: &str = include_str!("assets/sendit-changes.sh");
 const BANNER: &str = include_str!("assets/banner.txt");
 
 /// The login message below the banner.
@@ -59,6 +61,7 @@ pub fn prepare(settings: &VmSettings, meta_dir: &Path) -> Result<Vec<Share>> {
         network::ruleset(&settings.network, &network::host_networks()),
     )?;
     fs::write(meta_dir.join("network.sh"), NETWORK_SCRIPT)?;
+    fs::write(meta_dir.join("changes.sh"), CHANGES_SCRIPT)?;
     Ok(shares(settings, meta_dir))
 }
 
@@ -170,6 +173,17 @@ mod tests {
             image: None,
             network: network::Network::default(),
         }
+    }
+
+    #[test]
+    fn prepare_writes_the_changes_script() {
+        let dir = crate::util::TempDir::new("meta-changes");
+        let meta = dir.path().join("meta");
+        prepare(&settings(false), &meta).unwrap();
+        assert_eq!(
+            fs::read_to_string(meta.join("changes.sh")).unwrap(),
+            CHANGES_SCRIPT
+        );
     }
 
     #[test]

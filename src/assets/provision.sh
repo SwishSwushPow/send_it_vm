@@ -33,7 +33,8 @@ apt-get -y -o Dpkg::Options::=--force-confold full-upgrade
 apt-get -y install --no-install-recommends \
     git curl ca-certificates build-essential pkg-config cmake sudo \
     openssh-server cloud-guest-utils less vim-tiny \
-    unzip jq ripgrep fd-find htop systemd-zram-generator nftables
+    unzip jq ripgrep fd-find htop systemd-zram-generator nftables \
+    dkms linux-headers-cloud-arm64 inotify-tools
 # Updates come with a rebuilt base image, not in the background: an upgrade
 # running in the background holds up shutting down for up to 30 minutes, and
 # would be cut short when sendit forces the VM off.
@@ -430,6 +431,69 @@ if [ -x /usr/bin/dircolors ]; then
     alias grep='grep --color=auto'
 fi
 EOF
+
+# --- Host changes -----------------------------------------------------------
+# Changes the host makes to the project don't reach the guest's watchers
+# (inotify) through virtiofs, so sendit passes them over a console port,
+# /dev/hvc3, to a kernel module that emits the events. DKMS builds the module
+# for every installed kernel, not just the running one: the full-upgrade above
+# may have installed a newer kernel that only boots next.
+cp -R "$seed/sendit-notify" /usr/src/sendit-notify-1
+# The seed ISO folds file names to lower case, but the kernel's build system
+# only finds a file called Makefile.
+[ -e /usr/src/sendit-notify-1/Makefile ] || mv /usr/src/sendit-notify-1/makefile /usr/src/sendit-notify-1/Makefile
+dkms add -m sendit-notify -v 1
+built=0
+for modules in /lib/modules/*/; do
+    k=$(basename "$modules")
+    [ -e "$modules/build" ] || continue
+    if dkms install -m sendit-notify -v 1 -k "$k"; then
+        built=1
+    else
+        # Only the build log says why; it is gone once the VM powers off.
+        cat "/var/lib/dkms/sendit-notify/1/$k/aarch64/log/make.log" \
+            /var/lib/dkms/sendit-notify/1/build/make.log 2> /dev/null || true
+    fi
+done
+if [ "$built" = 0 ]; then
+    echo "building the sendit-notify module failed for every kernel" >&2
+    exit 1
+fi
+cat > /usr/local/sbin/sendit-changes <<'EOF'
+#!/bin/sh
+set -eu
+meta=/run/sendit/meta
+mkdir -p "$meta"
+mountpoint -q "$meta" || mount -t virtiofs -o ro sendit-meta "$meta"
+if [ ! -e "$meta/changes.sh" ]; then
+    # An older sendit; there is nothing to forward.
+    echo "sendit-changes: the sendit that started this VM sent no change forwarding"
+    exit 0
+fi
+exec sh "$meta/changes.sh"
+EOF
+chmod 755 /usr/local/sbin/sendit-changes
+# Without a host side for hvc3 (the host doesn't forward changes) the service
+# stays inactive. The kernel creates the hvc3 device either way, so the
+# device unit alone doesn't tell; opening it fails with ENODEV when nothing is
+# behind it, and ExecCondition= then skips the service without failing it.
+cat > /etc/systemd/system/sendit-changes.service <<'EOF'
+[Unit]
+Description=Pass file changes made on the host to watchers in the project
+BindsTo=dev-hvc3.device
+After=dev-hvc3.device sendit-mounts.service
+
+[Service]
+ExecCondition=/bin/sh -c ': < /dev/hvc3'
+ExecStartPre=/sbin/modprobe sendit_notify
+ExecStart=/usr/local/sbin/sendit-changes
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable sendit-changes.service
 
 # --- Custom scripts ---------------------------------------------------------
 # The image's image file from ~/.config/sendit/images (custom/main.sh), which
