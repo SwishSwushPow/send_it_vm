@@ -13,6 +13,7 @@ mod config;
 mod console;
 mod fsevents;
 pub mod net;
+mod snapshot;
 
 use std::cell::RefCell;
 use std::io::{IsTerminal, Write};

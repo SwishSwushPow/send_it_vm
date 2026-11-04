@@ -25,6 +25,7 @@ pub mod flags {
     pub const ITEM_FINDER_INFO_MOD: u32 = 0x2000;
     pub const ITEM_CHANGE_OWNER: u32 = 0x4000;
     pub const ITEM_XATTR_MOD: u32 = 0x8000;
+    pub const ITEM_IS_DIR: u32 = 0x20000;
 }
 
 type CFTypeRef = *const c_void;
