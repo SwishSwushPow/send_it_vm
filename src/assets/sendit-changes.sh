@@ -10,11 +10,15 @@ if [ -z "$root" ]; then
     exit 0
 fi
 
+# One descriptor stays open on the port from here until cat takes it over:
+# the hvc driver resets the port's termios (back to cooked, echoing) when the
+# last descriptor closes, so each separate open would undo the settings below.
+exec 3<> /dev/hvc3
 # Raw and silent, so that any byte of a path passes unchanged and nothing is
 # echoed back to the host.
 stty -F /dev/hvc3 raw -echo
 # The module needs the project root before any other record.
 printf 'R 0 %s\0' "$root" > /dev/sendit-notify
 # Tell the host that records are accepted now; it drops batches until then.
-printf '?' > /dev/hvc3
-exec cat /dev/hvc3 > /dev/sendit-notify
+printf '?' >&3
+exec cat <&3 > /dev/sendit-notify
