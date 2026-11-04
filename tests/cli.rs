@@ -139,23 +139,24 @@ fn explains_what_to_do_in_a_fresh_home() {
     );
     assert!(lines[2].ends_with(" (not created)"), "{status}");
     assert_eq!(
-        lines[3..7],
+        lines[3..8],
         [
             "cpus     2",
             "memory   4 GiB",
             "disk     64 GiB max",
-            ".git     hidden"
+            ".git     hidden",
+            "changes  forwarded from the Mac"
         ]
     );
     assert_eq!(
-        lines[7],
+        lines[8],
         "network  internet (the internet, but not the local network, the Mac or other VMs)"
     );
     assert_eq!(
-        lines[8],
+        lines[9],
         format!("mounts   {} -> /home/dev/project (rw)", env.project_path())
     );
-    assert_eq!(lines.len(), 9, "{status}");
+    assert_eq!(lines.len(), 10, "{status}");
 }
 
 #[test]

@@ -170,6 +170,7 @@ mod tests {
             ],
             expose_git,
             banner: true,
+            forward_changes: true,
             image: None,
             network: network::Network::default(),
         }

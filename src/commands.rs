@@ -1154,6 +1154,14 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             "hidden"
         }
     );
+    println!(
+        "changes  {}",
+        if settings.forward_changes {
+            "forwarded from the Mac"
+        } else {
+            "not forwarded"
+        }
+    );
     let network = settings.network.describe();
     match &report.applied_network {
         Some(applied) if *applied != network => {
@@ -1189,6 +1197,7 @@ mod tests {
             mounts: mounts.to_vec(),
             expose_git,
             banner: true,
+            forward_changes: true,
             image: None,
             network: network::Network::default(),
         }

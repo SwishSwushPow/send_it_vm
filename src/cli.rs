@@ -200,6 +200,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub expose_git: bool,
 
+    /// Don't pass file changes made on the Mac to watchers in the VM
+    #[arg(long)]
+    pub no_forward_changes: bool,
+
     /// Base image to create the VM from; an existing VM must have been
     /// made from it [default: `image` from the config file, else the one
     /// the VM was made from, else default]
@@ -266,6 +270,7 @@ impl RunArgs {
             read_only: self.read_only.then_some(true),
             expose_git: self.expose_git.then_some(true),
             banner: None,
+            forward_changes: self.no_forward_changes.then_some(false),
             image: self.image.clone(),
             network: self.network,
             network_allow: self.network_allow.clone(),
@@ -329,6 +334,20 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["sendit", "run", "--network", "offline"]).is_err());
         assert!(Cli::try_parse_from(["sendit", "run", "--network-allow", "x.com"]).is_err());
+    }
+
+    #[test]
+    fn no_forward_changes_flag() {
+        let cli = Cli::try_parse_from(["sendit", "run", "--no-forward-changes"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.settings().forward_changes, Some(false));
+        let cli = Cli::try_parse_from(["sendit", "run"]).unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.settings().forward_changes, None);
     }
 
     #[test]

@@ -193,6 +193,9 @@ pub struct Settings {
     pub expose_git: Option<bool>,
     /// Whether the login message starts with the "Send It" banner.
     pub banner: Option<bool>,
+    /// Whether changes made to the project on the Mac are passed on to
+    /// watchers in the VM.
+    pub forward_changes: Option<bool>,
     /// The base image a new VM is created from, and the one an existing VM
     /// must have been created from.
     pub image: Option<ImageName>,
@@ -263,6 +266,7 @@ pub struct VmSettings {
     pub mounts: Vec<Mount>,
     pub expose_git: bool,
     pub banner: bool,
+    pub forward_changes: bool,
     /// `None` unless a layer chooses one: the VM keeps its image, and a new
     /// one is created from `default`.
     pub image: Option<ImageName>,
@@ -356,6 +360,7 @@ impl Config {
         let mut read_only = false;
         let mut expose_git = false;
         let mut banner = true;
+        let mut forward_changes = true;
         let mut network = Network::default();
         let mut mounts = vec![Mount {
             host: project.root.clone(),
@@ -371,6 +376,7 @@ impl Config {
             read_only = layer.read_only.unwrap_or(read_only);
             expose_git = layer.expose_git.unwrap_or(expose_git);
             banner = layer.banner.unwrap_or(banner);
+            forward_changes = layer.forward_changes.unwrap_or(forward_changes);
             network.mode = layer.network.unwrap_or(network.mode);
             for allow in &layer.network_allow {
                 if !network.allow.contains(allow) {
@@ -390,6 +396,7 @@ impl Config {
             mounts,
             expose_git,
             banner,
+            forward_changes,
             image: chosen,
             network,
         };
@@ -756,6 +763,46 @@ mod tests {
                 _temp: temp,
             }
         }
+    }
+
+    #[test]
+    fn forward_changes_defaults_to_true() {
+        let fx = Fixture::new("forward-default");
+        let vm = Config::default()
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir, false)
+            .unwrap();
+        assert!(vm.forward_changes);
+    }
+
+    #[test]
+    fn forward_changes_layers() {
+        let fx = Fixture::new("forward-layers");
+        let config = Config::parse(&format!(
+            r#"
+            forward-changes = false
+
+            [projects."{}"]
+            forward-changes = true
+            "#,
+            fx.project.root.display()
+        ))
+        .unwrap();
+        let resolve = |cli: &Settings| {
+            config
+                .resolve(&fx.paths, &fx.project, cli, &fx.dir, false)
+                .unwrap()
+        };
+        assert!(resolve(&Settings::default()).forward_changes);
+        let cli = Settings {
+            forward_changes: Some(false),
+            ..Settings::default()
+        };
+        assert!(!resolve(&cli).forward_changes);
+        let top = Config::parse("forward-changes = false").unwrap();
+        let vm = top
+            .resolve(&fx.paths, &fx.project, &Settings::default(), &fx.dir, false)
+            .unwrap();
+        assert!(!vm.forward_changes);
     }
 
     #[test]
