@@ -90,10 +90,16 @@ static u64 key_inode(const struct inode *inode)
 	return ((u64)inode->i_ino << 1) | 1;
 }
 
-static u64 key_name(const struct inode *dir, const struct qstr *name)
+/*
+ * A name that appeared (created, moved in) and one that vanished (deleted,
+ * moved out) get separate keys: otherwise a guest create would also explain
+ * a host delete of the same name, and that DELETE would be lost.
+ */
+static u64 key_name(const struct inode *dir, const struct qstr *name,
+		    bool vanished)
 {
-	return (((u64)jhash(name->name, name->len, (u32)dir->i_ino) << 32) ^
-		dir->i_ino) & ~1ULL;
+	return ((((u64)jhash(name->name, name->len, (u32)dir->i_ino) << 32) ^
+		 dir->i_ino) & ~3ULL) | (vanished ? 2 : 0);
 }
 
 static void echo_note(u64 key)
@@ -147,9 +153,10 @@ static int sn_handle_event(struct fsnotify_group *group, u32 mask,
 	if (inode && (mask & (FS_MODIFY | FS_CLOSE_WRITE | FS_ATTRIB |
 			      FS_CREATE | FS_MOVED_TO)))
 		echo_note(key_inode(inode));
-	if (dir && name && (mask & (FS_CREATE | FS_DELETE | FS_MOVED_FROM |
-				    FS_MOVED_TO)))
-		echo_note(key_name(dir, name));
+	if (dir && name && (mask & (FS_CREATE | FS_MOVED_TO)))
+		echo_note(key_name(dir, name, false));
+	if (dir && name && (mask & (FS_DELETE | FS_MOVED_FROM)))
+		echo_note(key_name(dir, name, true));
 	return 0;
 }
 
@@ -244,7 +251,7 @@ static bool sn_path_ok(const char *path)
 static void sn_gone(s64 mtime, struct inode *dir, const struct qstr *name,
 		    const char *pathname)
 {
-	if (echo_hit(key_name(dir, name), mtime)) {
+	if (echo_hit(key_name(dir, name, true), mtime)) {
 		n_echo++;
 		return;
 	}
@@ -271,7 +278,7 @@ static void sn_present(char op, s64 mtime, struct inode *dir,
 	vfs_getattr(child, &stat, STATX_BASIC_STATS, AT_STATX_FORCE_SYNC);
 
 	if (echo_hit(key_inode(inode), mtime) ||
-	    (op == 'c' && echo_hit(key_name(dir, name), mtime))) {
+	    (op == 'c' && echo_hit(key_name(dir, name, false), mtime))) {
 		n_echo++;
 		return;
 	}
