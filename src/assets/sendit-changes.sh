@@ -17,8 +17,18 @@ exec 3<> /dev/hvc3
 # Raw and silent, so that any byte of a path passes unchanged and nothing is
 # echoed back to the host.
 stty -F /dev/hvc3 raw -echo
-# The module needs the project root before any other record.
-printf 'R 0 %s\0' "$root" > /dev/sendit-notify
-# Tell the host that records are accepted now; it drops batches until then.
+# Discard what the port holds from before this start: records the host sent
+# while nothing read them, which the cooked port may have mangled. The host
+# sends those paths again once it reads the `?` below. cat ends once nothing
+# has come for 0.2 s (min 0 time 2); --foreground keeps it in the port's
+# foreground process group, so that it may read.
+stty -F /dev/hvc3 min 0 time 2
+timeout --foreground 3 cat <&3 > /dev/null || true
+stty -F /dev/hvc3 min 1 time 0
+# The module gives each open file its own framing and root, which must come
+# first: the root and the records go through the same one.
+exec 4> /dev/sendit-notify
+printf 'R 0 %s\0' "$root" >&4
+# Tell the host that records are accepted now; it holds them back until then.
 printf '?' >&3
-exec cat <&3 > /dev/sendit-notify
+exec cat <&3 >&4

@@ -487,7 +487,9 @@ After=dev-hvc3.device sendit-mounts.service
 ExecCondition=/bin/sh -c ': < /dev/hvc3'
 ExecStartPre=/sbin/modprobe sendit_notify
 ExecStart=/usr/local/sbin/sendit-changes
-Restart=on-failure
+# Also when cat ends without an error, e.g. on a hangup of the port. The
+# host sends again what may have been lost once the new `?` arrives.
+Restart=always
 RestartSec=2
 
 [Install]

@@ -17,8 +17,11 @@ use crate::common::{self, text};
 
 /// What the base images are built from, apart from custom scripts: when any
 /// of it changes, the tests provision their images again.
-const PROVISION_INPUTS: [&str; 5] = [
+const PROVISION_INPUTS: [&str; 8] = [
     include_str!("../../src/assets/provision.sh"),
+    include_str!("../../src/assets/sendit-notify/sendit_notify.c"),
+    include_str!("../../src/assets/sendit-notify/Makefile"),
+    include_str!("../../src/assets/sendit-notify/dkms.conf"),
     include_str!("../../src/assets/user-data.yaml"),
     include_str!("../../src/provision/mod.rs"),
     include_str!("../../src/provision/scripts.rs"),
