@@ -22,13 +22,18 @@
  * a chmod or a copy that keeps the mtime (cp -p, rsync -a).
  *
  * Paths are resolved below the root that R pinned, never through a
- * symlink or into another mount. The guest's own view decides what
- * happened: after a forced re-lookup, a path that is gone gets IN_DELETE
- * (with IN_ISDIR for x, or for a directory the guest still had cached), and
- * one that exists gets IN_CREATE (c), IN_MODIFY and IN_CLOSE_WRITE (m), or
- * IN_ATTRIB (a). For a removal, the parent comes from the guest's dentry
- * cache: the host removes a directory's contents before the directory, and
- * by the time their records arrive the directory is gone on the host too.
+ * symlink or into another mount. For c, m and a, the guest's own view
+ * decides what happened: after a forced re-lookup, a path that is gone gets
+ * IN_DELETE, and one that exists gets IN_CREATE (c), IN_MODIFY and
+ * IN_CLOSE_WRITE (m), or IN_ATTRIB (a). r and x are taken as they are: the
+ * host sends them only for a path it found gone. They get IN_DELETE (with
+ * IN_ISDIR for x, or for a directory the guest still had cached) in the
+ * parent the guest has in its dentry cache, which it drops the path from;
+ * a directory's own watches get IN_DELETE_SELF and are dropped.
+ * Asking the host instead would fail: it removes a directory's contents
+ * before the directory, so by the time their records arrive the directory is
+ * gone too, or it was moved and the guest's entry for it now leads to where
+ * it went.
  *
  * The guest's own writes come back from the host as records too. A record
  * whose change time is no later than a recent local change to the same file
@@ -299,14 +304,22 @@ static bool sn_path_ok(const struct sn_writer *w, const char *path)
 	       !ends_with(path, len, "/.") && !ends_with(path, len, "/");
 }
 
-/* The guest finds `name` in `dir` gone. */
+/*
+ * `name` in `dir` is gone, as the host or the guest found. `self` is the
+ * directory the guest still has there, if any: as when a directory is
+ * removed, its watches get IN_DELETE_SELF and are dropped (IN_IGNORED).
+ * Otherwise a watcher would keep its watch under the old path, also for the
+ * same directory found again under its new name after a move.
+ */
 static void sn_gone(s64 ctime, struct inode *dir, const struct qstr *name,
-		    bool is_dir, const char *pathname)
+		    bool is_dir, struct inode *self, const char *pathname)
 {
 	if (echo_hit(key_name(dir, name, true), ctime)) {
 		n_echo++;
 		return;
 	}
+	if (self)
+		fsnotify_inoderemove(self);
 	fsnotify_name(FS_DELETE | (is_dir ? FS_ISDIR : 0), dir,
 		      FSNOTIFY_EVENT_INODE, dir, name, 0);
 	/* A guest create from before doesn't explain the host's next one. */
@@ -351,7 +364,7 @@ static void sn_present(char op, s64 ctime, struct inode *dir,
 	case 'a':
 		fsnotify_dentry(dentry, FS_ATTRIB);
 		break;
-	default: /* 'm', or 'r' and 'x' for a path that is back again */
+	default: /* 'm' */
 		if (is_dir)
 			return;
 		fsnotify_dentry(dentry, FS_MODIFY);
@@ -366,9 +379,9 @@ static void sn_present(char op, s64 ctime, struct inode *dir,
 /*
  * The directory `rel` (below the root) of a removed path, as the guest
  * still has it in its dentry cache. Not looked up: virtiofs would ask the
- * host, which has removed it with its contents by now, and then drop the
- * guest's entry too. Only directories are walked through, no symlink and
- * no other mount.
+ * host, which has removed or moved it with its contents by now, and then
+ * drop the guest's entry too. Only directories are walked through, no
+ * symlink and no other mount.
  */
 static int sn_removal_parent(const struct sn_writer *w, char *rel,
 			     struct path *parent)
@@ -443,29 +456,46 @@ static void sn_inject(struct sn_writer *w, char op, s64 ctime, char *pathname)
 	if (op == 'c' && echo_hit(key_name(dir, &name, false), ctime))
 		goto echo;
 	cached = d_hash_and_lookup(parent.dentry, &name);
-	if (!IS_ERR_OR_NULL(cached)) {
-		bool hit = false;
-
-		if (d_really_is_positive(cached)) {
-			is_dir |= d_is_dir(cached);
-			hit = !removal &&
-			      echo_hit(key_inode(d_inode(cached)), ctime);
-		}
-		dput(cached);
-		if (hit)
+	if (IS_ERR(cached))
+		cached = NULL;
+	if (cached && d_really_is_positive(cached)) {
+		is_dir |= d_is_dir(cached);
+		if (!removal && echo_hit(key_inode(d_inode(cached)), ctime)) {
+			dput(cached);
 			goto echo;
+		}
 	}
+
+	if (removal) {
+		/* A mount point stays: nothing removed it in the guest. */
+		bool drop = cached && d_really_is_positive(cached) &&
+			    !d_mountpoint(cached);
+
+		sn_gone(ctime, dir, &name, is_dir,
+			drop && d_is_dir(cached) ? d_inode(cached) : NULL,
+			pathname);
+		/* Readers look the path up afresh, as after a forced re-lookup. */
+		if (drop)
+			d_invalidate(cached);
+		dput(cached);
+		path_put(&parent);
+		return;
+	}
+	dput(cached);
 
 	/* LOOKUP_REVAL makes virtiofs drop cached entries the host removed. */
 	err = vfs_path_lookup(parent.dentry, parent.mnt, last,
 			      SN_LOOKUP | LOOKUP_REVAL, &child);
 	if (err == -ENOENT) {
-		sn_gone(ctime, dir, &name, is_dir, pathname);
+		sn_gone(ctime, dir, &name, is_dir, NULL, pathname);
 	} else if (!err) {
 		sn_present(op, ctime, dir, &name, &child, pathname);
 		path_put(&child);
 	} else {
 		n_errors++;
+		if (verbose)
+			pr_info("sendit-notify: can't look up %s: %d\n",
+				pathname, err);
 	}
 	path_put(&parent);
 	return;

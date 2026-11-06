@@ -615,6 +615,80 @@ fn forwards_directory_removal() {
 
 #[test]
 #[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
+fn forwards_moved_directories() {
+    let _slot = vm_slot();
+    let project = Project::new("moves");
+    // Outside the project, on the same volume.
+    let outside = root().join("moves-outside");
+    let _ = fs::remove_dir_all(&outside);
+    for tree in [
+        project.dir.join("out"),
+        project.dir.join("within"),
+        outside.join("incoming"),
+    ] {
+        fs::create_dir_all(tree.join("sub")).unwrap();
+        fs::write(tree.join("a.txt"), "x\n").unwrap();
+        fs::write(tree.join("sub/b.txt"), "x\n").unwrap();
+    }
+    let vm = project.run(&[]);
+    let errors = || vm.root_ok("cat /sys/module/sendit_notify/parameters/n_errors");
+    let errors_before = errors();
+    watch_in_guest(&vm, "moves");
+
+    // Like Finder's Move to Trash, a rename, and a move into the project.
+    fs::rename(project.dir.join("out"), outside.join("out")).unwrap();
+    fs::rename(project.dir.join("within"), project.dir.join("renamed")).unwrap();
+    fs::rename(outside.join("incoming"), project.dir.join("incoming")).unwrap();
+    let g = "/home/dev/moves";
+    let mut wanted = Vec::new();
+    for gone in ["out", "within"] {
+        wanted.extend([
+            format!("DELETE {g}/{gone}/sub/b.txt"),
+            format!("DELETE,ISDIR {g}/{gone}/sub"),
+            format!("DELETE {g}/{gone}/a.txt"),
+            format!("DELETE,ISDIR {g}/{gone}"),
+        ]);
+    }
+    for new in ["renamed", "incoming"] {
+        wanted.extend([
+            format!("CREATE,ISDIR {g}/{new}"),
+            format!("CREATE {g}/{new}/a.txt"),
+            format!("CREATE,ISDIR {g}/{new}/sub"),
+            format!("CREATE {g}/{new}/sub/b.txt"),
+        ]);
+    }
+    let has_all = |log: &str| wanted.iter().all(|w| log.lines().any(|l| l == w));
+    let log = wait_for_log(&vm, Duration::from_secs(10), has_all);
+    for w in &wanted {
+        assert!(
+            log.lines().any(|l| l == w),
+            "the guest didn't see `{w}`; its log:\n{log}"
+        );
+    }
+
+    // The watcher's watch on the renamed directory went with its old name,
+    // so it reports a change there under the new one.
+    fs::write(project.dir.join("renamed/sub/b.txt"), "changed\n").unwrap();
+    let modified = format!("MODIFY {g}/renamed/sub/b.txt");
+    let log = wait_for_log(&vm, Duration::from_secs(10), |log| {
+        log.lines().any(|l| l == modified)
+    });
+    assert!(
+        log.lines().any(|l| l == modified),
+        "the guest didn't see `{modified}`; its log:\n{log}"
+    );
+    let stale: Vec<_> = (log.lines())
+        .filter(|l| !l.starts_with("DELETE"))
+        .filter(|l| l.contains(&format!("{g}/out")) || l.contains(&format!("{g}/within")))
+        .collect();
+    assert!(stale.is_empty(), "events under the old paths: {stale:?}");
+    assert_eq!(errors(), errors_before, "the module counted errors");
+    vm.stop();
+    let _ = fs::remove_dir_all(&outside);
+}
+
+#[test]
+#[ignore = "boots VMs; run with `cargo test --test vm -- --ignored`"]
 fn forwards_what_a_stopped_service_missed() {
     let _slot = vm_slot();
     let project = Project::new("stopped");

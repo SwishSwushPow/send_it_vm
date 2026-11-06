@@ -402,7 +402,9 @@ fn forward_changes(
 /// The records for `changes`, in chunks of up to `RECORDS_PER_CLOCK`, or
 /// `None` if `stop` closed meanwhile. Each path is classified by what it is
 /// now, not by the flags alone, which FSEvents coalesces; rescans compare
-/// with the snapshot, which is updated with everything sent. Removals go
+/// with the snapshot, which is updated with everything sent. So is what a
+/// new directory holds, which FSEvents doesn't report when the directory was
+/// moved there. Removals go
 /// first, each before the directory it was in. The rest follow sorted, so a
 /// new directory comes before what was created in it, and what is in a new
 /// directory goes in later chunks, one level of new directories at a time.
@@ -443,6 +445,9 @@ fn records(
         scanned.push(sub);
     }
 
+    // New directories, to look into once the paths below are in the
+    // snapshot.
+    let mut new_trees: Vec<Vec<u8>> = Vec::new();
     for (i, (path, flags)) in changes.iter().enumerate() {
         if i % STOP_CHECK == 0 && stopped(stop) {
             return None;
@@ -472,15 +477,32 @@ fn records(
         }
         snapshot.set(rel, entry);
         if let Some(op) = classify(*flags, Some(&entry)) {
+            let new_dir = op == Op::Created && entry.is_dir();
+            // Moved here, so FSEvents won't report what it holds.
+            if new_dir && !old.is_some_and(|old| old.is_dir()) {
+                new_trees.push(rel.to_vec());
+            }
             found.insert(
                 rel.to_vec(),
                 Found {
                     op,
                     time_ns: entry.ctime_ns,
-                    new_dir: op == Op::Created && entry.is_dir(),
+                    new_dir,
                 },
             );
         }
+    }
+    // Outer ones first, which hold any inner ones.
+    new_trees.sort_by_key(Vec::len);
+    for tree in new_trees {
+        if scanned.iter().any(|done| is_in(&tree, done)) {
+            continue;
+        }
+        let changes = (snapshot.rescan(&forward.host_root, forward.hide_git, &tree, stop)).ok()?;
+        for (rel, change) in changes {
+            found.entry(rel).or_insert(Found::from(change));
+        }
+        scanned.push(tree);
     }
 
     let new_dirs: HashSet<&[u8]> = (found.iter())
@@ -1202,6 +1224,59 @@ mod tests {
             ]]
         );
         assert_eq!(snapshot.get(b"d/sub/c"), None);
+    }
+
+    #[test]
+    fn reports_what_a_moved_directory_holds() {
+        let temp = TempDir::new("changes-moves");
+        let outside = TempDir::new("changes-moves-outside");
+        let forward = forward_in(&temp);
+        let root = temp.path();
+        for tree in [root.join("old"), outside.path().join("incoming")] {
+            fs::create_dir_all(tree.join("sub")).unwrap();
+            fs::write(tree.join("a"), b"").unwrap();
+            fs::write(tree.join("sub/b"), b"").unwrap();
+        }
+        let (stop_read, _stop) = pipe().unwrap();
+        let mut snapshot = Snapshot::build(root, true, stop_read.as_fd()).unwrap();
+
+        // FSEvents reports a moved directory, but nothing in it.
+        fs::rename(root.join("old"), root.join("renamed")).unwrap();
+        fs::rename(outside.path().join("incoming"), root.join("incoming")).unwrap();
+        let moved = flags::ITEM_RENAMED | flags::ITEM_IS_DIR;
+        let changes = HashMap::from([
+            (root.join("old"), moved),
+            (root.join("renamed"), moved),
+            (root.join("incoming"), moved),
+        ]);
+        let chunks = records(&forward, &mut snapshot, changes, stop_read.as_fd()).unwrap();
+        let ops: Vec<_> = chunks.iter().map(ops_and_paths).collect();
+        assert_eq!(
+            ops,
+            [
+                vec![
+                    "r /home/dev/p/old/sub/b",
+                    "x /home/dev/p/old/sub",
+                    "r /home/dev/p/old/a",
+                    "x /home/dev/p/old",
+                    "c /home/dev/p/incoming",
+                    "c /home/dev/p/renamed",
+                ],
+                vec![
+                    "c /home/dev/p/incoming/a",
+                    "c /home/dev/p/incoming/sub",
+                    "c /home/dev/p/renamed/a",
+                    "c /home/dev/p/renamed/sub",
+                ],
+                vec![
+                    "c /home/dev/p/incoming/sub/b",
+                    "c /home/dev/p/renamed/sub/b"
+                ],
+            ]
+        );
+        assert!(chunks[1].wait && chunks[2].wait);
+        assert!(snapshot.get(b"renamed/sub/b").is_some());
+        assert_eq!(snapshot.get(b"old/a"), None);
     }
 
     #[test]
