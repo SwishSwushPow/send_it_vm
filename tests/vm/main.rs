@@ -440,7 +440,6 @@ fn forwards_host_changes() {
     let project = Project::new("forwards");
     fs::write(project.dir.join("a.txt"), "first\n").unwrap();
     fs::write(project.dir.join("m.txt"), "mode\n").unwrap();
-    let made = Instant::now();
     let vm = project.run(&[]);
     watch_in_guest(&vm, "forwards");
 
@@ -449,14 +448,15 @@ fn forwards_host_changes() {
     // created and removed within a moment is never seen to exist. So each
     // step gets a pause.
     let step = || sleep(Duration::from_millis(500));
-    // FSEvents keeps reporting a file as created for a good while (more than
-    // 9 s, less than 20 s were seen), which would hide the attribute change.
-    sleep(Duration::from_secs(25).saturating_sub(made.elapsed()));
+    // FSEvents still reports m.txt and b.txt as created when they change:
+    // that mustn't make them created again in the guest.
     fs::set_permissions(dir.join("m.txt"), fs::Permissions::from_mode(0o600)).unwrap();
     step();
     fs::write(dir.join("a.txt"), "second\n").unwrap();
     step();
     fs::write(dir.join("b.txt"), "b\n").unwrap();
+    step();
+    fs::write(dir.join("b.txt"), "edited\n").unwrap();
     step();
     fs::create_dir(dir.join("d")).unwrap();
     step();
@@ -473,6 +473,7 @@ fn forwards_host_changes() {
         format!("MODIFY {g}/a.txt"),
         format!("CLOSE_WRITE,CLOSE {g}/a.txt"),
         format!("CREATE {g}/b.txt"),
+        format!("MODIFY {g}/b.txt"),
         format!("CREATE,ISDIR {g}/d"),
         format!("CREATE {g}/d/c.txt"),
         format!("DELETE {g}/b.txt"),
@@ -490,6 +491,18 @@ fn forwards_host_changes() {
             "the guest didn't see `{w}`; its log:\n{log}"
         );
     }
+    for (event, path) in [("CREATE", "b.txt"), ("ATTRIB", "m.txt")] {
+        let line = format!("{event} {g}/{path}");
+        let count = log.lines().filter(|l| *l == line).count();
+        assert_eq!(
+            count, 1,
+            "`{line}` came {count} times; the guest's log:\n{log}"
+        );
+    }
+    assert!(
+        !log.lines().any(|l| l == format!("CREATE {g}/m.txt")),
+        "m.txt was created again; the guest's log:\n{log}"
+    );
 
     // The guest's own writes are not echoed back from the Mac.
     vm.ok("echo x > ~/forwards/g.txt");

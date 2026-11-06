@@ -85,6 +85,10 @@ const METADATA_FLAGS: u32 = flags::ITEM_INODE_META_MOD
     | flags::ITEM_FINDER_INFO_MOD
     | flags::ITEM_CHANGE_OWNER;
 
+/// Not an FSEvents flag: the path goes whatever the snapshot says, as the
+/// guest may have missed what it was told about it.
+const RESENT: u32 = 1 << 31;
+
 /// Flags that say FSEvents lost events under a path, which is then rescanned.
 const SCAN_FLAGS: u32 = flags::MUST_SCAN_SUB_DIRS | flags::USER_DROPPED | flags::KERNEL_DROPPED;
 
@@ -400,14 +404,17 @@ fn forward_changes(
 }
 
 /// The records for `changes`, in chunks of up to `RECORDS_PER_CLOCK`, or
-/// `None` if `stop` closed meanwhile. Each path is classified by what it is
-/// now, not by the flags alone, which FSEvents coalesces; rescans compare
-/// with the snapshot, which is updated with everything sent. So is what a
-/// new directory holds, which FSEvents doesn't report when the directory was
-/// moved there. Removals go
-/// first, each before the directory it was in. The rest follow sorted, so a
-/// new directory comes before what was created in it, and what is in a new
-/// directory goes in later chunks, one level of new directories at a time.
+/// `None` if `stop` closed meanwhile. Each path is compared with the
+/// snapshot, which has what the guest was told and is updated with
+/// everything sent, so a change goes once. FSEvents' flags, which it
+/// coalesces and keeps for a while, only decide for a path sent again
+/// (`RESENT`) or one a full snapshot doesn't have. Rescans compare a whole
+/// subtree with the snapshot; so does a look into a new directory, as
+/// FSEvents doesn't report what it holds when it was moved there. Removals
+/// go first, each before the directory it was in. The rest follow sorted,
+/// so a new directory comes before what was created in it, and what is in a
+/// new directory goes in later chunks, one level of new directories at a
+/// time.
 fn records(
     forward: &Forward,
     snapshot: &mut Snapshot,
@@ -459,6 +466,9 @@ fn records(
             continue;
         }
         let old = snapshot.get(rel);
+        // The snapshot has what the guest was told about the path, unless
+        // it is to go again or the snapshot is full.
+        let told = flags & RESENT == 0 && snapshot.is_complete();
         let Ok(entry) = snapshot::stat(path) else {
             // Gone, or only reachable through a symlink now. So is what was
             // in it, which FSEvents doesn't report when the directory was
@@ -467,19 +477,31 @@ fn records(
             for (below, was) in snapshot.remove(rel) {
                 found.entry(below).or_insert(Found::removed(was.is_dir()));
             }
-            found.insert(rel.to_vec(), Found::removed(dir));
+            // Not if the guest never heard of it, or heard it's gone.
+            if old.is_some() || !told {
+                found.insert(rel.to_vec(), Found::removed(dir));
+            }
             continue;
         };
-        if old.is_some_and(|old| old.is_dir() && !entry.is_dir()) {
+        // Another directory, or none, where there was one: what was in it
+        // is gone.
+        if old.is_some_and(|old| old.is_dir() && (!entry.is_dir() || old.ino != entry.ino)) {
             for (below, was) in snapshot.remove_below(rel) {
                 found.entry(below).or_insert(Found::removed(was.is_dir()));
             }
         }
         snapshot.set(rel, entry);
-        if let Some(op) = classify(*flags, Some(&entry)) {
+        // FSEvents reports a path again after a rescan sent it, and as
+        // created for a while after it was: only the snapshot can tell.
+        let op = match old {
+            Some(old) if told => snapshot::compare(old, entry).map(|change| Found::from(change).op),
+            None if told => Some(Op::Created),
+            _ => classify(*flags, Some(&entry)),
+        };
+        if let Some(op) = op {
             let new_dir = op == Op::Created && entry.is_dir();
-            // Moved here, so FSEvents won't report what it holds.
-            if new_dir && !old.is_some_and(|old| old.is_dir()) {
+            // Maybe moved here, so FSEvents won't report what it holds.
+            if new_dir {
                 new_trees.push(rel.to_vec());
             }
             found.insert(
@@ -558,16 +580,17 @@ impl Found {
         }
     }
 
-    /// FSEvents flags that make `records` send this again.
+    /// Flags that make `records` send this again.
     fn flags(&self) -> u32 {
-        match self.op {
-            Op::Created if self.new_dir => flags::ITEM_CREATED | flags::ITEM_IS_DIR,
-            Op::Created => flags::ITEM_CREATED,
-            Op::Modified => flags::ITEM_MODIFIED,
-            Op::Attrib => flags::ITEM_INODE_META_MOD,
-            Op::Removed => flags::ITEM_REMOVED,
-            Op::RemovedDir => flags::ITEM_REMOVED | flags::ITEM_IS_DIR,
-        }
+        RESENT
+            | match self.op {
+                Op::Created if self.new_dir => flags::ITEM_CREATED | flags::ITEM_IS_DIR,
+                Op::Created => flags::ITEM_CREATED,
+                Op::Modified => flags::ITEM_MODIFIED,
+                Op::Attrib => flags::ITEM_INODE_META_MOD,
+                Op::Removed => flags::ITEM_REMOVED,
+                Op::RemovedDir => flags::ITEM_REMOVED | flags::ITEM_IS_DIR,
+            }
     }
 }
 
@@ -765,7 +788,7 @@ mod tests {
     use crate::util::TempDir;
     use std::ffi::OsStr;
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     fn forward(hide_git: bool) -> Forward {
         Forward {
@@ -1044,8 +1067,8 @@ mod tests {
         let temp = TempDir::new("changes-forward");
         let file = temp.path().join("a b.txt");
         fs::write(&file, b"a").unwrap();
+        fs::write(temp.path().join("gone"), b"g").unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
-        let ctime = entry(&file).ctime_ns;
         let running = Running::start(forward_in(&temp), STALL_TIMEOUT);
 
         // Not ready: dropped.
@@ -1057,6 +1080,9 @@ mod tests {
         assert!(lock(&running.pending).is_empty());
 
         running.ready();
+        fs::write(&file, b"changed").unwrap();
+        let ctime = entry(&file).ctime_ns;
+        fs::remove_file(temp.path().join("gone")).unwrap();
         running.change(&file, flags::ITEM_MODIFIED);
         running.change(&temp.path().join(".git/HEAD"), flags::ITEM_CREATED);
         running.change(&temp.path().join("gone"), flags::ITEM_REMOVED);
@@ -1227,6 +1253,72 @@ mod tests {
     }
 
     #[test]
+    fn sends_each_change_once() {
+        let temp = TempDir::new("changes-once");
+        let forward = forward_in(&temp);
+        let root = temp.path();
+        fs::write(root.join("known.txt"), b"k").unwrap();
+        let (stop_read, _stop) = pipe().unwrap();
+        let mut snapshot = Snapshot::build(root, true, stop_read.as_fd()).unwrap();
+        let mut batch = |changes: &[(&str, u32)]| -> Vec<Vec<String>> {
+            let changes = (changes.iter())
+                .map(|(path, flags)| (root.join(path), *flags))
+                .collect();
+            let chunks = records(&forward, &mut snapshot, changes, stop_read.as_fd()).unwrap();
+            chunks.iter().map(ops_and_paths).collect()
+        };
+
+        // FSEvents drops events, and the rescan finds the changes...
+        fs::write(root.join("new.txt"), b"n").unwrap();
+        fs::write(root.join("known.txt"), b"changed").unwrap();
+        assert_eq!(
+            batch(&[("", flags::USER_DROPPED)]),
+            [["m /home/dev/p/known.txt", "c /home/dev/p/new.txt"]]
+        );
+        // ...that its late events report again, with a file that came and
+        // went before anything was sent about it.
+        let none: [Vec<String>; 0] = [];
+        let late = [
+            ("new.txt", flags::ITEM_CREATED),
+            ("known.txt", flags::ITEM_MODIFIED),
+            ("brief.txt", flags::ITEM_CREATED | flags::ITEM_REMOVED),
+        ];
+        assert_eq!(batch(&late), none);
+
+        // FSEvents still says created for a while after a file was.
+        fs::write(root.join("new.txt"), b"edited").unwrap();
+        let sticky = flags::ITEM_CREATED | flags::ITEM_MODIFIED;
+        assert_eq!(batch(&[("new.txt", sticky)]), [["m /home/dev/p/new.txt"]]);
+        fs::set_permissions(root.join("new.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+        let sticky = flags::ITEM_CREATED | flags::ITEM_INODE_META_MOD;
+        assert_eq!(batch(&[("new.txt", sticky)]), [["a /home/dev/p/new.txt"]]);
+
+        // An editor's save: a new file renamed over the old one.
+        fs::write(root.join("new.txt.tmp"), b"saved").unwrap();
+        fs::rename(root.join("new.txt.tmp"), root.join("new.txt")).unwrap();
+        let renamed = flags::ITEM_CREATED | flags::ITEM_RENAMED;
+        assert_eq!(
+            batch(&[("new.txt", renamed), ("new.txt.tmp", renamed)]),
+            [["c /home/dev/p/new.txt"]]
+        );
+
+        fs::remove_file(root.join("known.txt")).unwrap();
+        let removed = [("known.txt", flags::ITEM_REMOVED)];
+        assert_eq!(batch(&removed), [["r /home/dev/p/known.txt"]]);
+        assert_eq!(batch(&removed), none);
+
+        // What a guest missed goes again, changed or not.
+        let missed = [
+            ("new.txt", flags::ITEM_CREATED | RESENT),
+            ("known.txt", flags::ITEM_REMOVED | RESENT),
+        ];
+        assert_eq!(
+            batch(&missed),
+            [["r /home/dev/p/known.txt", "c /home/dev/p/new.txt"]]
+        );
+    }
+
+    #[test]
     fn reports_what_a_moved_directory_holds() {
         let temp = TempDir::new("changes-moves");
         let outside = TempDir::new("changes-moves-outside");
@@ -1291,7 +1383,8 @@ mod tests {
         let mut snapshot = Snapshot::build(root, true, stop_read.as_fd()).unwrap();
 
         // The guest swaps A for a link to elsewhere: a path through it is
-        // gone, whether its target has the name or not.
+        // gone, whether its target has the name or not, and as the guest
+        // never heard of either, nothing is sent about them.
         fs::remove_dir(root.join("A")).unwrap();
         symlink(outside.path(), root.join("A")).unwrap();
         let changes = HashMap::from([
@@ -1301,14 +1394,7 @@ mod tests {
         ]);
         let chunks = records(&forward, &mut snapshot, changes, stop_read.as_fd()).unwrap();
         let ops: Vec<_> = chunks.iter().map(ops_and_paths).collect();
-        assert_eq!(
-            ops,
-            [vec![
-                "r /home/dev/p/A/secret.txt",
-                "r /home/dev/p/A/missing.txt",
-                "c /home/dev/p/A",
-            ]]
-        );
+        assert_eq!(ops, [vec!["c /home/dev/p/A"]]);
     }
 
     #[test]
@@ -1316,10 +1402,13 @@ mod tests {
         let temp = TempDir::new("changes-new-dirs");
         let forward = forward_in(&temp);
         let (stop_read, _stop) = pipe().unwrap();
+        for name in ["old.txt", "z.txt"] {
+            fs::write(temp.path().join(name), b"").unwrap();
+        }
         let mut snapshot = Snapshot::build(temp.path(), true, stop_read.as_fd()).unwrap();
         fs::create_dir_all(temp.path().join("new/sub")).unwrap();
         for name in ["new/sub/f", "new/g", "old.txt", "z.txt"] {
-            fs::write(temp.path().join(name), b"").unwrap();
+            fs::write(temp.path().join(name), b"changed").unwrap();
         }
         let changes = HashMap::from([
             (temp.path().join("new"), flags::ITEM_CREATED),

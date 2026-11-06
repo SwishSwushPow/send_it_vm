@@ -121,15 +121,15 @@ virtiofs gives programs in the VM no inotify events for files changed on the Mac
 
 Events are the Mac's changes as sendit sees them, not one for each write:
 
-- A path that changes again within a moment is reported once, as its final state, and an event can arrive twice.
-- A file edited or chmod'ed within about 10 to 20 seconds of being created on the Mac can arrive as a create and a modify, since FSEvents keeps reporting it as created for that long.
+- A path that changes again within a moment is reported once, as its final state: a file created and edited at once arrives as a create, and one created and removed again before it was sent doesn't arrive at all. sendit compares each path with what it last told the VM, so a change arrives once, also when FSEvents reports it again.
+- A file saved by renaming a new file over it, as many editors do, arrives as a create.
 - When the Mac is busy, FSEvents can drop events and only say where. sendit then compares that part of the project with what it last told the VM, and reports the differences as creates, modifies and deletes.
-- If the VM stops reading for a while, e.g. while it is very busy or its service restarts, the changes wait until it reads again.
+- If the VM stops reading for a while, e.g. while it is very busy or its service restarts, the changes wait until it reads again. What it may have missed is sent again, so some events can then arrive twice.
 - Changes made before `sendit run` started aren't sent. Those made while the VM boots arrive once it is up.
 - Watchers that don't look into a directory when they hear of it, such as `inotifywait -r`, can miss files created right after it, as they would without sendit.
 - The events reach inotify and fanotify listeners that use file handles, not fanotify listeners that ask for file descriptors.
 
-Only the project directory is forwarded, not extra `--mount`s, and `.git` only with `--expose-git`. Changes the VM makes itself already have their events, so the ones that come back from the Mac a moment later are dropped; a watcher in the VM sees its own writes once. A change on the Mac within a tenth of a second of the VM's own change to the same file can be taken for that one's echo, and dropped too.
+Only the project directory is forwarded, not extra `--mount`s, and `.git` only with `--expose-git`. Changes the VM makes itself already have their events, so the ones that come back from the Mac a moment later are dropped; a watcher in the VM sees its own writes once. A change on the Mac within a tenth of a second of the VM's own change to the same file can be taken for that one's echo, and dropped too, and a file the VM creates that the Mac removes within that moment isn't reported removed.
 
 `forward-changes = false` in the config file, or `sendit run --no-forward-changes`, turns it off; `sendit status` shows the setting as `changes`, also for a VM whose image doesn't have it. It needs an image built by this version: rebuild older ones with `sendit provision`, and make VMs from them again with `sendit reset`. Until then, the VM runs without it.
 

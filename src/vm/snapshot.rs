@@ -50,6 +50,9 @@ pub(super) struct Entry {
     pub mtime_ns: i64,
     /// The change time, which moves on with any change, a chmod's too.
     pub ctime_ns: i64,
+    /// Another one means another file at the path, e.g. after an editor's
+    /// save that renames a new file over the old one.
+    pub ino: u64,
 }
 
 impl Entry {
@@ -72,6 +75,7 @@ impl Entry {
             size: stat.st_size.try_into().unwrap_or(0),
             mtime_ns: ns(stat.st_mtime, stat.st_mtime_nsec),
             ctime_ns: ns(stat.st_ctime, stat.st_ctime_nsec),
+            ino: stat.st_ino,
         }
     }
 }
@@ -229,10 +233,11 @@ fn walk(
     Ok(())
 }
 
-/// How `new` differs from `old`, at the same path. A directory only changes
-/// by being created or removed: its entries report their own changes.
-fn compare(old: Entry, new: Entry) -> Option<Change> {
-    if old.kind != new.kind {
+/// How `new` differs from `old`, at the same path: another kind or file is
+/// created. A directory only changes by being created or removed: its
+/// entries report their own changes.
+pub(super) fn compare(old: Entry, new: Entry) -> Option<Change> {
+    if old.kind != new.kind || old.ino != new.ino {
         Some(Change::Created(new))
     } else if new.is_dir() {
         None
@@ -274,6 +279,11 @@ impl Snapshot {
             snapshot.set(rel, entry);
         })?;
         Ok(snapshot)
+    }
+
+    /// Whether it has every path: a path it doesn't have is new.
+    pub fn is_complete(&self) -> bool {
+        !self.full
     }
 
     pub fn get(&self, rel: &[u8]) -> Option<Entry> {
