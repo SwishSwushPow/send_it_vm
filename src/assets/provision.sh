@@ -207,6 +207,32 @@ if [ -n "${TERM:-}" ] && ! infocmp "$TERM" > /dev/null 2>&1; then
 fi
 EOF
 
+# --- Prompt marks -----------------------------------------------------------
+# Interactive bash marks where each prompt, command and its output begin
+# (OSC 133), so terminals such as Rex and Ghostty can jump between commands
+# in the scrollback (Cmd+Up and Cmd+Down). Login shells, too, read
+# /etc/bash.bashrc (from /etc/profile), but before ~/.bashrc sets PS1 anew,
+# so the marks go into PS1 before every prompt instead of once; that also
+# keeps them when something else changes PS1 later, such as a Python venv.
+# The first entry of PROMPT_COMMAND, it ends the last command's output with
+# its exit status and passes that status on.
+cat >> /etc/bash.bashrc <<'EOF'
+
+# Added by sendit: OSC 133 prompt marks, so the terminal can jump between
+# commands in the scrollback.
+if [ "${TERM-}" != dumb ] && ! declare -F __sendit_prompt_marks > /dev/null; then
+    __sendit_prompt_marks() {
+        local status=$? start='\[\e]133;A\a\]' end='\[\e]133;B\a\]'
+        printf '\e]133;D;%s\a' "$status"
+        PS1=${PS1//"$start"/}
+        PS1=$start${PS1//"$end"/}$end
+        return "$status"
+    }
+    PROMPT_COMMAND="__sendit_prompt_marks${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+    PS0="${PS0-}"'\e]133;C\a'
+fi
+EOF
+
 # --- Networking -------------------------------------------------------------
 # cloud-init's generated config matches this VM's MAC address, but every
 # project VM gets its own MAC. Replace it with a config that matches by name.

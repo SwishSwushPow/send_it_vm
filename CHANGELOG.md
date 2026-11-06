@@ -23,6 +23,7 @@
 
 The base revision is now 11: rebuild images from 0.9.0 and earlier with `sendit provision --all`, then delete their VMs with `sendit prune --outdated`. Until then, sendit can't make VMs from the old images or run the VMs made from them.
 
+- bash in the VM marks each prompt and command with OSC 133, so terminals such as Ghostty and Rex can jump between commands in the scrollback (Cmd+Up and Cmd+Down). Debian's bash doesn't, and Rex doesn't add the marks itself. Images get it when they are rebuilt with `sendit provision NAME --force`, and existing VMs when they are made again from such an image with `sendit reset`.
 - Base images install nftables and load rules that let nothing out of the VM but DHCP before its network comes up; once it is up, the VM applies its own rules from sendit, and keeps the first ones if that fails.
 
 ## 0.9.0 - 2026-10-23

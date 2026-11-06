@@ -54,6 +54,8 @@ Inside the VM, the host is `host.sendit.internal`. Host services must listen on 
 
 In the console, `exit` or Ctrl-D shuts the VM down. Ctrl-] asks the guest to shut down, and a second press forces it off. Any shutdown that takes over 30 seconds, however it started, is forced too.
 
+bash in the VM marks each prompt and command with OSC 133, so terminals that read these marks, such as Ghostty and Rex, can jump between commands in the scrollback (Cmd+Up and Cmd+Down in both), in the console, in `sendit ssh` and in Rex sessions on the VM.
+
 The project is mounted at `/home/dev/<name>`, where login shells start. `run` also takes:
 
 - `--cpus N` and `--memory 8G`
