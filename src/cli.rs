@@ -27,7 +27,8 @@ pub struct Cli {
 impl Cli {
     /// Parses `args` like `try_parse_from`, and also rejects `-n` together
     /// with `-C`: clap's `conflicts_with` misses them when they are given
-    /// on different levels, e.g. `sendit -n app stop -C dir`.
+    /// on different levels, e.g. `sendit -n app stop -C dir`. Rejects `-n`
+    /// for commands that don't act on one project, too.
     pub fn try_parse_checked_from<I, T>(args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
@@ -40,7 +41,40 @@ impl Cli {
                 "the argument '--name <NAME>' cannot be used with '--project <DIR>'",
             ));
         }
+        // Commands for all VMs or images would ignore it, and `sendit -n app
+        // prune --all` would delete every stopped VM, not app's. `-C` stays
+        // allowed there, as before, e.g. for wrappers that always pass it.
+        if let (Some(_), Some(command)) = (&cli.name, cli.command.not_for_a_project()) {
+            return Err(Self::command().error(
+                ErrorKind::ArgumentConflict,
+                format!(
+                    "the argument '--name <NAME>' cannot be used with '{command}', which \
+                     doesn't act on one project's VM"
+                ),
+            ));
+        }
         Ok(cli)
+    }
+}
+
+impl Command {
+    /// How the command is written if it acts on every VM or on images
+    /// instead of one project, e.g. `prune`.
+    fn not_for_a_project(&self) -> Option<&'static str> {
+        match self {
+            Self::Provision { all: true, .. } => Some("provision --all"),
+            Self::Provision { image: Some(_), .. } => Some("provision IMAGE"),
+            Self::List => Some("list"),
+            Self::Images { .. } => Some("images"),
+            Self::Prune { .. } => Some("prune"),
+            Self::Provision { .. }
+            | Self::Run(_)
+            | Self::Ssh { .. }
+            | Self::Status
+            | Self::Stop
+            | Self::Rename { .. }
+            | Self::Reset { .. } => None,
+        }
     }
 }
 
@@ -443,6 +477,44 @@ mod tests {
         ] {
             let error = Cli::try_parse_checked_from(args).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_name_for_commands_that_take_no_project() {
+        for command in [
+            &["prune", "--all", "-y"][..],
+            &["prune"],
+            &["list"],
+            &["images"],
+            &["images", "--delete", "rust"],
+            &["provision", "rust"],
+            &["provision", "--all"],
+        ] {
+            for flag in [&["-n", "app"][..], &["--name", "app"]] {
+                // Before the subcommand and after it.
+                for args in [
+                    [&["sendit"][..], flag, command].concat(),
+                    [&["sendit"][..], command, flag].concat(),
+                ] {
+                    let error = Cli::try_parse_checked_from(&args).unwrap_err();
+                    assert_eq!(error.kind(), ErrorKind::ArgumentConflict, "{args:?}");
+                }
+            }
+            // Alone, and with -C, which they ignore as before.
+            for args in [
+                [&["sendit"][..], command].concat(),
+                [&["sendit", "-C", "/p"][..], command].concat(),
+            ] {
+                assert!(Cli::try_parse_checked_from(&args).is_ok(), "{args:?}");
+            }
+        }
+        // provision without an image builds the project's.
+        for args in [
+            &["sendit", "-n", "app", "provision"][..],
+            &["sendit", "-C", "/p", "provision", "--force"],
+        ] {
+            assert!(Cli::try_parse_checked_from(args).is_ok(), "{args:?}");
         }
     }
 
