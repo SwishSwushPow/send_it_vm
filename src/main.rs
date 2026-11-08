@@ -1,4 +1,6 @@
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+// Elsewhere, sendit builds only for developing it, in this repository, whose
+// .cargo/config.toml sets `sendit_dev` on Linux; it can't run VMs there.
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), sendit_dev)))]
 compile_error!("sendit requires macOS on Apple silicon");
 
 mod cli;
@@ -8,9 +10,9 @@ mod image;
 mod mounts;
 mod network;
 mod paths;
+mod platform;
 mod project_vm;
 mod provision;
-mod sign;
 mod util;
 mod vm;
 mod worktree;
@@ -40,7 +42,7 @@ fn main() -> ExitCode {
 
 fn sendit() -> Result<ExitCode> {
     let cli = Cli::try_parse_checked_from(std::env::args_os()).unwrap_or_else(|e| e.exit());
-    sign::ensure_entitled()?;
+    platform::ensure_entitled()?;
     let paths = Paths::from_env()?;
     // Every time, so that directories made by older versions, or deleted
     // and made again, are private and excluded too.
@@ -51,7 +53,7 @@ fn sendit() -> Result<ExitCode> {
                 paths.display(&dir)
             );
         }
-        if let Err(error) = util::exclude_from_backups(&dir) {
+        if let Err(error) = platform::exclude_from_backups(&dir) {
             eprintln!(
                 "warning: could not exclude {} from Time Machine backups: {error:#}",
                 paths.display(&dir)

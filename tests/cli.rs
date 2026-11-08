@@ -916,6 +916,7 @@ fn entitlements(binary: &Path) -> String {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "codesign is macOS-only")]
 fn signs_itself_with_the_virtualization_entitlement() {
     const ENTITLEMENT: &str = "com.apple.security.virtualization";
     let env = Env::new("self-signing");

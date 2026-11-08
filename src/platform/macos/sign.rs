@@ -16,7 +16,7 @@ use objc2_foundation::ns_string;
 
 use crate::util;
 
-const ENTITLEMENTS: &[u8] = include_bytes!("../entitlements.plist");
+const ENTITLEMENTS: &[u8] = include_bytes!("../../../entitlements.plist");
 
 /// Set for the re-executed binary, so a signature that didn't take effect
 /// fails instead of looping.

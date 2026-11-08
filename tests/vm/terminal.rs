@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::harness::{BOOT_TIMEOUT, Project, STOP_TIMEOUT, terminate, wait_timeout};
 
 /// What sendit writes when it gives the terminal back, as in
-/// src/vm/console.rs.
+/// src/vm/machine/console.rs.
 pub const TERMINAL_RESET: &[u8] =
     b"\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?2004l";
 pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
@@ -93,7 +93,8 @@ fn openpty(rows: u16, cols: u16) -> (OwnedFd, OwnedFd) {
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut size,
+            // Mutable on macOS, const on Linux.
+            &raw mut size,
         );
         assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
         // Neither end may leak into sendit; it gets copies of the slave.

@@ -1,10 +1,7 @@
 //! The pristine Debian cloud image and raw disk file helpers.
 
-use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::Read;
-use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,6 +11,7 @@ use sha2::{Digest, Sha512};
 
 use crate::config::ByteSize;
 use crate::paths::Paths;
+use crate::platform;
 use crate::util::{fresh_dir, run, run_output};
 
 const IMAGE_BASE_URL: &str = "https://cloud.debian.org/images/cloud/trixie/latest";
@@ -144,7 +142,8 @@ fn punch_zero_blocks(path: &Path) -> Result<()> {
         match (zero, zero_run) {
             (true, None) => zero_run = Some(offset),
             (false, Some(start)) => {
-                punch_hole(&file, start, offset - start)?;
+                platform::punch_hole(&file, start, offset - start)
+                    .context("punching a hole in the disk image")?;
                 zero_run = None;
             }
             _ => {}
@@ -154,20 +153,6 @@ fn punch_zero_blocks(path: &Path) -> Result<()> {
         }
         offset += n as u64;
     }
-}
-
-fn punch_hole(file: &File, offset: u64, len: u64) -> Result<()> {
-    let args = libc::fpunchhole_t {
-        fp_flags: 0,
-        reserved: 0,
-        fp_offset: offset as libc::off_t,
-        fp_length: len as libc::off_t,
-    };
-    // SAFETY: F_PUNCHHOLE takes a pointer to a valid fpunchhole_t.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_PUNCHHOLE, &args) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("punching a hole in the disk image");
-    }
-    Ok(())
 }
 
 /// Reads until `buf` is full or the end of the file is reached.
@@ -187,11 +172,7 @@ fn read_full(file: &mut File, buf: &mut [u8]) -> Result<usize> {
 /// with `SENDIT_VM_DIR` on an external drive, or on other file systems,
 /// it falls back to a sparse copy.
 pub fn clone_file(src: &Path, dst: &Path) -> Result<()> {
-    let c_src = CString::new(src.as_os_str().as_bytes())?;
-    let c_dst = CString::new(dst.as_os_str().as_bytes())?;
-    // SAFETY: both arguments are valid NUL-terminated paths.
-    if unsafe { libc::clonefile(c_src.as_ptr(), c_dst.as_ptr(), 0) } != 0 {
-        let error = std::io::Error::last_os_error();
+    if let Err(error) = platform::clonefile(src, dst) {
         if matches!(error.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) {
             return copy_sparse(src, dst)
                 .with_context(|| format!("copying {} to {}", src.display(), dst.display()));

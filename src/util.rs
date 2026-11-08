@@ -1,17 +1,12 @@
 //! Small helpers for files and external commands.
 
-use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::ptr::NonNull;
 
 use anyhow::{Context, Result, ensure};
-use objc2::rc::Retained;
-use objc2_foundation::{NSNumber, NSURL, NSURLIsExcludedFromBackupKey};
 use serde::de::DeserializeOwned;
 
 /// Turns a "not found" error into `None`, e.g. `if_exists(fs::read(path))`.
@@ -81,33 +76,6 @@ pub fn make_private(dir: &Path) -> Result<()> {
             .with_context(|| format!("restricting access to {}", dir.display()))?;
     }
     Ok(())
-}
-
-/// Creates `dir` if needed and keeps it and everything in it out of Time
-/// Machine backups, like `tmutil addexclusion`: the mark sits on the
-/// directory itself and moves with it.
-pub fn exclude_from_backups(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let url = file_url(dir)?;
-    let yes = NSNumber::new_bool(true);
-    // SAFETY: the key takes an NSNumber holding a boolean.
-    unsafe { url.setResourceValue_forKey_error(Some(&yes), NSURLIsExcludedFromBackupKey) }
-        .map_err(|error| anyhow::anyhow!(error.localizedDescription().to_string()))
-}
-
-/// A file URL for `path`, built from its bytes so that paths which aren't
-/// valid UTF-8 still point at the right file.
-pub fn file_url(path: &Path) -> Result<Retained<NSURL>> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("path {} contains a NUL byte", path.display()))?;
-    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
-    Ok(unsafe {
-        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
-            NonNull::new_unchecked(c_path.as_ptr().cast_mut()),
-            path.is_dir(),
-            None,
-        )
-    })
 }
 
 /// Reads and parses a TOML file; `None` if it doesn't exist.

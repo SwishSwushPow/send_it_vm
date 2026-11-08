@@ -27,7 +27,7 @@ use objc2::rc::Retained;
 use objc2_foundation::NSFileHandle;
 use objc2_virtualization::{VZFileHandleSerialPortAttachment, VZSerialPortAttachment};
 
-use super::ConsoleMode;
+use crate::vm::{ConsoleMode, window_size};
 
 /// Ctrl-]
 const ESCAPE_KEY: u8 = 0x1d;
@@ -486,24 +486,6 @@ fn is_terminal_name(value: &str) -> bool {
 fn terminal_size() -> Option<String> {
     let (rows, cols) = window_size()?;
     Some(format!("{rows} {cols}\n"))
-}
-
-/// The terminal's rows and columns, if stdout is a terminal.
-pub(super) fn window_size() -> Option<(u16, u16)> {
-    let mut size = libc::winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: TIOCGWINSZ fills in the winsize it is given.
-    if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } != 0
-        || size.ws_row == 0
-        || size.ws_col == 0
-    {
-        return None;
-    }
-    Some((size.ws_row, size.ws_col))
 }
 
 /// Forwards `from` (stdin) to the guest, counting escape keys, until `stop`

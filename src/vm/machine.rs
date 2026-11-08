@@ -1,0 +1,278 @@
+//! Running a VM with Virtualization.framework.
+//!
+//! The VM lives on the main dispatch queue: `run` creates it on the main
+//! thread and then drives the main run loop until the VM has stopped. This
+//! keeps all (non-`Send`) Objective-C objects on a single thread.
+//!
+//! objc2-virtualization marks every method `unsafe`. Unless a `SAFETY`
+//! comment says otherwise, the `unsafe` blocks here only call them with
+//! valid, retained objects on the main thread.
+
+mod config;
+mod console;
+
+use std::cell::RefCell;
+use std::io::{IsTerminal, Write};
+use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, ensure};
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{AllocAnyThread, DefinedClass, define_class, msg_send};
+use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSError, NSRunLoop};
+use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineDelegate};
+
+use super::{CatchSignals, ConsoleMode, LAST_SIGNAL, SIGNALS, VmDir, VmSpec};
+use console::Console;
+
+/// How long to wait for the guest to shut down after asking it to, or after
+/// it said that it is shutting down on its own.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the guest is asked again while it hasn't reacted. Early in
+/// boot, nothing in the guest handles the request yet (systemd-logind
+/// hasn't started), and the request is lost.
+const STOP_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Prints a status line between guest output. Errors are ignored: after a
+/// SIGHUP the terminal is gone, and the VM must still be shut down cleanly.
+fn notice(message: &str) {
+    let mut stderr = std::io::stderr();
+    // On a terminal, it may be in raw mode and in the middle of a line.
+    let _ = if stderr.is_terminal() {
+        write!(stderr, "\r\n[sendit] {message}\r\n")
+    } else {
+        writeln!(stderr, "[sendit] {message}")
+    };
+}
+
+#[derive(Clone, Copy)]
+enum Stopping {
+    No,
+    /// A stop was asked for, but the VM can't be stopped yet (e.g. while it
+    /// is starting); retried until it can.
+    Pending,
+    /// The guest was first asked to shut down at `since`, and last at `last`.
+    Requested {
+        since: Instant,
+        last: Instant,
+    },
+    Forced,
+}
+
+/// State shared between the run loop and VZ callbacks (all on the main thread).
+#[derive(Default)]
+struct VmState {
+    start_error: RefCell<Option<String>>,
+    /// Set once the VM has stopped: `Ok` for a clean stop, `Err` otherwise.
+    stopped: RefCell<Option<Result<(), String>>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "SenditVmDelegate"]
+    #[ivars = Rc<VmState>]
+    struct VmDelegate;
+
+    unsafe impl NSObjectProtocol for VmDelegate {}
+
+    unsafe impl VZVirtualMachineDelegate for VmDelegate {
+        #[unsafe(method(guestDidStopVirtualMachine:))]
+        fn guest_did_stop(&self, _vm: &VZVirtualMachine) {
+            self.ivars().stopped.replace(Some(Ok(())));
+        }
+
+        #[unsafe(method(virtualMachine:didStopWithError:))]
+        fn did_stop_with_error(&self, _vm: &VZVirtualMachine, error: &NSError) {
+            self.ivars().stopped.replace(Some(Err(ns_message(error))));
+        }
+    }
+);
+
+impl VmDelegate {
+    fn new(state: Rc<VmState>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(state);
+        // SAFETY: NSObject's `init` takes no arguments and returns the object.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Boots the VM with the console attached to this terminal and blocks until
+/// it has stopped. Must be called on the main thread, the only one that
+/// drains the main dispatch queue the VM runs on. The guest powers off when
+/// its console user logs out. Pressing Ctrl-] (or sending SIGTERM, SIGHUP
+/// or SIGINT) asks the guest to shut down; doing it again, or the guest not
+/// reacting in time, stops the VM forcibly. So does a shutdown the guest
+/// started on its own that takes too long. Returns the signal that asked
+/// the VM to shut down, if one did before anything else.
+pub fn run(dir: &VmDir, spec: &VmSpec) -> Result<Option<libc::c_int>> {
+    ensure!(
+        unsafe { VZVirtualMachine::isSupported() },
+        "virtualization is not supported on this Mac"
+    );
+
+    // Signals from before this VM, which ended an earlier one, don't count.
+    let first_signal = SIGNALS.load(Ordering::Relaxed);
+    let mut seen_escapes = first_signal;
+    let mut stopped_by = None;
+    let _signals = CatchSignals::new();
+    let console = Console::attach(&spec.console)?;
+    let configuration = catch_objc(|| config::build(dir, spec, &console.ports()))??;
+    let state = Rc::new(VmState::default());
+    let delegate = VmDelegate::new(state.clone());
+    let vm = unsafe {
+        VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &configuration)
+    };
+    unsafe { vm.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+
+    let start_state = state.clone();
+    let on_start = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: VZ passes a valid NSError or null.
+        if let Some(error) = unsafe { error.as_ref() } {
+            start_state.start_error.replace(Some(ns_message(error)));
+        }
+    });
+    catch_objc(|| unsafe { vm.startWithCompletionHandler(&on_start) })?;
+
+    // While provisioning, nobody is logged in on the console to log out,
+    // and Ctrl-C isn't forwarded to the guest.
+    let provisioning = matches!(spec.console, ConsoleMode::Provision(_));
+    let (started, stopping_notice) = match spec.console {
+        ConsoleMode::Provision(_) => (
+            "VM starting. Press Ctrl-C to abort.",
+            "Shutting down. Press Ctrl-C again to force.",
+        ),
+        ConsoleMode::Login => ("VM starting. Type exit to shut it down.", "Shutting down."),
+        // Whatever has the terminal says what to do; detached, there is none.
+        ConsoleMode::Hidden | ConsoleMode::Detached => ("VM starting.", "Shutting down."),
+    };
+    notice(started);
+
+    let run_loop = NSRunLoop::currentRunLoop();
+    let mut stopping = Stopping::No;
+    let result = loop {
+        let deadline = NSDate::dateWithTimeIntervalSinceNow(0.2);
+        run_loop.runMode_beforeDate(unsafe { NSDefaultRunLoopMode }, &deadline);
+
+        if let Some(error) = state.start_error.take() {
+            break Err(anyhow::anyhow!(error)).context("starting the VM");
+        }
+        if let Some(stopped) = state.stopped.take() {
+            break stopped
+                .map_err(anyhow::Error::msg)
+                .context("the VM stopped with an error");
+        }
+
+        let escapes = console.escapes() + SIGNALS.load(Ordering::Relaxed);
+        let escaped = escapes > seen_escapes;
+        seen_escapes = escapes;
+        // Unlike pressing Ctrl-] again, asking again doesn't force the VM
+        // off: a command run over SSH ends when the guest shuts down, and
+        // asks once more then.
+        let shutdown =
+            (spec.shutdown.as_ref()).is_some_and(|flag| flag.swap(false, Ordering::Relaxed));
+        // Provisioning ends with the guest shutting down, which must not be
+        // cut short.
+        let guest_stopping = !provisioning && console.guest_stopping();
+        stopping = match stopping {
+            Stopping::No if escaped || shutdown => {
+                // A signal by now came first: a command that ends because
+                // of it, e.g. ssh on Ctrl-C, sets `shutdown` only after.
+                if SIGNALS.load(Ordering::Relaxed) > first_signal {
+                    stopped_by = Some(LAST_SIGNAL.load(Ordering::Relaxed));
+                }
+                let next = stop(&vm, &state, stopping_notice);
+                if matches!(next, Stopping::Pending) {
+                    notice("The VM is still starting; it shuts down once it can.");
+                }
+                next
+            }
+            // The guest is already shutting down, e.g. after a logout: it
+            // gets as long as if it had been asked to.
+            Stopping::No | Stopping::Pending if guest_stopping => {
+                let now = Instant::now();
+                Stopping::Requested {
+                    since: now,
+                    last: now,
+                }
+            }
+            Stopping::Pending => stop(&vm, &state, stopping_notice),
+            Stopping::Requested { since, last } if escaped || since.elapsed() > STOP_TIMEOUT => {
+                if force_stop(&vm, &state) {
+                    notice("Forcing the VM off.");
+                    Stopping::Forced
+                } else {
+                    Stopping::Requested { since, last }
+                }
+            }
+            Stopping::Requested { since, last } if last.elapsed() >= STOP_REQUEST_INTERVAL => {
+                // Once the guest shuts down, it ignores further requests.
+                if unsafe { vm.canRequestStop() } {
+                    let _ = unsafe { vm.requestStopWithError() };
+                }
+                Stopping::Requested {
+                    since,
+                    last: Instant::now(),
+                }
+            }
+            other => other,
+        };
+    };
+    drop(console);
+    if std::io::stderr().is_terminal() {
+        let _ = writeln!(std::io::stderr());
+    }
+    result.map(|()| stopped_by)
+}
+
+fn ns_message(error: &NSError) -> String {
+    error.localizedDescription().to_string()
+}
+
+/// Runs `f`, turning an Objective-C exception (which Rust can't unwind
+/// through) into an error.
+fn catch_objc<R>(f: impl FnOnce() -> R) -> Result<R> {
+    objc2::exception::catch(AssertUnwindSafe(f)).map_err(|exception| match exception {
+        Some(exception) => anyhow::anyhow!("Objective-C exception: {exception}"),
+        None => anyhow::anyhow!("unknown Objective-C exception"),
+    })
+}
+
+/// Asks the guest to shut down, or stops the VM forcibly if the guest can't
+/// be asked. `Pending` if neither is possible yet.
+fn stop(vm: &VZVirtualMachine, state: &Rc<VmState>, stopping_notice: &str) -> Stopping {
+    if unsafe { vm.canRequestStop() && vm.requestStopWithError().is_ok() } {
+        notice(stopping_notice);
+        let now = Instant::now();
+        Stopping::Requested {
+            since: now,
+            last: now,
+        }
+    } else if force_stop(vm, state) {
+        Stopping::Forced
+    } else {
+        Stopping::Pending
+    }
+}
+
+/// Stops the VM without asking the guest; false if it can't be stopped now.
+fn force_stop(vm: &VZVirtualMachine, state: &Rc<VmState>) -> bool {
+    if !unsafe { vm.canStop() } {
+        return false;
+    }
+    let state = state.clone();
+    let on_stop = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: VZ passes a valid NSError or null.
+        let result = match unsafe { error.as_ref() } {
+            Some(error) => Err(ns_message(error)),
+            None => Ok(()),
+        };
+        state.stopped.replace(Some(result));
+    });
+    unsafe { vm.stopWithCompletionHandler(&on_stop) };
+    true
+}

@@ -2,3 +2,12 @@
 # entitlement, so `cargo build/run/test/install --path .` produce working binaries.
 [target.aarch64-apple-darwin]
 linker = "scripts/link-and-sign.sh"
+
+# Lets sendit build on Linux, e.g. in a Linux VM, for developing it; it
+# can't run VMs there. `cargo install` from crates.io or git doesn't read
+# this file, so installing still fails anywhere but on Apple silicon Macs.
+# A RUSTFLAGS (or CARGO_ENCODED_RUSTFLAGS) environment variable replaces
+# these flags; add `--cfg sendit_dev` to it then.
+[target.'cfg(target_os = "linux")']
+rustflags = ["--cfg", "sendit_dev"]
+rustdocflags = ["--cfg", "sendit_dev"]

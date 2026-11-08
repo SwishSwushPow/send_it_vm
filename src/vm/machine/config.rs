@@ -13,9 +13,11 @@ use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSData, NSError, NSString};
 use objc2_virtualization::*;
 
-use super::{VmDir, VmSpec, ns_message};
+use super::ns_message;
 use crate::mounts::Share;
-use crate::util::{file_url, if_exists, write_atomic};
+use crate::platform::file_url;
+use crate::util::{if_exists, write_atomic};
+use crate::vm::{VmDir, VmSpec};
 
 pub fn build(
     dir: &VmDir,

@@ -12,7 +12,9 @@ categories = ["command-line-utilities", "virtualization", "development-tools"]
 # (such as VM disk images) can end up in a package. Cargo.toml and Cargo.lock
 # are always included. The linker wrapper (.cargo/ and scripts/) stays out:
 # it only signs builds in this repository, and installed binaries sign
-# themselves (see src/sign.rs), which needs entitlements.plist.
+# themselves (see src/platform/macos/sign.rs), which needs entitlements.plist.
+# Leaving .cargo/ out also keeps installing failing anywhere but on Apple
+# silicon Macs: its config.toml lets this repository build on Linux.
 include = ["/src/", "/entitlements.plist", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
 
 [[bin]]
@@ -21,17 +23,25 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-block2 = "0.6"
 clap = { version = "4.6.7", features = ["derive"] }
 hex = "0.4.3"
 libc = "0.2.189"
-objc2 = { version = "0.6", features = ["exception"] }
-objc2-foundation = "0.3"
-objc2-virtualization = "0.3"
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.0"
 toml = "1.1.6"
 uuid = { version = "1.26.1", features = ["v5"] }
+
+# Virtualization.framework and the rest of macOS. Without them, sendit builds
+# elsewhere, e.g. in a Linux VM, for developing it, but can't run VMs.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = "0.3"
+objc2-virtualization = "0.3"
+
+[lints.rust]
+# Set by .cargo/config.toml for builds on Linux.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sendit_dev)"] }
 
 [profile.release]
 # rustc's strip step runs after the linker and would replace the signature
