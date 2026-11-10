@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `sendit run` for a git worktree whose main worktree's VM is running asks whether to start from the image before it asks about risky shares, and asks about shares once, for the build the new VM is really made from. It asked about the shares of the main worktree's VM's build first, then again if the image's latest build asked for others.
+- `sendit run` says that the image is not provisioned yet, or outdated, before it asks about risky shares, so that you don't confirm shares for a VM it can't make.
+
 ## 0.10.0 - 2026-11-06
 
 ### Added

@@ -847,14 +847,14 @@ fn asks_before_risky_shares() {
         "~ (read-only) contains your home directory",
     );
 
-    // An ordinary share gets as far as the missing image.
-    fs::remove_dir_all(&image).unwrap();
+    // An ordinary share gets as far as making the VM, which fails on the
+    // image's missing disk.
     env.config("");
     let data = env.project.parent().unwrap().join("data");
     fs::create_dir_all(&data).unwrap();
     assert_fails_with(
         &env.sendit(&["run", "--mount", data.to_str().unwrap()]),
-        "is not provisioned yet",
+        "from the default image",
     );
 }
 
@@ -900,7 +900,8 @@ fn moves_vms_to_sendit_vm_dir() {
     assert!(!env.home.join(".sendit").exists());
 
     // Shares of it are risky, ~/.sendit no longer is. With the image there,
-    // as sendit says it is missing before it asks about shares.
+    // as sendit says it is missing before it asks about shares; without its
+    // disk, a run that isn't refused fails making the VM.
     let image = env.home.join(".cache/sendit/images/default");
     fs::create_dir_all(&image).unwrap();
     fs::write(
@@ -917,11 +918,10 @@ fn moves_vms_to_sendit_vm_dir() {
             vms.canonicalize().unwrap().display()
         ),
     );
-    fs::remove_dir_all(&image).unwrap();
     fs::create_dir_all(env.home.join(".sendit")).unwrap();
     assert_fails_with(
         &sendit(&vms, &["run", "--mount", "~/.sendit"]),
-        "is not provisioned yet",
+        "from the default image",
     );
 }
 

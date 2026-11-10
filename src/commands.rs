@@ -331,8 +331,8 @@ pub fn list(paths: &Paths) -> Result<()> {
                     ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
                 };
                 // Only a hint: a marker that can't be read doesn't stop the listing.
-                let earlier = Origin::of_vm(paths, &dir, &metadata.image);
-                let image = if earlier.is_ok_and(|origin| origin.earlier_build()) {
+                let origin = Origin::of_vm(paths, &dir, &metadata.image);
+                let image = if origin.is_ok_and(|origin| origin.earlier_build()) {
                     format!("{} (earlier build)", metadata.image)
                 } else {
                     metadata.image.to_string()

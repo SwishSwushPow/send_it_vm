@@ -196,16 +196,7 @@ mod tests {
         let go: ImageName = "go".parse().unwrap();
         let vm = dir(&paths, &wt);
         let build = |marker: &str| write_marker(&provision::marker(&paths, &rust), marker);
-        let described = |origin: Result<Origin>| -> Vec<String> {
-            origin
-                .unwrap()
-                .mounts()
-                .iter()
-                .map(|m| m.mount.to_string())
-                .collect()
-        };
-        let shares =
-            |image: &ImageName, fresh: bool| described(Origin::of(&paths, &wt, image, fresh));
+        let shares = |image: &ImageName, fresh: bool| mounts(Origin::of(&paths, &wt, image, fresh));
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
 
         assert!(shares(&rust, false).is_empty());
@@ -237,7 +228,7 @@ mod tests {
         );
         build("~/third:ro");
         assert_eq!(shares(&rust, false), ["~/parent:ro"]);
-        let new_vm = |fresh| described(Origin::of_new_vm(&paths, &wt, &rust, fresh));
+        let new_vm = |fresh| mounts(Origin::of_new_vm(&paths, &wt, &rust, fresh));
         assert_eq!(new_vm(false), ["~/parent:ro"]);
         assert_eq!(new_vm(true), ["~/third:ro"]);
 

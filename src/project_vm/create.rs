@@ -15,7 +15,10 @@ use crate::util;
 use crate::vm::VmDir;
 
 /// What a project's missing VM is to be made from, decided before its
-/// settings are resolved: they share what that build asks for.
+/// settings are resolved: they share what that build asks for. To be a copy
+/// of its parent VM, it holds the parent's lock until `create` has made the
+/// copy, also while `sendit run` asks about shares, so that the parent can't
+/// start meanwhile.
 pub struct NewVm {
     image: ImageName,
     source: Source,
@@ -100,7 +103,7 @@ enum Source {
     Parent {
         dir: VmDir,
         metadata: Metadata,
-        /// Keeps the parent from starting while it is copied.
+        /// Keeps the parent from starting until it is copied.
         _lock: File,
     },
 }
@@ -275,7 +278,7 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
 mod tests {
     use super::super::lock::lock;
     use super::super::test_util::*;
-    use super::super::{Origin, State};
+    use super::super::{Origin, State, state};
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -328,7 +331,7 @@ mod tests {
 
     #[test]
     fn shares_what_the_build_it_is_made_from_asks_for() {
-        let temp = crate::util::TempDir::new("vm-build-shares-new");
+        let temp = crate::util::TempDir::new("vm-new-vm-shares");
         let paths = Paths::new(temp.path().join("home"));
         let (wt, parent) = worktree_with_parent(temp.path(), &paths);
         let rust: ImageName = "rust".parse().unwrap();
@@ -344,6 +347,9 @@ mod tests {
         // Stopped parent: a copy, sharing what the parent's build asked for.
         let new_vm = plan(&paths, &wt, &rust, false, &never).unwrap();
         assert!(!new_vm.is_from_image());
+        // Locked from the decision on, so the parent can't start before it
+        // is copied.
+        assert_eq!(state(&parent).unwrap(), State::Running(None));
         let before = mounts(Origin::of(&paths, &wt, &rust, new_vm.is_from_image()));
         assert_eq!(before, ["~/parent:ro"]);
         create(&paths, &wt, new_vm).unwrap();

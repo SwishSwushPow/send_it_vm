@@ -74,17 +74,12 @@ pub(super) fn write_built(path: &Path, built: u64) {
 /// Writes an image's marker, or a VM's copy of one, to `path`, saying
 /// that the scripts asked for `mount`.
 pub(super) fn write_marker(path: &Path, mount: &str) {
-    write_marker_of(path, "images/rust.sh", mount);
-}
-
-/// Like `write_marker`, with the mount asked for by `script`.
-pub(super) fn write_marker_of(path: &Path, script: &str, mount: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         path,
         format!(
             "revision = {}\ncustom_scripts = []\n\
-             [[mounts]]\nscript = \"{script}\"\nmount = \"{mount}\"\n",
+             [[mounts]]\nscript = \"images/rust.sh\"\nmount = \"{mount}\"\n",
             provision::BASE_REVISION
         ),
     )
