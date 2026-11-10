@@ -260,11 +260,13 @@ pub fn reset(
         eprintln!("This project has no VM.");
         return Ok(());
     }
-    if project_vm::state(&dir)? != State::Stopped {
-        bail!(
+    match project_vm::state(&dir)? {
+        State::Stopped => {}
+        State::Busy => bail!("{}; try again in a moment", project_vm::BUSY),
+        State::Running(_) => bail!(
             "the VM is running; stop it first with `{} stop`",
             project_vm::sendit_for(&dir, project)
-        );
+        ),
     }
     let parent = project_vm::parent_metadata(paths, project);
     let next = match &parent {
@@ -315,6 +317,7 @@ pub fn list(paths: &Paths) -> Result<()> {
         let metadata = project_vm::metadata(&dir);
         let state = match project_vm::state(&dir)? {
             State::Running(_) => "running",
+            State::Busy => "busy",
             State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
             State::Stopped => "stopped",
         };
@@ -534,9 +537,16 @@ pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
             Err(_) if all => ("?".to_string(), "?".to_string(), &mut others),
             Err(_) => continue,
         };
-        if project_vm::state(&dir)? != State::Stopped {
-            eprintln!("Skipping {project}: it is still running.");
-            continue;
+        match project_vm::state(&dir)? {
+            State::Stopped => {}
+            State::Busy => {
+                eprintln!("Skipping {project}: another sendit process is using it.");
+                continue;
+            }
+            State::Running(_) => {
+                eprintln!("Skipping {project}: it is still running.");
+                continue;
+            }
         }
         group.push((dir, listed));
     }
@@ -682,6 +692,10 @@ fn vm_state(
     } else {
         let state = match project_vm::state(vm_dir)? {
             State::Stopped => "stopped".to_string(),
+            State::Busy => {
+                "busy, another sendit process is making, starting, copying or deleting it"
+                    .to_string()
+            }
             State::Running(_) => {
                 applied = network::applied(&vm_dir.meta());
                 match vm::net::vm_ip(vm_dir)? {

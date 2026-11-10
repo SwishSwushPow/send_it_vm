@@ -184,7 +184,7 @@ The VM is a boundary, but not one that makes it safe to run anything in it and t
 Nothing is written into project directories.
 
 - `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys
-- `~/.sendit/<project>_<uuid>/`: one directory per project VM
+- `~/.sendit/<project>_<uuid>/`: one directory per project VM, and next to it, its lock, `.<project>_<uuid>.lock`, which sendit keeps when it deletes the VM
 - `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 
 sendit excludes `~/.cache/sendit/` and the VM directory from Time Machine backups: they hold only what sendit can make again, and a VM's disk changes on every run. Keep anything you can't lose in the project directory. It also makes both accessible only to you, since base images, VM disks and the files of a build hold whatever the provisioning scripts put there, secrets included.

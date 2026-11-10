@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::lock::{self, Lock, State, state};
+use super::lock::{self, BUSY, Lock, State, state};
 use super::ssh::{login, run_command, wait_until_answers};
 use super::{dir, metadata, sendit_for};
 use crate::config::{ByteSize, VmSettings};
@@ -367,8 +367,8 @@ pub fn stop(paths: &Paths, project: &Project) -> Result<()> {
             eprintln!("The VM is not running.");
             return Ok(());
         }
-        State::Running(None) => bail!("the VM is starting or busy; try again in a moment"),
-        State::Running(Some(pid)) => pid,
+        State::Busy => bail!("{BUSY}; try again in a moment"),
+        State::Running(pid) => pid,
     };
     // `run` treats SIGTERM like Ctrl-]: it asks the guest to shut down and
     // forces it off if the guest doesn't react in time.

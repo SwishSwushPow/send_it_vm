@@ -28,11 +28,17 @@ const LOCK_FD_ENV: &str = "SENDIT_LOCK_FD";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Stopped,
-    /// Running under this `sendit run` process. The PID is missing while
-    /// that process makes the VM and starts up, and while another command
-    /// holds the lock to copy or delete the VM.
-    Running(Option<u32>),
+    /// Another sendit process holds the lock and the VM isn't running yet:
+    /// `sendit run` is making it, asking about it or starting up, or
+    /// another command is copying or deleting it. `BUSY` says so.
+    Busy,
+    /// Running under this `sendit run` process.
+    Running(u32),
 }
+
+/// What `State::Busy` means, for messages.
+pub const BUSY: &str =
+    "the VM is busy: another sendit process is making, starting, copying or deleting it";
 
 /// A VM's lock, held until it is dropped, or the process ends.
 #[derive(Debug)]
@@ -99,7 +105,10 @@ pub fn state(dir: &VmDir) -> Result<State> {
         Err(fs::TryLockError::WouldBlock) => {
             let mut pid = String::new();
             std::io::Read::read_to_string(&mut file, &mut pid)?;
-            Ok(State::Running(pid.trim().parse().ok()))
+            Ok(match pid.trim().parse() {
+                Ok(pid) => State::Running(pid),
+                Err(_) => State::Busy,
+            })
         }
         Err(fs::TryLockError::Error(e)) => {
             Err(e).with_context(|| format!("locking {}", path.display()))
@@ -112,7 +121,13 @@ pub fn state(dir: &VmDir) -> Result<State> {
 /// error says how to reach it, to run `command` there or else open a
 /// shell.
 pub(super) fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<Lock> {
-    try_lock(dir)?.ok_or_else(|| already_running(dir, project, command))
+    if let Some(lock) = try_lock(dir)? {
+        return Ok(lock);
+    }
+    match state(dir)? {
+        State::Busy => anyhow::bail!("{BUSY}; try again in a moment"),
+        _ => Err(already_running(dir, project, command)),
+    }
 }
 
 /// The error for starting the project's VM, in `dir`, while it runs, which
@@ -183,12 +198,9 @@ mod tests {
 
         // Made and started, but not yet running.
         let running = lock(&vm, &project, &[]).unwrap();
-        assert_eq!(state(&vm).unwrap(), State::Running(None));
+        assert_eq!(state(&vm).unwrap(), State::Busy);
         running.record_pid().unwrap();
-        assert_eq!(
-            state(&vm).unwrap(),
-            State::Running(Some(std::process::id()))
-        );
+        assert_eq!(state(&vm).unwrap(), State::Running(std::process::id()));
         drop(running);
         assert_eq!(state_once_released(&vm), State::Stopped);
         // Held to copy or delete the VM, the lock doesn't point at the
@@ -202,7 +214,7 @@ mod tests {
                 None => panic!("the lock stays taken"),
             }
         };
-        assert_eq!(state(&vm).unwrap(), State::Running(None));
+        assert_eq!(state(&vm).unwrap(), State::Busy);
         assert!(stop(&paths, &project).is_err());
     }
 
@@ -254,11 +266,15 @@ mod tests {
         let project = Project::at(temp.path()).unwrap();
         let vm = dir(&paths, &project);
         fs::create_dir_all(vm.path()).unwrap();
-        let _running = lock(&vm, &project, &[]).unwrap();
+        let running = lock(&vm, &project, &[]).unwrap();
         let error = |command: &[&str]| {
             let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
             lock(&vm, &project, &command).unwrap_err().to_string()
         };
+        // Not yet running, e.g. while asking about shares: no shell to open.
+        let busy = error(&[]);
+        assert!(busy.starts_with(BUSY), "{busy}");
+        running.record_pid().unwrap();
         // Tests don't run in the project, so it is named, by its directory
         // while the VM has no name.
         let ssh = format!("sendit -C {} ssh", quote(&temp.path().to_string_lossy()));

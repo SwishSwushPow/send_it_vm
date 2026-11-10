@@ -107,7 +107,7 @@ pub(super) fn plan(
 /// be started while it is being deleted.
 pub fn delete(dir: &VmDir) -> Result<()> {
     let Some(_lock) = try_lock(dir)? else {
-        bail!("{} is running; stop it first", dir.path().display());
+        bail!("{} is running or busy; stop it first", dir.path().display());
     };
     fs::remove_dir_all(dir.path()).with_context(|| format!("deleting {}", dir.path().display()))
 }
@@ -141,11 +141,14 @@ fn source(
     let Some(parent) = parent(paths, project).filter(|_| !fresh) else {
         return Ok((Source::Base, None));
     };
+    // Before reading what the parent is: it can't be deleted, and made
+    // again, after that.
+    let lock = try_lock(&parent)?;
     let why_not = match metadata(&parent) {
         Err(e) => format!("{e:#}"),
         Ok(m) if m.image != *image => format!("it was made from the {} image", m.image),
         Ok(m) if m.outdated() => "it was made from an outdated base image".to_string(),
-        Ok(metadata) => match try_lock(&parent)? {
+        Ok(metadata) => match lock {
             Some(lock) => {
                 let source = Source::Parent {
                     dir: parent,
@@ -366,7 +369,7 @@ mod tests {
         assert!(!new_vm.is_from_image());
         // Locked from the decision on, so the parent can't start before it
         // is copied.
-        assert_eq!(state(&parent).unwrap(), State::Running(None));
+        assert_eq!(state(&parent).unwrap(), State::Busy);
         let before = mounts(Origin::of(&paths, &wt, &rust, new_vm.is_from_image()));
         assert_eq!(before, ["~/parent:ro"]);
         create(&paths, &wt, new_vm).unwrap();

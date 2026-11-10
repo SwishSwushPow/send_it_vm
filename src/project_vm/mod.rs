@@ -58,7 +58,7 @@ use crate::worktree;
 use ssh::quote;
 
 pub use create::{NewVm, create, delete, new_vm};
-pub use lock::{State, state};
+pub use lock::{BUSY, State, state};
 pub use naming::{find, name_vms, rename};
 pub use origin::Origin;
 pub use run::{Detach, background_project, lock_to_run, run, stop};

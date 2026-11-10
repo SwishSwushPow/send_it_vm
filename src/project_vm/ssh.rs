@@ -8,9 +8,9 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
-use super::lock::{State, state};
+use super::lock::{BUSY, State, state};
 use super::{dir, sendit_for};
 use crate::config::GUEST_USER;
 use crate::paths::{Paths, Project};
@@ -20,11 +20,14 @@ use crate::vm::{VmDir, net};
 /// as root if `root`, running `command` if given.
 pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> Result<()> {
     let dir = dir(paths, project);
-    ensure!(
-        state(&dir)? != State::Stopped,
-        "the VM is not running; start it with `{} run`",
-        sendit_for(&dir, project)
-    );
+    match state(&dir)? {
+        State::Stopped => bail!(
+            "the VM is not running; start it with `{} run`",
+            sendit_for(&dir, project)
+        ),
+        State::Busy => bail!("{BUSY}; try again once it runs"),
+        State::Running(_) => {}
+    }
     let error = ssh_command(paths, &dir, root, Remote::Login(command))?.exec();
     Err(error).context("running ssh")
 }
