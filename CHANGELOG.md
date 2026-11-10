@@ -4,6 +4,7 @@
 
 ### Changed
 
+- **Breaking:** `SENDIT_VM_DIR` must name a folder that holds only sendit's VMs, since sendit excludes it from Time Machine backups as a whole. With anything else in it, every command stops and names what's there; move those things elsewhere and they are backed up again, as the exclusion is on the folder, not on them. sendit now creates the folder when it doesn't exist, as long as the folder it is in does.
 - `sendit run` for a git worktree whose main worktree's VM is running asks whether to start from the image before it asks about risky shares, and asks about shares once, for the build the new VM is really made from. It asked about the shares of the main worktree's VM's build first, then again if the image's latest build asked for others.
 - `sendit run` says that the image is not provisioned yet, or outdated, before it asks about risky shares, so that you don't confirm shares for a VM it can't make.
 - Only one sendit process at a time makes, runs, copies or deletes a VM: `sendit run` holds the VM's lock from before it decides whether to make the VM, also while it asks about it. Until the VM boots, the VM is "busy": a second `sendit run`, `ssh`, `stop` and `reset` say so instead of taking it for running, `sendit list` and `sendit status` show it as busy, and `sendit prune` skips it. Each VM's lock is now a file next to its directory, `.<project>_<uuid>.lock`, which stays when the VM is deleted. Stop running VMs before upgrading: this version doesn't see the locks of VMs started by earlier ones.
