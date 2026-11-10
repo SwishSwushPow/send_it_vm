@@ -64,6 +64,31 @@ pub fn linked_worktree(root: &Path) -> Option<(PathBuf, &Path)> {
     Some((main, top))
 }
 
+/// The git directories that git on the Mac may use in `root` or one of the
+/// directories above it, inner ones first: each `.git` on the way up, and
+/// for a `.git` file, as in a linked worktree or a submodule, the common
+/// directory of the directory it points to, e.g. the main worktree's
+/// `.git`, then that directory itself. The common one comes first so that
+/// a share of the main worktree is said to contain its `.git`. Only those
+/// that exist.
+pub fn git_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in root.ancestors() {
+        let dot_git = dir.join(".git");
+        if fs::symlink_metadata(&dot_git).is_err() {
+            continue;
+        }
+        dirs.push(dot_git.clone());
+        if let Some(gitdir) = read_link(&dot_git, "gitdir: ") {
+            if let Some(common) = read_link(&gitdir.join("commondir"), "") {
+                dirs.push(common);
+            }
+            dirs.push(gitdir);
+        }
+    }
+    dirs
+}
+
 /// The counterpart of `dir` in the worktree of `branch` in the git
 /// repository at `dir`: the worktree itself, or for a subdirectory of the
 /// repository, as in a monorepo, the same one in the worktree. The
@@ -249,6 +274,7 @@ pub fn layout(temp: &Path) -> (PathBuf, PathBuf) {
         format!("{}\n", wt.join(".git").display()),
     )
     .unwrap();
+    fs::write(gitdir.join("commondir"), "../..\n").unwrap();
     (main, wt)
 }
 
@@ -377,6 +403,43 @@ mod tests {
         let repo = repo(temp.path());
         git_in(&repo, &["worktree", "add", "-q", "--detach", "../wt"]);
         assert_eq!(main_worktree(&temp.path().join("wt")), Some(repo));
+    }
+
+    #[test]
+    fn finds_the_git_dirs_of_a_project() {
+        let temp = TempDir::new("worktree-git-dirs");
+        assert_eq!(git_dirs(temp.path()), Vec::<PathBuf>::new());
+
+        // A subdirectory of a repository, as in a monorepo.
+        let repo = repo(temp.path());
+        let web = repo.join("apps/web");
+        fs::create_dir_all(&web).unwrap();
+        assert_eq!(git_dirs(&web), [repo.join(".git")]);
+
+        // A linked worktree: its `.git` file, the main worktree's `.git`
+        // and the worktree's directory in that.
+        git_in(&repo, &["worktree", "add", "-q", "--detach", "../wt"]);
+        let wt = temp.path().join("wt");
+        assert_eq!(
+            git_dirs(&wt),
+            [
+                wt.join(".git"),
+                repo.join(".git"),
+                repo.join(".git/worktrees/wt")
+            ]
+        );
+
+        // A submodule, whose repository is in its superproject's `.git`,
+        // which comes next anyway.
+        let modules = repo.join(".git/modules/sub");
+        let sub = repo.join("sub");
+        fs::create_dir_all(&modules).unwrap();
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        assert_eq!(
+            git_dirs(&sub),
+            [sub.join(".git"), modules, repo.join(".git")]
+        );
     }
 
     #[test]

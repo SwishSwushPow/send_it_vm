@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Result, bail, ensure};
 
 use crate::cli::{Cli, RunArgs};
-use crate::config::{ByteSize, Config, Mount, VmSettings};
+use crate::config::{ByteSize, Config, VmSettings};
 use crate::network;
 use crate::paths::{ImageName, Paths, Project, VmName};
 use crate::project_vm::{self, Detach, Metadata, NewVm, Origin, State};
@@ -104,10 +104,13 @@ pub fn run(paths: &Paths, cli: &Cli, args: &RunArgs, cwd: &Path) -> Result<i32> 
 /// contain or sit inside sendit's own state. Through those the VM could
 /// become root (the root SSH key), add shares on the next run (the config
 /// file) or run commands as root on the next boot (a VM's mount script).
-/// Read-only shares count too: reading the root key is enough. Fails with
-/// `Declined` if the user says no.
+/// Read-only shares count too: reading the root key is enough. Unless
+/// `.git` is exposed, the same goes for the project's git repository, whose
+/// hooks and config git on the Mac runs, through any share but the
+/// project's own, which hides `.git` alone. Fails with `Declined` if the
+/// user says no.
 pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
-    let risky = risky_shares(paths, &settings.mounts);
+    let risky = risky_shares(paths, settings);
     if risky.is_empty() {
         return Ok(());
     }
@@ -122,7 +125,7 @@ pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
 }
 
 /// One line for each mount that `confirm_shares` asks about.
-fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
+fn risky_shares(paths: &Paths, settings: &VmSettings) -> Vec<String> {
     // Resolved, like the mounts' host paths, so that a symlinked
     // ~/.config/sendit is caught through a share of its target. Each link
     // on the way counts too, directory links included: the VM could point
@@ -164,16 +167,37 @@ fn risky_shares(paths: &Paths, mounts: &[Mount]) -> Vec<String> {
             );
         }
     }
+    // The project's share hides only `<project>/.git`. Above the project
+    // there may be more, e.g. for a subdirectory of a repository, and a
+    // `.git` file or symlink leads to the repository elsewhere: in the main
+    // worktree's `.git` for a linked worktree, or e.g. in `.bare` in the
+    // project, which its own share then exposes too.
+    let mut git = Vec::new();
+    if !settings.expose_git {
+        for dir in worktree::git_dirs(&settings.project().host) {
+            git.extend(
+                protected_paths(&dir)
+                    .into_iter()
+                    .map(|(path, link)| (path, link, "the project's git repository")),
+            );
+        }
+    }
+    let hidden = settings.project().host.join(".git");
     let home = canonical(paths.home());
 
-    mounts
+    settings
+        .mounts
         .iter()
-        .filter_map(|mount| {
+        .enumerate()
+        .filter_map(|(i, mount)| {
             let host = &mount.host;
+            let git = git
+                .iter()
+                .filter(|(path, _, _)| i > 0 || !path.starts_with(&hidden));
             let reason = if home.starts_with(host) {
                 "contains your home directory".to_string()
             } else {
-                state.iter().find_map(|(path, link, what)| {
+                state.iter().chain(git).find_map(|(path, link, what)| {
                     // A link reads as the way there, which the VM could
                     // change, not as what it protects.
                     if path.starts_with(host) && *link {
@@ -798,7 +822,22 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Mount;
     use crate::util::TempDir;
+
+    /// Settings that share `mounts`, the first one as the project.
+    fn sharing(mounts: &[Mount], expose_git: bool) -> VmSettings {
+        VmSettings {
+            cpus: 1,
+            memory: ByteSize::gib(1),
+            disk_size: ByteSize::gib(8),
+            mounts: mounts.to_vec(),
+            expose_git,
+            banner: true,
+            image: None,
+            network: network::Network::default(),
+        }
+    }
 
     #[test]
     fn prunes_more_vms_as_the_scope_widens() {
@@ -867,7 +906,7 @@ mod tests {
             guest: "/mnt/x".into(),
             read_only,
         };
-        let risky = |mounts: &[Mount]| risky_shares(&paths, mounts);
+        let risky = |mounts: &[Mount]| risky_shares(&paths, &sharing(mounts, true));
 
         assert!(risky(&[mount(&home.join("code/proj"), false)]).is_empty());
         assert_eq!(
@@ -995,6 +1034,112 @@ mod tests {
     }
 
     #[test]
+    fn flags_other_shares_of_the_project_repository() {
+        let temp = TempDir::new("risky-git");
+        let paths = Paths::new(temp.path().join("home"));
+        let code = temp.path().join("code");
+        let app = code.join("app");
+        for dir in [".git/hooks", "src"] {
+            fs::create_dir_all(app.join(dir)).unwrap();
+        }
+        let mount = |host: &Path, read_only| Mount {
+            host: host.to_path_buf(),
+            guest: "/mnt/x".into(),
+            read_only,
+        };
+        let project = mount(&app, false);
+        let risky = |extra: &Path, expose_git| {
+            risky_shares(
+                &paths,
+                &sharing(&[project.clone(), mount(extra, true)], expose_git),
+            )
+        };
+        let shown = |path: &Path| path.display().to_string();
+
+        // The project's own share hides `.git`.
+        assert!(risky_shares(&paths, &sharing(std::slice::from_ref(&project), false)).is_empty());
+        assert!(risky(&app.join("src"), false).is_empty());
+        assert_eq!(
+            risky(&code, false),
+            [format!(
+                "{} (read-only) contains the project's git repository ({})",
+                shown(&code),
+                shown(&app.join(".git"))
+            )]
+        );
+        // The project again, at another guest path.
+        assert_eq!(risky(&app, false).len(), 1);
+        assert_eq!(
+            risky(&app.join(".git/hooks"), false),
+            [format!(
+                "{} (read-only) is inside the project's git repository ({})",
+                shown(&app.join(".git/hooks")),
+                shown(&app.join(".git"))
+            )]
+        );
+        assert!(risky(&code, true).is_empty());
+
+        // The repository a subdirectory is in.
+        let web = app.join("src/web");
+        fs::create_dir_all(&web).unwrap();
+        let project = mount(&web, false);
+        let risky = |extra: &Path| {
+            risky_shares(
+                &paths,
+                &sharing(&[project.clone(), mount(extra, true)], false),
+            )
+        };
+        assert!(risky(&app.join("src")).is_empty());
+        assert_eq!(risky(&app).len(), 1);
+
+        // A linked worktree's repository, in its main worktree.
+        let (main, wt) = worktree::layout(temp.path());
+        let project = mount(&wt, false);
+        let risky = |extra: &Path| {
+            risky_shares(
+                &paths,
+                &sharing(&[project.clone(), mount(extra, true)], false),
+            )
+        };
+        assert_eq!(
+            risky(&main),
+            [format!(
+                "{} (read-only) contains the project's git repository ({})",
+                shown(&main),
+                shown(&main.join(".git"))
+            )]
+        );
+
+        // A repository in the project that `.git` leads to, which the
+        // project's own share exposes: the bare repository of worktrees
+        // inside the project, and a `.git` symlink.
+        let alone =
+            |project: &Path| risky_shares(&paths, &sharing(&[mount(project, false)], false));
+        let bare = temp.path().join("bare");
+        fs::create_dir_all(bare.join(".bare")).unwrap();
+        fs::write(bare.join(".git"), "gitdir: ./.bare\n").unwrap();
+        assert_eq!(
+            alone(&bare),
+            [format!(
+                "{} (read-write) contains the project's git repository ({})",
+                shown(&bare),
+                shown(&bare.join(".bare"))
+            )]
+        );
+        let linked = temp.path().join("linked");
+        fs::create_dir_all(linked.join(".realgit")).unwrap();
+        std::os::unix::fs::symlink(".realgit", linked.join(".git")).unwrap();
+        assert_eq!(
+            alone(&linked),
+            [format!(
+                "{} (read-write) contains the project's git repository ({})",
+                shown(&linked),
+                shown(&linked.join(".realgit"))
+            )]
+        );
+    }
+
+    #[test]
     fn flags_shares_of_directory_links_on_the_way() {
         let temp = TempDir::new("risky-dir-links");
         let mount = |host: PathBuf| Mount {
@@ -1019,7 +1164,7 @@ mod tests {
         )
         .unwrap();
         let paths = Paths::new(home.clone());
-        let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
+        let risky = |dir: &str| risky_shares(&paths, &sharing(&[mount(home.join(dir))], true));
         assert_eq!(
             risky("dotfiles"),
             [
@@ -1050,7 +1195,7 @@ mod tests {
             .unwrap();
         std::os::unix::fs::symlink(home.join("dotfiles/config"), home.join(".config")).unwrap();
         let paths = Paths::new(home.clone());
-        let risky = |dir: &str| risky_shares(&paths, &[mount(home.join(dir))]);
+        let risky = |dir: &str| risky_shares(&paths, &sharing(&[mount(home.join(dir))], true));
         assert_eq!(
             risky("dotfiles"),
             [

@@ -811,6 +811,7 @@ fn asks_before_risky_shares() {
     let env = Env::new("risky-shares");
     let scripts = env.home.join(".config/sendit/provision-scripts");
     fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(env.project.join(".git")).unwrap();
     let home = env.home.canonicalize().unwrap();
 
     // Without the image, sendit says so before it asks about shares.
@@ -835,6 +836,11 @@ fn asks_before_risky_shares() {
         (
             scripts.canonicalize().unwrap(),
             "(read-write) is inside sendit's configuration (~/.config/sendit)",
+        ),
+        // The project again, without the mask over its `.git`.
+        (
+            env.project.canonicalize().unwrap(),
+            "(read-only) contains the project's git repository",
         ),
     ] {
         let spec = match reason.contains("read-write") {

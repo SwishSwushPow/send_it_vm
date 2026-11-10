@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- **Security:** `sendit run` shared the project's `.git` without a word through any other share that contained it, e.g. `mounts = ["~/Code"]`, though only the project's own share hides it. It now asks first, unless `.git` is exposed. The same goes for the repository that a project in one of its subfolders is in, and the one that a linked worktree's or submodule's `.git` file points to, also when that is in the project, e.g. a `.git` file that points to `.bare`.
 - **Security:** VMs whose path has a space in it, e.g. with `SENDIT_VM_DIR` on a drive called "My Drive", didn't have their SSH host key stored or checked, since ssh split the path of their `known_hosts` file. A `%` or `${` in the paths of that file or of the SSH key was expanded by ssh too.
 - Two `sendit run`s of a project started at the same time could both make its VM, and one could boot a disk that the other was still copying, e.g. with `SENDIT_VM_DIR` on another drive.
 - `sendit run` while `sendit reset` deleted the VM could boot the disk being deleted.
