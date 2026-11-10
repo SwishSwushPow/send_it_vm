@@ -9,6 +9,7 @@
 mod common;
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -894,8 +895,8 @@ fn moves_vms_to_sendit_vm_dir() {
     assert_fails_with(
         &output,
         &format!(
-            "{} is not a directory; create it, or connect the drive it is on",
-            vms.display()
+            "{} doesn't exist; create it, or connect the drive it is on",
+            external.display()
         ),
     );
     assert!(!vms.exists());
@@ -904,7 +905,8 @@ fn moves_vms_to_sendit_vm_dir() {
         "contains your home directory",
     );
 
-    fs::create_dir_all(&vms).unwrap();
+    // Made when the folder it is in exists, private and out of backups.
+    fs::create_dir(&external).unwrap();
     let output = sendit(&vms, &["list"]);
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(
@@ -912,6 +914,28 @@ fn moves_vms_to_sendit_vm_dir() {
         format!("No VMs in {}.\n", vms.display())
     );
     assert!(!env.home.join(".sendit").exists());
+    assert!(vms.is_dir());
+    assert_eq!(
+        fs::metadata(&vms).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    let excluded = Command::new("tmutil")
+        .arg("isexcluded")
+        .arg(&vms)
+        .output()
+        .unwrap();
+    assert!(
+        text(&excluded.stdout).contains("[Excluded]"),
+        "{}",
+        text(&excluded.stdout)
+    );
+    // Anything else in it stops every command.
+    fs::write(vms.join("notes.txt"), "").unwrap();
+    assert_fails_with(
+        &sendit(&vms, &["list"]),
+        "holds files that aren't sendit's: notes.txt;",
+    );
+    fs::remove_file(vms.join("notes.txt")).unwrap();
 
     // Shares of it are risky, ~/.sendit no longer is. With the image there,
     // as sendit says it is missing before it asks about shares; without its
