@@ -96,18 +96,22 @@ pub fn marker(paths: &Paths, image: &ImageName) -> PathBuf {
     marker_file(&VmDir::new(paths.image_dir(image)))
 }
 
-/// The mounts recorded in `marker`, an image's marker or a VM's copy of one;
-/// none if it doesn't exist.
-pub fn marker_mounts(marker: &Path) -> Result<Vec<ScriptMount>> {
-    Ok(util::read_toml::<Marker>(marker)?
-        .map(|marker| marker.mounts)
-        .unwrap_or_default())
+/// What an image build's marker, or a VM's copy of it, records for the
+/// VMs made from the build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Build {
+    /// What the image's scripts asked to share.
+    pub mounts: Vec<ScriptMount>,
+    /// When it was built (see `Marker::built`).
+    pub built: Option<u64>,
 }
 
-/// When the build that `marker` records was made (see `Marker::built`);
-/// None if it doesn't exist or doesn't say.
-pub fn marker_built(marker: &Path) -> Result<Option<u64>> {
-    Ok(util::read_toml::<Marker>(marker)?.and_then(|marker| marker.built))
+/// The build that `marker` records; `None` if the file doesn't exist.
+pub fn build(marker: &Path) -> Result<Option<Build>> {
+    Ok(util::read_toml::<Marker>(marker)?.map(|marker| Build {
+        mounts: marker.mounts,
+        built: marker.built,
+    }))
 }
 
 pub enum BaseState {
@@ -769,8 +773,7 @@ mod tests {
     fn reads_the_mounts_and_build_recorded_in_a_marker() {
         let home = TempDir::new("marker-mounts");
         let file = home.path().join("provisioned.toml");
-        assert!(marker_mounts(&file).unwrap().is_empty());
-        assert_eq!(marker_built(&file).unwrap(), None);
+        assert_eq!(build(&file).unwrap(), None);
 
         let mounts = vec![ScriptMount {
             script: "images/rust.sh".into(),
@@ -785,13 +788,23 @@ mod tests {
             built: Some(1_760_000_000),
         };
         fs::write(&file, toml::to_string(&marker).unwrap()).unwrap();
-        assert_eq!(marker_mounts(&file).unwrap(), mounts);
-        assert_eq!(marker_built(&file).unwrap(), Some(1_760_000_000));
+        assert_eq!(
+            build(&file).unwrap(),
+            Some(Build {
+                mounts,
+                built: Some(1_760_000_000)
+            })
+        );
 
         // Images built before sendit recorded them have none.
         fs::write(&file, "revision = 10\ncustom_scripts = []\n").unwrap();
-        assert!(marker_mounts(&file).unwrap().is_empty());
-        assert_eq!(marker_built(&file).unwrap(), None);
+        assert_eq!(
+            build(&file).unwrap(),
+            Some(Build {
+                mounts: vec![],
+                built: None
+            })
+        );
     }
 
     #[test]

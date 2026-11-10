@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::lock::try_lock;
 use super::naming::{lock_names, name_unnamed, name_vms, unique_name, wanted_name};
-use super::{Metadata, dir, image, metadata, new_vm_mounts, parent, script_mounts};
+use super::{Metadata, Origin, dir, image, metadata, parent};
 use crate::commands;
 use crate::config::VmSettings;
 use crate::paths::{ImageName, Paths, Project};
@@ -47,12 +47,14 @@ pub fn create_if_missing(
         return Ok(None);
     }
     let image = image(paths, project, settings.image.as_ref());
-    let expected = new_vm_mounts(paths, project, &image, fresh)?;
+    let expected = Origin::of_new_vm(paths, project, &image, fresh)?
+        .mounts()
+        .to_vec();
     let note = create(paths, project, &dir, &image, fresh, ask)?;
     Ok(Some(Created {
         note,
         other_shares: !provision::same_mounts(
-            &script_mounts(paths, project, &image, fresh)?,
+            Origin::of(paths, project, &image, fresh)?.mounts(),
             &expected,
         ),
     }))
@@ -418,7 +420,9 @@ mod tests {
                     }
                 }
                 let disk = fs::read_to_string(vm.disk()).unwrap();
-                let built = provision::marker_built(&vm.image_marker()).unwrap();
+                let built = provision::build(&vm.image_marker())
+                    .unwrap()
+                    .and_then(|build| build.built);
                 if built.map(|n| n.to_string()).as_ref() != Some(&disk) {
                     wrong.push(format!("disk of build {disk}, marker of {built:?}"));
                 }

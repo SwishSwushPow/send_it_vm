@@ -13,8 +13,8 @@ use anyhow::{Result, bail, ensure};
 use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::network;
 use crate::paths::{ImageName, Paths, Project, VmName};
-use crate::project_vm::{self, State};
-use crate::provision::{self, BaseState, ScriptMount};
+use crate::project_vm::{self, Origin, State};
+use crate::provision::{self, BaseState};
 use crate::util::canonical;
 use crate::vm::{self, VmDir};
 
@@ -252,8 +252,8 @@ pub fn list(paths: &Paths) -> Result<()> {
                     ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
                 };
                 // Only a hint: a marker that can't be read doesn't stop the listing.
-                let earlier = project_vm::earlier_build(paths, &dir, &metadata.image);
-                let image = if earlier.unwrap_or(false) {
+                let earlier = Origin::of_vm(paths, &dir, &metadata.image);
+                let image = if earlier.is_ok_and(|origin| origin.earlier_build()) {
                     format!("{} (earlier build)", metadata.image)
                 } else {
                     metadata.image.to_string()
@@ -570,21 +570,9 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
     let sendit = project_vm::sendit_for(&vm_dir, project);
-    // Whether the image's scripts asked for other shares in its latest
-    // build, if it has one.
-    let latest = provision::marker(paths, image);
-    let behind =
-        |mounts: Vec<ScriptMount>| -> Result<bool> {
-            Ok(latest.exists()
-                && !provision::same_mounts(&mounts, &provision::marker_mounts(&latest)?))
-        };
     // Whether a new VM would be made from an earlier build than the latest.
-    let new_vm_behind = || -> Result<bool> {
-        Ok(
-            behind(project_vm::new_vm_mounts(paths, project, image, false)?)?
-                || project_vm::new_vm_from_earlier_build(paths, project, image, false)?,
-        )
-    };
+    let new_vm_behind =
+        || -> Result<bool> { Ok(Origin::of_new_vm(paths, project, image, false)?.behind()) };
     // What the rules of the running VM let it connect to, which flags of
     // `sendit run` or a later change to the config file may have made
     // different from `settings`.
@@ -629,8 +617,9 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
                 format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
             }
             Some(_) => {
-                let shares = behind(project_vm::script_mounts(paths, project, image, false)?)?;
-                if shares || project_vm::earlier_build(paths, &vm_dir, image)? {
+                let origin = Origin::of_vm(paths, &vm_dir, image)?;
+                let shares = origin.other_shares();
+                if shares || origin.earlier_build() {
                     // A worktree's VM made again is a copy of its parent VM,
                     // which may be behind too.
                     let how = if new_vm_behind()? {

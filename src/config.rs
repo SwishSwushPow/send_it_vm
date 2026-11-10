@@ -445,7 +445,8 @@ fn script_mounts(
     // out without a word, also by `run`.
     provision::check_no_subfolders(paths)?;
     let mut mounts = Vec::new();
-    for ScriptMount { script, mount } in project_vm::script_mounts(paths, project, image, fresh)? {
+    let origin = project_vm::Origin::of(paths, project, image, fresh)?;
+    for ScriptMount { script, mount } in origin.mounts().iter().cloned() {
         let host = paths.expand_tilde(&mount.host);
         if host.exists() {
             mounts.push(mount);
