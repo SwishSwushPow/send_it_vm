@@ -1,5 +1,5 @@
-//! The commands that inspect and clean up VMs: `status`, `reset`, `list`,
-//! `images` and `prune`, plus the confirmation prompts they share with `run`.
+//! The commands that run, inspect and clean up VMs: `run`, `status`,
+//! `reset`, `list`, `images` and `prune`, plus their confirmation prompts.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -10,13 +10,92 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Result, bail, ensure};
 
+use crate::cli::{Cli, RunArgs};
 use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::network;
 use crate::paths::{ImageName, Paths, Project, VmName};
-use crate::project_vm::{self, Origin, State};
+use crate::project_vm::{self, Detach, NewVm, Origin, State};
 use crate::provision::{self, BaseState};
 use crate::util::canonical;
 use crate::vm::{self, VmDir};
+use crate::worktree;
+
+/// `sendit run`: returns the exit code for the process.
+pub fn run(paths: &Paths, cli: &Cli, args: &RunArgs, cwd: &Path) -> Result<i32> {
+    let background = project_vm::background_project();
+    let detach = if background.is_some() {
+        Detach::Background
+    } else if args.detach {
+        Detach::Start
+    } else {
+        Detach::No
+    };
+    let project = match (&background, &args.worktree) {
+        (Some(root), _) => Project::at(root)?,
+        (None, Some(branch)) => {
+            let dir = match &cli.name {
+                Some(name) => project_vm::find(paths, name)?.root,
+                None => cli.project.clone().unwrap_or_else(|| cwd.to_path_buf()),
+            };
+            Project::at(&worktree::open(
+                &dir,
+                branch,
+                args.from.as_deref(),
+                args.worktree_path.as_deref(),
+            )?)?
+        }
+        // Found by name, the project directory may be gone, but it must be
+        // there to run, and still lead to the same VM.
+        (None, None) => match &cli.name {
+            Some(name) => {
+                let found = project_vm::find(paths, name)?;
+                let project = Project::at(&found.root)?;
+                ensure!(
+                    project.id == found.id,
+                    "the VM's project directory {} now resolves to {}, a project of its own",
+                    found.root.display(),
+                    project.root.display()
+                );
+                project
+            }
+            None => Project::at(cli.project.as_deref().unwrap_or(cwd))?,
+        },
+    };
+    let config = Config::load(paths)?;
+    let flags = args.settings();
+    let chosen = match &flags.image {
+        Some(image) => Some(image.clone()),
+        None => config.resolve_image(paths, &project)?,
+    };
+    let image = project_vm::image(paths, &project, chosen.as_ref());
+    // Before the settings: a new VM shares what the build it is made from
+    // asks for, and that may take asking whether to copy the parent VM.
+    let new_vm = project_vm::new_vm(paths, &project, &image, args.fresh, &confirm)?;
+    let from_image = new_vm.as_ref().map_or(args.fresh, NewVm::is_from_image);
+    let settings = config.resolve(paths, &project, &flags, cwd, from_image)?;
+    // Before asking about shares, for a run that can't start anyway.
+    if let Some(new_vm) = &new_vm {
+        new_vm.check_image(paths)?;
+    }
+    // In the background, the process that started this one has asked, and
+    // there is no terminal to ask on.
+    if detach != Detach::Background {
+        confirm_shares(paths, &settings)?;
+    }
+    let note = match new_vm {
+        Some(new_vm) => project_vm::create(paths, &project, new_vm)?,
+        None => None,
+    };
+    project_vm::run(
+        paths,
+        &project,
+        &settings,
+        args.fresh,
+        note,
+        &args.command,
+        detach,
+    )
+}
 
 /// Asks before sharing directories that contain the home directory, or
 /// contain or sit inside sendit's own state. Through those the VM could

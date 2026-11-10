@@ -17,13 +17,12 @@ mod worktree;
 
 use std::process::ExitCode;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 
 use crate::cli::{Cli, Command};
 use crate::commands::{Declined, PruneScope};
 use crate::config::{Config, Settings};
 use crate::paths::{Paths, Project};
-use crate::project_vm::Detach;
 
 fn main() -> ExitCode {
     match sendit() {
@@ -74,73 +73,7 @@ fn sendit() -> Result<ExitCode> {
             commands::status(&paths, &project, &settings)
         }
         Command::Run(args) => {
-            let background = project_vm::background_project();
-            let detach = if background.is_some() {
-                Detach::Background
-            } else if args.detach {
-                Detach::Start
-            } else {
-                Detach::No
-            };
-            let project = match (&background, &args.worktree) {
-                (Some(root), _) => Project::at(root)?,
-                (None, Some(branch)) => {
-                    let dir = match &cli.name {
-                        Some(name) => project_vm::find(&paths, name)?.root,
-                        None => cli.project.clone().unwrap_or_else(|| cwd.clone()),
-                    };
-                    Project::at(&worktree::open(
-                        &dir,
-                        branch,
-                        args.from.as_deref(),
-                        args.worktree_path.as_deref(),
-                    )?)?
-                }
-                // Found by name, the project directory may be gone, but it
-                // must be there to run, and still lead to the same VM.
-                (None, None) if cli.name.is_some() => {
-                    let found = project()?;
-                    let project = Project::at(&found.root)?;
-                    ensure!(
-                        project.id == found.id,
-                        "the VM's project directory {} now resolves to {}, a project \
-                         of its own",
-                        found.root.display(),
-                        project.root.display()
-                    );
-                    project
-                }
-                (None, None) => project()?,
-            };
-            let mut settings = resolve(&project, &args.settings(), args.fresh)?;
-            // In the background, the process that started this one has
-            // asked, and there is no terminal to ask on.
-            if detach != Detach::Background {
-                commands::confirm_shares(&paths, &settings)?;
-            }
-            let created = project_vm::create_if_missing(
-                &paths,
-                &project,
-                &settings,
-                args.fresh,
-                &commands::confirm,
-            )?;
-            // Made from the image instead of its running parent VM, from a
-            // build whose scripts asked for other shares than the parent's.
-            if created.as_ref().is_some_and(|created| created.other_shares) {
-                settings = resolve(&project, &args.settings(), args.fresh)?;
-                commands::confirm_shares(&paths, &settings)?;
-            }
-            let note = created.and_then(|created| created.note);
-            let code = project_vm::run(
-                &paths,
-                &project,
-                &settings,
-                args.fresh,
-                note,
-                &args.command,
-                detach,
-            )?;
+            let code = commands::run(&paths, &cli, args, &cwd)?;
             // Exit codes and 128 plus a signal number fit.
             return Ok(ExitCode::from(u8::try_from(code).unwrap_or(u8::MAX)));
         }

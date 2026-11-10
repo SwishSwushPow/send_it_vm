@@ -805,8 +805,19 @@ fn asks_before_risky_shares() {
     fs::create_dir_all(&scripts).unwrap();
     let home = env.home.canonicalize().unwrap();
 
-    // Without a terminal to ask on, sendit refuses before it looks for the
-    // image, let alone boots anything.
+    // Without the image, sendit says so before it asks about shares.
+    let output = env.sendit(&["run", "--mount", home.to_str().unwrap()]);
+    assert_fails_with(&output, "is not provisioned yet");
+
+    let image = env.home.join(".cache/sendit/images/default");
+    fs::create_dir_all(&image).unwrap();
+    fs::write(
+        image.join("provisioned.toml"),
+        "revision = 1000\ncustom_scripts = []\n",
+    )
+    .unwrap();
+    // Without a terminal to ask on, sendit refuses before it makes or boots
+    // anything.
     for (mount, reason) in [
         (home.clone(), "(read-only) contains your home directory"),
         (
@@ -837,6 +848,7 @@ fn asks_before_risky_shares() {
     );
 
     // An ordinary share gets as far as the missing image.
+    fs::remove_dir_all(&image).unwrap();
     env.config("");
     let data = env.project.parent().unwrap().join("data");
     fs::create_dir_all(&data).unwrap();
@@ -887,7 +899,15 @@ fn moves_vms_to_sendit_vm_dir() {
     );
     assert!(!env.home.join(".sendit").exists());
 
-    // Shares of it are risky, ~/.sendit no longer is.
+    // Shares of it are risky, ~/.sendit no longer is. With the image there,
+    // as sendit says it is missing before it asks about shares.
+    let image = env.home.join(".cache/sendit/images/default");
+    fs::create_dir_all(&image).unwrap();
+    fs::write(
+        image.join("provisioned.toml"),
+        "revision = 1000\ncustom_scripts = []\n",
+    )
+    .unwrap();
     let output = sendit(&vms, &["run", "--mount", external.to_str().unwrap()]);
     assert_fails_with(
         &output,
@@ -897,6 +917,7 @@ fn moves_vms_to_sendit_vm_dir() {
             vms.canonicalize().unwrap().display()
         ),
     );
+    fs::remove_dir_all(&image).unwrap();
     fs::create_dir_all(env.home.join(".sendit")).unwrap();
     assert_fails_with(
         &sendit(&vms, &["run", "--mount", "~/.sendit"]),

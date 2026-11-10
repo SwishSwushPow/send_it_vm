@@ -311,9 +311,9 @@ impl Config {
 
     /// Merges all layers for `project`. Relative mount paths given on the
     /// command line are resolved against `cwd`; in the config file they must
-    /// be absolute or start with `~`. A VM that `run` is yet to create, as a
-    /// `fresh` one if so, shares what the image build it will be made from
-    /// asked for.
+    /// be absolute or start with `~`. A VM that `run` is yet to create shares
+    /// what the image build it will be made from asked for: with `fresh`,
+    /// the image's latest build, not a copy of its parent VM.
     pub fn resolve(
         &self,
         paths: &Paths,

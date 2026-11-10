@@ -4,7 +4,10 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::{Metadata, State, dir, state};
+use anyhow::Result;
+
+use super::create::{Ask, create, plan};
+use super::{Metadata, Origin, State, dir, state};
 use crate::paths::{ImageName, Paths, Project};
 use crate::provision;
 use crate::vm::VmDir;
@@ -100,4 +103,26 @@ pub(super) fn write_vm(vm: &VmDir, root: &Path, name: Option<&str>) {
         name: name.map(|name| name.parse().unwrap()),
     };
     fs::write(vm.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
+}
+
+/// Makes the project's VM as `sendit run` does, once it has decided
+/// what from. Returns the note on why it isn't a copy of its parent.
+pub(super) fn make_vm(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    fresh: bool,
+    ask: Ask,
+) -> Result<Option<String>> {
+    create(paths, project, plan(paths, project, image, fresh, ask)?)
+}
+
+/// The specs of the shares that `origin` says the build asked for.
+pub(super) fn mounts(origin: Result<Origin>) -> Vec<String> {
+    origin
+        .unwrap()
+        .mounts()
+        .iter()
+        .map(|m| m.mount.to_string())
+        .collect()
 }

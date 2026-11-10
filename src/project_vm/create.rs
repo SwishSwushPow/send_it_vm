@@ -7,37 +7,57 @@ use anyhow::{Context, Result, bail};
 
 use super::lock::try_lock;
 use super::naming::{lock_names, name_unnamed, name_vms, unique_name, wanted_name};
-use super::{Metadata, Origin, dir, image, metadata, parent};
+use super::{Metadata, dir, metadata, parent};
 use crate::commands;
-use crate::config::VmSettings;
 use crate::paths::{ImageName, Paths, Project};
 use crate::provision::{self, BaseState};
 use crate::util;
 use crate::vm::VmDir;
 
-/// What `create_if_missing` did.
-pub struct Created {
-    /// Why the VM isn't a copy of its parent VM, if it has one and needn't
-    /// be fresh.
-    pub note: Option<String>,
-    /// Whether the image's scripts share other directories with the new VM
-    /// than `new_vm_mounts` said before: the user chose to make it from the
-    /// image instead of its running parent VM, which came from another
-    /// build.
-    pub other_shares: bool,
+/// What a project's missing VM is to be made from, decided before its
+/// settings are resolved: they share what that build asks for.
+pub struct NewVm {
+    image: ImageName,
+    source: Source,
+    /// Why it isn't a copy of its parent VM, if it has one and needn't be
+    /// fresh.
+    note: Option<String>,
 }
 
-/// Creates the project's VM unless it exists, from the image `settings`
-/// choose. A `fresh` VM is created from the base image even for a git
-/// worktree, whose VM is otherwise a copy of its parent VM; while that
-/// runs, only if the user agrees when asked with `ask`.
-pub fn create_if_missing(
+impl NewVm {
+    /// Whether it is made from the image's latest build, not as a copy of
+    /// its parent VM.
+    pub fn is_from_image(&self) -> bool {
+        matches!(self.source, Source::Base)
+    }
+
+    /// Fails unless the image it is made from is provisioned and not
+    /// outdated. A copy of a parent VM needs no image.
+    pub fn check_image(&self, paths: &Paths) -> Result<()> {
+        if !self.is_from_image() {
+            return Ok(());
+        }
+        let image = &self.image;
+        let state = provision::base_state(paths, image)?;
+        if matches!(state, BaseState::Missing | BaseState::Outdated) {
+            bail!("the {image} image is {}", state.describe(image));
+        }
+        Ok(())
+    }
+}
+
+/// What the project's VM is to be made from, of `image`, unless it exists:
+/// `None` then, and it gets a name if it has none. A `fresh` VM is made
+/// from the base image even for a git worktree, whose VM is otherwise a
+/// copy of its parent VM; while that runs, only if the user agrees when
+/// asked with `ask`.
+pub fn new_vm(
     paths: &Paths,
     project: &Project,
-    settings: &VmSettings,
+    image: &ImageName,
     fresh: bool,
     ask: Ask,
-) -> Result<Option<Created>> {
+) -> Result<Option<NewVm>> {
     let dir = dir(paths, project);
     if dir.path().exists() {
         // Made before sendit named VMs: `-n` finds it from now on.
@@ -46,18 +66,23 @@ pub fn create_if_missing(
         }
         return Ok(None);
     }
-    let image = image(paths, project, settings.image.as_ref());
-    let expected = Origin::of_new_vm(paths, project, &image, fresh)?
-        .mounts()
-        .to_vec();
-    let note = create(paths, project, &dir, &image, fresh, ask)?;
-    Ok(Some(Created {
+    plan(paths, project, image, fresh, ask).map(Some)
+}
+
+/// What `new_vm` decides, without looking whether the VM exists.
+pub(super) fn plan(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    fresh: bool,
+    ask: Ask,
+) -> Result<NewVm> {
+    let (source, note) = source(paths, project, image, fresh, ask)?;
+    Ok(NewVm {
+        image: image.clone(),
+        source,
         note,
-        other_shares: !provision::same_mounts(
-            Origin::of(paths, project, &image, fresh)?.mounts(),
-            &expected,
-        ),
-    }))
+    })
 }
 
 /// Deletes a stopped VM. It holds the VM's lock meanwhile, so the VM can't
@@ -141,19 +166,19 @@ fn source(
     Ok((Source::Base, Some(note)))
 }
 
-/// Creates the project's VM as a copy of its parent VM, or else, or if it
-/// is to be `fresh`, of the base image, asking with `ask` first if the
-/// parent is running. Returns a note on why it isn't a copy of its parent
-/// VM if it has one and the VM needn't be fresh.
-pub(super) fn create(
-    paths: &Paths,
-    project: &Project,
-    dir: &VmDir,
-    image: &ImageName,
-    fresh: bool,
-    ask: Ask,
-) -> Result<Option<String>> {
-    let (source, note) = source(paths, project, image, fresh, ask)?;
+/// Makes the project's VM from what `new_vm` decided. Returns the note on
+/// why it isn't a copy of its parent VM, if it has one and needn't be
+/// fresh.
+pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<String>> {
+    let dir = &dir(paths, project);
+    // `sendit run` checked, but the image may have been deleted since.
+    new_vm.check_image(paths)?;
+    let NewVm {
+        image,
+        source,
+        note,
+    } = new_vm;
+    let image = &image;
     // The marker of the image's build that the VM is made from, which it
     // keeps a copy of. A parent made before VMs kept one shares what the
     // latest build asked for; so does a copy of it, which keeps none either.
@@ -176,10 +201,6 @@ pub(super) fn create(
             )
         }
         Source::Base => {
-            let state = provision::base_state(paths, image)?;
-            if matches!(state, BaseState::Missing | BaseState::Outdated) {
-                bail!("the {image} image is {}", state.describe(image));
-            }
             eprintln!(
                 "Creating {} from the {image} image",
                 paths.display(dir.path())
@@ -252,12 +273,10 @@ pub(super) fn create(
 
 #[cfg(test)]
 mod tests {
-    use super::super::State;
     use super::super::lock::lock;
     use super::super::test_util::*;
+    use super::super::{Origin, State};
     use super::*;
-    use crate::config::ByteSize;
-    use crate::network::Network;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -277,22 +296,19 @@ mod tests {
         // Running: nothing unless the user agrees to the base image, which
         // isn't there.
         let running = lock(&parent, &wt, &[]).unwrap();
-        let declined = create(&paths, &wt, &vm, &rust, false, &no).unwrap_err();
+        let declined = make_vm(&paths, &wt, &rust, false, &no).unwrap_err();
         assert!(declined.is::<commands::Declined>(), "{declined:#}");
         assert!(!vm.path().exists());
-        let error = create(&paths, &wt, &vm, &rust, false, &yes).unwrap_err();
+        let error = make_vm(&paths, &wt, &rust, false, &yes).unwrap_err();
         assert!(error.to_string().contains("rust image"), "{error:#}");
         drop(running);
         assert_eq!(state_once_released(&parent), State::Stopped);
 
         // Made from another image: from the base image without asking.
         let go: ImageName = "go".parse().unwrap();
-        assert!(create(&paths, &wt, &vm, &go, false, &never).is_err());
+        assert!(make_vm(&paths, &wt, &go, false, &never).is_err());
 
-        assert_eq!(
-            create(&paths, &wt, &vm, &rust, false, &never).unwrap(),
-            None
-        );
+        assert_eq!(make_vm(&paths, &wt, &rust, false, &never).unwrap(), None);
         assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "disk");
         assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "efi");
         let metadata = metadata(&vm).unwrap();
@@ -311,8 +327,8 @@ mod tests {
     }
 
     #[test]
-    fn asks_about_shares_again_if_the_image_asks_for_others() {
-        let temp = crate::util::TempDir::new("vm-other-shares");
+    fn shares_what_the_build_it_is_made_from_asks_for() {
+        let temp = crate::util::TempDir::new("vm-build-shares-new");
         let paths = Paths::new(temp.path().join("home"));
         let (wt, parent) = worktree_with_parent(temp.path(), &paths);
         let rust: ImageName = "rust".parse().unwrap();
@@ -320,32 +336,55 @@ mod tests {
         write_marker(&provision::marker(&paths, &rust), "~/latest:ro");
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
-        let settings = VmSettings {
-            cpus: 1,
-            memory: ByteSize::gib(1),
-            disk_size: ByteSize::gib(8),
-            mounts: Vec::new(),
-            expose_git: false,
-            banner: true,
-            image: None,
-            network: Network::default(),
-        };
+        write_marker(&parent.image_marker(), "~/parent:ro");
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
         let yes = |_: &str, _: &str| Ok(true);
         let vm = dir(&paths, &wt);
-        let _running = lock(&parent, &wt, &[]).unwrap();
-        let other_shares = |script: &str, mount: &str| {
-            write_marker_of(&parent.image_marker(), script, mount);
-            let created = create_if_missing(&paths, &wt, &settings, false, &yes).unwrap();
-            assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
-            fs::remove_dir_all(vm.path()).unwrap();
-            created.unwrap().other_shares
-        };
 
-        // Confirmed for the parent's build, made from the latest. Only the
-        // shares count, not the scripts asking for them.
-        assert!(other_shares("images/rust.sh", "~/parent:ro"));
-        assert!(!other_shares("images/rust.sh", "~/latest:ro"));
-        assert!(!other_shares("renamed.sh", "~/latest:ro"));
+        // Stopped parent: a copy, sharing what the parent's build asked for.
+        let new_vm = plan(&paths, &wt, &rust, false, &never).unwrap();
+        assert!(!new_vm.is_from_image());
+        let before = mounts(Origin::of(&paths, &wt, &rust, new_vm.is_from_image()));
+        assert_eq!(before, ["~/parent:ro"]);
+        create(&paths, &wt, new_vm).unwrap();
+        assert_eq!(mounts(Origin::of_vm(&paths, &vm, &rust)), before);
+        assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "disk");
+        assert_eq!(state_once_released(&parent), State::Stopped);
+        fs::remove_dir_all(vm.path()).unwrap();
+
+        // Running parent, and the user agrees: from the image, sharing what
+        // its latest build asks for.
+        let _running = lock(&parent, &wt, &[]).unwrap();
+        let new_vm = plan(&paths, &wt, &rust, false, &yes).unwrap();
+        assert!(new_vm.is_from_image());
+        let before = mounts(Origin::of(&paths, &wt, &rust, new_vm.is_from_image()));
+        assert_eq!(before, ["~/latest:ro"]);
+        create(&paths, &wt, new_vm).unwrap();
+        assert_eq!(mounts(Origin::of_vm(&paths, &vm, &rust)), before);
+        assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
+
+        // Fresh: from the image without asking, even while the parent runs.
+        assert!(
+            plan(&paths, &wt, &rust, true, &never)
+                .unwrap()
+                .is_from_image()
+        );
+    }
+
+    #[test]
+    fn leaves_an_existing_vm_alone_and_names_it() {
+        let temp = crate::util::TempDir::new("vm-existing");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        write_vm(&vm, temp.path(), None);
+        assert!(
+            new_vm(&paths, &project, &ImageName::default(), false, &never)
+                .unwrap()
+                .is_none()
+        );
+        assert!(metadata(&vm).unwrap().name.is_some());
     }
 
     #[test]
@@ -371,7 +410,7 @@ mod tests {
         // Without asking, even while the parent runs.
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
         let _running = lock(&parent, &wt, &[]).unwrap();
-        assert_eq!(create(&paths, &wt, &vm, &rust, true, &never).unwrap(), None);
+        assert_eq!(make_vm(&paths, &wt, &rust, true, &never).unwrap(), None);
         assert_eq!(fs::read_to_string(vm.disk()).unwrap(), "base disk");
         assert_eq!(fs::read_to_string(vm.efi_vars()).unwrap(), "base efi");
         let metadata = metadata(&vm).unwrap();
@@ -410,7 +449,7 @@ mod tests {
                 }
             });
             for _ in 0..300 {
-                match create(&paths, &project, &vm, &rust, false, &never) {
+                match make_vm(&paths, &project, &rust, false, &never) {
                     Ok(_) => made += 1,
                     // Missing for a moment, or rebuilt meanwhile.
                     Err(e) if e.to_string().starts_with("the rust image") => continue,
@@ -441,8 +480,7 @@ mod tests {
         let (wt, parent) = worktree_with_parent(temp.path(), &paths);
         fs::remove_file(parent.efi_vars()).unwrap();
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
-        let vm = dir(&paths, &wt);
-        assert!(create(&paths, &wt, &vm, &"rust".parse().unwrap(), false, &never).is_err());
+        assert!(make_vm(&paths, &wt, &"rust".parse().unwrap(), false, &never).is_err());
         let left: Vec<_> = fs::read_dir(paths.vms_dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

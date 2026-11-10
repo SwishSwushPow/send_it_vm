@@ -54,7 +54,7 @@ pub fn background_project() -> Option<PathBuf> {
     std::env::var_os(DETACHED_ENV).map(PathBuf::from)
 }
 
-/// Boots the project's VM, which `create_if_missing` has created, and runs
+/// Boots the project's VM, which exists or `create` has made, and runs
 /// it until it stops, showing `note` once it starts. Without a
 /// `command`, the console is attached. With one, the
 /// command runs over SSH once the VM answers, as with `sendit ssh`, and the

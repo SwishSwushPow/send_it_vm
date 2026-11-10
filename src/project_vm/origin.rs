@@ -125,7 +125,6 @@ fn broken_marker_copy(paths: &Paths, copy: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::create::create;
     use super::super::dir;
     use super::super::test_util::*;
     use super::*;
@@ -168,7 +167,7 @@ mod tests {
         // image is built again; made again, it would be a copy again.
         write_built(&parent.image_marker(), 2);
         assert!(!new_vm(&rust, false));
-        create(&paths, &wt, &vm, &rust, false, &never).unwrap();
+        make_vm(&paths, &wt, &rust, false, &never).unwrap();
         assert!(!made());
         build(3);
         assert!(made());
@@ -182,7 +181,7 @@ mod tests {
         let base = VmDir::new(paths.image_dir(&rust));
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
-        create(&paths, &wt, &vm, &rust, true, &never).unwrap();
+        make_vm(&paths, &wt, &rust, true, &never).unwrap();
         assert!(!made());
         build(4);
         assert!(made());
@@ -214,7 +213,7 @@ mod tests {
         // what the latest build asked for, and so does a copy of it.
         build("~/first:ro");
         assert_eq!(shares(&rust, false), ["~/first:ro"]);
-        create(&paths, &wt, &vm, &rust, false, &never).unwrap();
+        make_vm(&paths, &wt, &rust, false, &never).unwrap();
         assert!(!vm.image_marker().exists());
         build("~/second:ro");
         assert_eq!(shares(&rust, false), ["~/second:ro"]);
@@ -231,7 +230,7 @@ mod tests {
 
         // A copy keeps the parent's, also after the image is built again,
         // and made again it would be a copy of the parent again.
-        create(&paths, &wt, &vm, &rust, false, &never).unwrap();
+        make_vm(&paths, &wt, &rust, false, &never).unwrap();
         assert_eq!(
             fs::read_to_string(vm.image_marker()).unwrap(),
             fs::read_to_string(parent.image_marker()).unwrap()
@@ -247,7 +246,7 @@ mod tests {
         let base = VmDir::new(paths.image_dir(&rust));
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
-        create(&paths, &wt, &vm, &rust, true, &never).unwrap();
+        make_vm(&paths, &wt, &rust, true, &never).unwrap();
         build("~/fourth:ro");
         assert_eq!(shares(&rust, false), ["~/third:ro"]);
 

@@ -53,7 +53,7 @@ use crate::vm::VmDir;
 use crate::worktree;
 use ssh::quote;
 
-pub use create::{create_if_missing, delete};
+pub use create::{NewVm, create, delete, new_vm};
 pub use lock::{State, state};
 pub use naming::{find, name_vms, rename};
 pub use origin::Origin;
