@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- **Security:** VMs whose path has a space in it, e.g. with `SENDIT_VM_DIR` on a drive called "My Drive", didn't have their SSH host key stored or checked, since ssh split the path of their `known_hosts` file. A `%` or `${` in the paths of that file or of the SSH key was expanded by ssh too.
 - Two `sendit run`s of a project started at the same time could both make its VM, and one could boot a disk that the other was still copying, e.g. with `SENDIT_VM_DIR` on another drive.
 - `sendit run` while `sendit reset` deleted the VM could boot the disk being deleted.
 - `sendit stop` at the same moment as another command checked the VM, e.g. `sendit list`, could take the stopped VM for running and signal the process of its last run, or whatever process had that PID since.

@@ -3,7 +3,7 @@
 
 use std::io::IsTerminal;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -53,20 +53,7 @@ fn ssh_command(paths: &Paths, dir: &VmDir, root: bool, remote: Remote) -> Result
     let (user, key) = login(paths, root)?;
     // Each VM gets its own known_hosts: IP addresses are reused across VMs,
     // but a VM's host keys stay the same for its lifetime.
-    let known_hosts = dir.known_hosts();
-    // No config file: ~/.ssh/config may forward the SSH agent or ports to
-    // every host, and thereby hand them to the VM.
-    let mut ssh = Command::new("ssh");
-    ssh.args(["-F", "/dev/null"])
-        .arg("-i")
-        .arg(&key)
-        .args(["-o", "IdentitiesOnly=yes"])
-        .args(["-o", "StrictHostKeyChecking=accept-new"])
-        .arg("-o")
-        .arg(format!("UserKnownHostsFile={}", known_hosts.display()))
-        .args(["-o", "LogLevel=ERROR"])
-        // The guest's sshd accepts it; ssh doesn't send it by default.
-        .args(["-o", "SendEnv=COLORTERM"]);
+    let mut ssh = ssh_to_vm(&key, &dir.known_hosts());
     match remote {
         Remote::Login(command) if !command.is_empty() && interactive() => {
             ssh.arg("-t");
@@ -88,6 +75,36 @@ fn ssh_command(paths: &Paths, dir: &VmDir, root: bool, remote: Remote) -> Result
     }
     Ok(ssh)
 }
+
+/// ssh with the options of every connection to a VM: logging in with the
+/// private key `key` only, and keeping the VM's host key in `known_hosts`.
+fn ssh_to_vm(key: &Path, known_hosts: &Path) -> Command {
+    let mut ssh = Command::new("ssh");
+    // No config file: ~/.ssh/config may forward the SSH agent or ports to
+    // every host, and thereby hand them to the VM.
+    ssh.args(["-F", "/dev/null"])
+        // ssh splits these two options at spaces, and expands `%` tokens
+        // and `${VAR}` in them, which can't be escaped. It inserts the
+        // value of an environment variable as it is, so the paths come
+        // that way, e.g. for SENDIT_VM_DIR="/Volumes/My Drive/sendit".
+        // Through `-o`: `-i` doesn't expand the variable before it checks
+        // that the file exists, and leaves out the key.
+        .env(KEY_VAR, key)
+        .env(KNOWN_HOSTS_VAR, known_hosts)
+        .args(["-o", &format!("IdentityFile=${{{KEY_VAR}}}")])
+        .args(["-o", "IdentitiesOnly=yes"])
+        .args(["-o", "StrictHostKeyChecking=accept-new"])
+        .args(["-o", &format!("UserKnownHostsFile=${{{KNOWN_HOSTS_VAR}}}")])
+        .args(["-o", "LogLevel=ERROR"])
+        // The guest's sshd accepts it; ssh doesn't send it by default.
+        .args(["-o", "SendEnv=COLORTERM"]);
+    ssh
+}
+
+/// The environment variables through which ssh gets the paths of the key
+/// and the known_hosts file. Only COLORTERM is sent to the VM.
+const KEY_VAR: &str = "SENDIT_SSH_KEY";
+const KNOWN_HOSTS_VAR: &str = "SENDIT_KNOWN_HOSTS";
 
 /// The user and SSH key to log in to a VM with, as root if `root`.
 pub(super) fn login(paths: &Paths, root: bool) -> Result<(&'static str, PathBuf)> {
@@ -245,6 +262,7 @@ fn wait_for_ssh(mut child: Child, stopped: &mut dyn FnMut() -> bool) -> Result<O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// The words a POSIX shell makes of `line`.
     fn words(line: &str) -> Vec<String> {
@@ -260,6 +278,40 @@ mod tests {
             .collect();
         words.pop();
         words
+    }
+
+    #[test]
+    fn passes_paths_to_ssh_as_they_are() {
+        let temp = crate::util::TempDir::new("ssh-paths");
+        // Spaces split the option, `%h` and `${HOME}` would be expanded, and a
+        // quote would start a quoted part. ssh -G joins several files with
+        // one space, so two show a split.
+        let dir = temp.path().join("My  Drive/%h ${HOME} \"q");
+        fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id_ed25519");
+        let known_hosts = dir.join("known_hosts");
+        fs::write(&key, "").unwrap();
+
+        let output = ssh_to_vm(&key, &known_hosts)
+            .args(["-G", "dev@192.0.2.1"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let config = String::from_utf8(output.stdout).unwrap();
+        let line = format!("userknownhostsfile {}", known_hosts.display());
+        assert!(config.lines().any(|l| l == line), "{config}");
+
+        // ssh -G doesn't expand the identity file; loading it does, before
+        // the connection to a closed port fails.
+        let output = ssh_to_vm(&key, &known_hosts)
+            .args(["-v", "-o", "BatchMode=yes", "-o", "ConnectTimeout=2"])
+            .args(["-p", "1", "dev@127.0.0.1", "true"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&output.stderr);
+        let line = format!("identity file {} type", key.display());
+        assert!(log.contains(&line), "{log}");
     }
 
     #[test]
