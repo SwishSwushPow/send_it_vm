@@ -4,10 +4,12 @@
 //! PID in it once the VM starts. The other commands only look at it.
 
 use std::fs::{self, File};
-use std::os::unix::fs::FileExt;
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use super::sendit_for;
 use super::ssh::shell_command;
@@ -17,6 +19,11 @@ use crate::vm::VmDir;
 
 /// How often taking a VM's lock is retried, 20 ms apart.
 const LOCK_RETRIES: u32 = 5;
+
+/// Set to the number of the descriptor of the VM's lock for the `sendit
+/// run` process that `run --detach` starts in the background, which the
+/// starting process passes the lock on to.
+const LOCK_FD_ENV: &str = "SENDIT_LOCK_FD";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -38,6 +45,42 @@ impl Lock {
         self.0
             .write_all_at(std::process::id().to_string().as_bytes(), 0)
             .context("recording the PID in the VM's lock")
+    }
+
+    /// Passes the lock on to the `sendit run` process that `command`
+    /// starts, which takes it with `inherited`. Returns its descriptor,
+    /// which a `pre_exec` hook must keep open across exec. The lock is then
+    /// held until both processes have let go of it, so no other process
+    /// can take it in between.
+    pub(super) fn pass_to(&self, command: &mut Command) -> RawFd {
+        let fd = self.0.as_raw_fd();
+        command.env(LOCK_FD_ENV, fd.to_string());
+        fd
+    }
+
+    /// The lock of the VM in `dir` that the process that started this one
+    /// passed on with `pass_to`.
+    pub(super) fn inherited(dir: &VmDir) -> Result<Lock> {
+        let fd: RawFd = std::env::var(LOCK_FD_ENV)
+            .ok()
+            .and_then(|fd| fd.parse().ok())
+            .context("the VM's lock was not passed on")?;
+        // Not to be passed on further, e.g. to keep the VM looking like it
+        // runs after this process has ended.
+        // SAFETY: plain syscall; fails unless the descriptor is open.
+        let set = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        ensure!(set != -1, "the VM's lock was not passed on");
+        // SAFETY: the descriptor is open, and was only passed on to be
+        // taken here, once.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let path = dir.lock();
+        let (passed, there) = (file.metadata()?, fs::metadata(&path)?);
+        ensure!(
+            passed.dev() == there.dev() && passed.ino() == there.ino(),
+            "the lock passed on is not {}",
+            path.display()
+        );
+        Ok(Lock(file))
     }
 }
 
@@ -68,7 +111,7 @@ pub fn state(dir: &VmDir) -> Result<State> {
 /// processes running it would corrupt its disk. If the VM is running, the
 /// error says how to reach it, to run `command` there or else open a
 /// shell.
-pub fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<Lock> {
+pub(super) fn lock(dir: &VmDir, project: &Project, command: &[String]) -> Result<Lock> {
     try_lock(dir)?.ok_or_else(|| already_running(dir, project, command))
 }
 
@@ -93,9 +136,6 @@ fn already_running(dir: &VmDir, project: &Project, command: &[String]) -> anyhow
 /// signal.
 pub(super) fn try_lock(dir: &VmDir) -> Result<Option<Lock>> {
     let path = dir.lock();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
     let file = File::options()
         .create(true)
         .truncate(false)
@@ -190,6 +230,7 @@ mod tests {
         let paths = Paths::new(temp.path().join("home"));
         let project = Project::at(temp.path()).unwrap();
         let vm = dir(&paths, &project);
+        fs::create_dir_all(paths.vms_dir()).unwrap();
         // Taken before the VM exists, to make it.
         let making = lock(&vm, &project, &[]).unwrap();
         assert!(!vm.path().exists());

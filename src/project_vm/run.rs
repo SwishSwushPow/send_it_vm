@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::lock::{Lock, State, state};
+use super::lock::{self, Lock, State, state};
 use super::ssh::{login, run_command, wait_until_answers};
 use super::{dir, metadata, sendit_for};
 use crate::config::{ByteSize, VmSettings};
@@ -52,6 +52,23 @@ pub enum Detach {
 /// this is it.
 pub fn background_project() -> Option<PathBuf> {
     std::env::var_os(DETACHED_ENV).map(PathBuf::from)
+}
+
+/// Takes the lock of the project's VM, to make it if need be and run it
+/// with `run`; if the VM is running, the error says how to reach it, to run
+/// `command` there or else open a shell. The process in the background
+/// takes the lock that the one that started it passed on.
+pub fn lock_to_run(
+    paths: &Paths,
+    project: &Project,
+    command: &[String],
+    detach: Detach,
+) -> Result<Lock> {
+    let dir = dir(paths, project);
+    match detach {
+        Detach::Background => Lock::inherited(&dir),
+        Detach::No | Detach::Start => lock::lock(&dir, project, command),
+    }
 }
 
 /// Boots the project's VM, which exists or `create` has made, under its
@@ -111,9 +128,7 @@ pub fn run(
         // Here, where it is seen; the disk grows in the background.
         warn_if_shrinking(paths, &dir, project, settings)?;
         starting(note);
-        // For the process in the background to take.
-        drop(lock);
-        return run_in_background(paths, project, &dir);
+        return run_in_background(paths, project, &dir, &lock);
     }
     lock.record_pid()?;
     // The VM starts now: its boot and banner come first on the screen. A
@@ -165,11 +180,11 @@ pub fn run(
 }
 
 /// Starts the `sendit run` process that runs the VM in `dir` in the
-/// background, with its output going to the VM's console log, and waits
-/// until the VM answers over SSH. If a signal comes first, e.g. Ctrl-C, or
-/// the VM doesn't answer in time, the VM is shut down again. Returns 0, or
-/// 128 plus the number of that signal.
-fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i32> {
+/// background, passing `lock` on to it, with its output going to the VM's
+/// console log, and waits until the VM answers over SSH. If a signal comes
+/// first, e.g. Ctrl-C, or the VM doesn't answer in time, the VM is shut
+/// down again. Returns 0, or 128 plus the number of that signal.
+fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir, lock: &Lock) -> Result<i32> {
     let log_path = dir.console_log();
     let log =
         File::create(&log_path).with_context(|| format!("creating {}", log_path.display()))?;
@@ -181,6 +196,7 @@ fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i3
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
+    let lock_fd = lock.pass_to(&mut sendit);
     // In a session of its own, it has no terminal: none going away hangs
     // it up, and Ctrl-C in this one doesn't reach it. Descriptors that
     // were handed to this process to pass on, e.g. a jobserver's pipe,
@@ -190,7 +206,7 @@ fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i3
     // SAFETY: setsid, getdtablesize, fcntl and close are async-signal-safe,
     // so they may run between fork and exec.
     unsafe {
-        sendit.pre_exec(|| {
+        sendit.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -199,6 +215,10 @@ fn run_in_background(paths: &Paths, project: &Project, dir: &VmDir) -> Result<i3
                 if flags != -1 && flags & libc::FD_CLOEXEC == 0 {
                     libc::close(fd);
                 }
+            }
+            // Open after exec, for the process to take as its own.
+            if libc::fcntl(lock_fd, libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });

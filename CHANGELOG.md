@@ -6,6 +6,14 @@
 
 - `sendit run` for a git worktree whose main worktree's VM is running asks whether to start from the image before it asks about risky shares, and asks about shares once, for the build the new VM is really made from. It asked about the shares of the main worktree's VM's build first, then again if the image's latest build asked for others.
 - `sendit run` says that the image is not provisioned yet, or outdated, before it asks about risky shares, so that you don't confirm shares for a VM it can't make.
+- A second `sendit run` of a project fails with "already running" from the moment the first one starts making or booting the VM, before it asks anything. Each VM's lock is now a file next to its directory, `.<project>_<uuid>.lock`, which stays when the VM is deleted.
+
+### Fixed
+
+- Two `sendit run`s of a project started at the same time could both make its VM, and one could boot a disk that the other was still copying, e.g. with `SENDIT_VM_DIR` on another drive.
+- `sendit run` while `sendit reset` deleted the VM could boot the disk being deleted.
+- `sendit stop` at the same moment as another command checked the VM, e.g. `sendit list`, could take the stopped VM for running and signal the process of its last run, or whatever process had that PID since.
+- Two `sendit run -d` of a project at the same time could both empty the VM's console log, and the one that lost then claimed that the VM had stopped.
 
 ## 0.10.0 - 2026-11-06
 

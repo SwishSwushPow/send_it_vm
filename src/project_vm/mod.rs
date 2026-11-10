@@ -20,7 +20,8 @@
 //!
 //! `run --detach` runs the VM in a second `sendit run` process, which it
 //! starts in a session of its own, without a terminal, and leaves running
-//! once the VM answers over SSH. It is sendit run again rather than a fork:
+//! once the VM answers over SSH. It passes the VM's lock on to that process
+//! rather than letting go of it. It is sendit run again rather than a fork:
 //! forking without exec isn't safe once Objective-C is loaded.
 //!
 //! Each VM has a name of its own, kept in its metadata, by which `-n` finds
@@ -57,10 +58,10 @@ use crate::worktree;
 use ssh::quote;
 
 pub use create::{NewVm, create, delete, new_vm};
-pub use lock::{State, lock, state};
+pub use lock::{State, state};
 pub use naming::{find, name_vms, rename};
 pub use origin::Origin;
-pub use run::{Detach, background_project, run, stop};
+pub use run::{Detach, background_project, lock_to_run, run, stop};
 pub use ssh::ssh;
 
 /// Written into a project VM's directory when it is created, and again
