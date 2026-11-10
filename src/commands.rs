@@ -14,7 +14,7 @@ use crate::cli::{Cli, RunArgs};
 use crate::config::{ByteSize, Config, Mount, VmSettings};
 use crate::network;
 use crate::paths::{ImageName, Paths, Project, VmName};
-use crate::project_vm::{self, Detach, NewVm, Origin, State};
+use crate::project_vm::{self, Detach, Metadata, NewVm, Origin, State};
 use crate::provision::{self, BaseState};
 use crate::util::canonical;
 use crate::vm::{self, VmDir};
@@ -641,20 +641,21 @@ pub fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
-pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    project_vm::name_vms(paths)?;
-    let image = &project_vm::image(paths, project, settings.image.as_ref());
-    let base_dir = paths.image_dir(image);
-    let base_state = provision::base_state(paths, image)?.describe(image);
-    let vm_dir = project_vm::dir(paths, project);
-    let metadata = project_vm::metadata(&vm_dir).ok();
-    let sendit = project_vm::sendit_for(&vm_dir, project);
+/// The state of the project's VM for `status`, e.g. "stopped; made from
+/// an earlier build …", and while it runs, what its network rules let it
+/// connect to, which flags of `sendit run` or a later change to the config
+/// file may have made different from its settings.
+fn vm_state(
+    paths: &Paths,
+    project: &Project,
+    image: &ImageName,
+    vm_dir: &VmDir,
+    metadata: Option<&Metadata>,
+) -> Result<(String, Option<String>)> {
+    let sendit = project_vm::sendit_for(vm_dir, project);
     // Whether a new VM would be made from an earlier build than the latest.
     let new_vm_behind =
         || -> Result<bool> { Ok(Origin::of_new_vm(paths, project, image, false)?.behind()) };
-    // What the rules of the running VM let it connect to, which flags of
-    // `sendit run` or a later change to the config file may have made
-    // different from `settings`.
     let mut applied = None;
     let state = if !vm_dir.path().exists() {
         let parent = project_vm::parent_metadata(paths, project);
@@ -676,18 +677,18 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             _ => "not created".to_string(),
         }
     } else {
-        let state = match project_vm::state(&vm_dir)? {
+        let state = match project_vm::state(vm_dir)? {
             State::Stopped => "stopped".to_string(),
             State::Running(_) => {
                 applied = network::applied(&vm_dir.meta());
-                match vm::net::vm_ip(&vm_dir)? {
+                match vm::net::vm_ip(vm_dir)? {
                     Some(ip) => format!("running at {ip}"),
                     None => "running".to_string(),
                 }
             }
         };
         // Also while it runs: the config file may have changed since.
-        match &metadata {
+        match metadata {
             Some(m) if m.image != *image => format!(
                 "{state}; made from the {} image, `{sendit} reset` recreates it from {image}",
                 m.image
@@ -696,7 +697,7 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
                 format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
             }
             Some(_) => {
-                let origin = Origin::of_vm(paths, &vm_dir, image)?;
+                let origin = Origin::of_vm(paths, vm_dir, image)?;
                 let shares = origin.other_shares();
                 if shares || origin.earlier_build() {
                     // A worktree's VM made again is a copy of its parent VM,
@@ -721,6 +722,17 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
             None => state,
         }
     };
+    Ok((state, applied))
+}
+
+pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
+    project_vm::name_vms(paths)?;
+    let image = &project_vm::image(paths, project, settings.image.as_ref());
+    let base_dir = paths.image_dir(image);
+    let base_state = provision::base_state(paths, image)?.describe(image);
+    let vm_dir = project_vm::dir(paths, project);
+    let metadata = project_vm::metadata(&vm_dir).ok();
+    let (state, applied) = vm_state(paths, project, image, &vm_dir, metadata.as_ref())?;
     println!(
         "image    {image} in {} ({base_state})",
         paths.display(&base_dir)
