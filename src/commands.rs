@@ -869,7 +869,7 @@ mod tests {
         let outdated = vm("outdated", &present, current - 1);
         let orphan = vm("orphan", &temp.path().join("gone"), current);
         let broken = vm_dir("broken");
-        // Not a VM, e.g. in a $SENDIT_VM_DIR that holds other things too.
+        // Not a VM, e.g. a folder that the user put in ~/.sendit.
         let other = paths.vms_dir().join("photos");
         fs::create_dir_all(&other).unwrap();
 
