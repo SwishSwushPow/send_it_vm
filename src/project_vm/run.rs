@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::lock::{State, already_running, lock, state, try_lock};
+use super::lock::{Lock, State, state};
 use super::ssh::{login, run_command, wait_until_answers};
-use super::{dir, metadata, sendit_for, sendit_in};
+use super::{dir, metadata, sendit_for};
 use crate::config::{ByteSize, VmSettings};
 use crate::image;
 use crate::mounts;
@@ -54,10 +54,10 @@ pub fn background_project() -> Option<PathBuf> {
     std::env::var_os(DETACHED_ENV).map(PathBuf::from)
 }
 
-/// Boots the project's VM, which exists or `create` has made, and runs
-/// it until it stops, showing `note` once it starts. Without a
-/// `command`, the console is attached. With one, the
-/// command runs over SSH once the VM answers, as with `sendit ssh`, and the
+/// Boots the project's VM, which exists or `create` has made, under its
+/// `lock`, and runs it until it stops, showing `note` once it starts.
+/// Without a `command`, the console is attached. With one, the command runs
+/// over SSH once the VM answers, as with `sendit ssh`, and the
 /// VM shuts down when it has ended. Returns its exit code, or if a signal
 /// stopped the VM first, 128 plus its number; else 0. `detach` says where
 /// the VM runs; in the background, it runs without a command.
@@ -65,24 +65,14 @@ pub fn run(
     paths: &Paths,
     project: &Project,
     settings: &VmSettings,
-    fresh: bool,
     note: Option<String>,
     command: &[String],
     detach: Detach,
+    lock: Lock,
 ) -> Result<i32> {
     let dir = dir(paths, project);
     let metadata = metadata(&dir)?;
     let sendit = sendit_for(&dir, project);
-    if fresh && let Some(copy_of) = &metadata.copy_of {
-        bail!(
-            "{} is a copy of the VM of {} already; `{sendit} reset` deletes it so \
-             that `{} run --fresh` starts it over from the {} image",
-            paths.display(dir.path()),
-            paths.display(copy_of),
-            sendit_in(project),
-            metadata.image,
-        );
-    }
     if let Some(image) = &settings.image {
         ensure!(
             metadata.image == *image,
@@ -115,20 +105,17 @@ pub fn run(
             eprintln!("{note}");
         }
     };
+    let run_dir = dir.run_dir();
+    fs::create_dir_all(&run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
     if detach == Detach::Start {
-        // The lock is for the process in the background; this only checks
-        // that the VM isn't running yet. Should another `sendit run` take
-        // the lock first, the process in the background fails at once, long before
-        // the other VM could answer over SSH, and this one reports it.
-        if try_lock(&dir)?.is_none() {
-            return Err(already_running(&dir, project, command));
-        }
         // Here, where it is seen; the disk grows in the background.
         warn_if_shrinking(paths, &dir, project, settings)?;
         starting(note);
+        // For the process in the background to take.
+        drop(lock);
         return run_in_background(paths, project, &dir);
     }
-    let _lock = lock(&dir, project, command)?;
+    lock.record_pid()?;
     // The VM starts now: its boot and banner come first on the screen. A
     // command's output follows on from what is there, like any command's.
     if command.is_empty() && detach == Detach::No {
@@ -416,43 +403,7 @@ fn warn_if_shrinking(
 
 #[cfg(test)]
 mod tests {
-    use super::super::ssh::quote;
-    use super::super::test_util::*;
-    use super::super::write_metadata;
     use super::*;
-    use crate::network::Network;
-
-    #[test]
-    fn gives_steps_after_reset_by_directory() {
-        let temp = crate::util::TempDir::new("vm-reset-hint");
-        let paths = Paths::new(temp.path().join("home"));
-        let project = Project::at(temp.path()).unwrap();
-        let vm = dir(&paths, &project);
-        write_vm(&vm, temp.path(), Some("app-wt"));
-        let mut metadata = metadata(&vm).unwrap();
-        metadata.copy_of = Some(temp.path().join("main"));
-        write_metadata(&vm, &metadata).unwrap();
-        let settings = VmSettings {
-            cpus: 1,
-            memory: ByteSize::gib(1),
-            disk_size: ByteSize::gib(8),
-            mounts: Vec::new(),
-            expose_git: false,
-            banner: true,
-            image: None,
-            network: Network::default(),
-        };
-        let error = run(&paths, &project, &settings, true, None, &[], Detach::No)
-            .unwrap_err()
-            .to_string();
-        // Tests don't run in the project. The name is gone after the reset.
-        let expected = format!(
-            "`sendit -n app-wt reset` deletes it so that `sendit -C {} run --fresh` starts \
-             it over",
-            quote(&temp.path().to_string_lossy())
-        );
-        assert!(error.contains(&expected), "{error}");
-    }
 
     #[test]
     fn shows_the_end_of_the_console_log() {

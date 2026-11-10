@@ -61,6 +61,9 @@ pub fn run(paths: &Paths, cli: &Cli, args: &RunArgs, cwd: &Path) -> Result<i32> 
             None => Project::at(cli.project.as_deref().unwrap_or(cwd))?,
         },
     };
+    // From before deciding whether the VM is to be made until it has
+    // stopped: no other sendit process makes, runs or deletes it meanwhile.
+    let lock = project_vm::lock(&project_vm::dir(paths, &project), &project, &args.command)?;
     let config = Config::load(paths)?;
     let flags = args.settings();
     let chosen = match &flags.image {
@@ -90,10 +93,10 @@ pub fn run(paths: &Paths, cli: &Cli, args: &RunArgs, cwd: &Path) -> Result<i32> 
         paths,
         &project,
         &settings,
-        args.fresh,
         note,
         &args.command,
         detach,
+        lock,
     )
 }
 

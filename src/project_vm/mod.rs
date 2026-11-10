@@ -12,8 +12,11 @@
 //! cache isn't on it yet, so a copy then would only be as good as after a
 //! power cut; `run` offers to start from the base image instead.
 //!
-//! While a VM runs, its `sendit run` process holds a lock on `run/lock` and
-//! has written its PID there; that is how the other commands find it.
+//! Only one sendit process at a time makes, runs, copies or deletes a VM:
+//! it holds the VM's lock, `.<dir>.lock` next to the VM's directory, the
+//! whole time. `sendit run` takes it before deciding whether to make the VM
+//! and keeps it until the VM has stopped, with its PID in it once the VM
+//! starts; that is how the other commands find it.
 //!
 //! `run --detach` runs the VM in a second `sendit run` process, which it
 //! starts in a session of its own, without a terminal, and leaves running
@@ -54,7 +57,7 @@ use crate::worktree;
 use ssh::quote;
 
 pub use create::{NewVm, create, delete, new_vm};
-pub use lock::{State, state};
+pub use lock::{State, lock, state};
 pub use naming::{find, name_vms, rename};
 pub use origin::Origin;
 pub use run::{Detach, background_project, run, stop};

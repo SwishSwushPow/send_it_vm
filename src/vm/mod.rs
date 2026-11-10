@@ -151,15 +151,20 @@ impl VmDir {
         self.0.join("known_hosts")
     }
 
-    /// State of the current run: the lock, the meta share and, for a VM
-    /// running in the background, its console log.
+    /// State of the current run: the meta share and, for a VM running in
+    /// the background, its console log.
     pub fn run_dir(&self) -> PathBuf {
         self.0.join("run")
     }
 
-    /// Held by the `sendit run` process of a running VM, and holds its PID.
+    /// Held by the sendit process that makes, runs or deletes the VM, and
+    /// while it runs, holds that process's PID. Next to the VM's directory,
+    /// `.<dir>.lock`, not in it: it also covers making and deleting that.
     pub fn lock(&self) -> PathBuf {
-        self.run_dir().join("lock")
+        let mut name = std::ffi::OsString::from(".");
+        name.push(self.0.file_name().expect("a VM directory has a name"));
+        name.push(".lock");
+        self.0.with_file_name(name)
     }
 
     /// What the `sendit run` process of a VM in the background and its

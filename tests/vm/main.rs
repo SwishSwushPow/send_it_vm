@@ -203,7 +203,11 @@ fn runs_in_the_background() {
     assert!(project.ok(&["status"]).contains("running"));
     // Its process leads a session of its own, without a terminal to hang
     // it up.
-    let lock = project.vm_dir().join("run/lock");
+    let vm = project.vm_dir();
+    let lock = vm.with_file_name(format!(
+        ".{}.lock",
+        vm.file_name().unwrap().to_str().unwrap()
+    ));
     let pid: libc::pid_t = fs::read_to_string(&lock).unwrap().trim().parse().unwrap();
     // SAFETY: plain syscall.
     assert_eq!(unsafe { libc::getsid(pid) }, pid);

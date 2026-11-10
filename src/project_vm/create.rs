@@ -1,13 +1,13 @@
 //! Making a project's VM, as a copy of its parent VM or of the base image,
 //! and deleting it.
 
-use std::fs::{self, File};
+use std::fs;
 
 use anyhow::{Context, Result, bail};
 
-use super::lock::try_lock;
+use super::lock::{Lock, try_lock};
 use super::naming::{lock_names, name_unnamed, name_vms, unique_name, wanted_name};
-use super::{Metadata, dir, metadata, parent};
+use super::{Metadata, dir, metadata, parent, sendit_for, sendit_in};
 use crate::commands;
 use crate::paths::{ImageName, Paths, Project};
 use crate::provision::{self, BaseState};
@@ -50,7 +50,8 @@ impl NewVm {
 }
 
 /// What the project's VM is to be made from, of `image`, unless it exists:
-/// `None` then, and it gets a name if it has none. A `fresh` VM is made
+/// `None` then, and it gets a name if it has none; a `fresh` one fails if
+/// it is a copy of its parent VM. A `fresh` VM is made
 /// from the base image even for a git worktree, whose VM is otherwise a
 /// copy of its parent VM; while that runs, only if the user agrees when
 /// asked with `ask`.
@@ -66,6 +67,20 @@ pub fn new_vm(
         // Made before sendit named VMs: `-n` finds it from now on.
         if metadata(&dir).is_ok_and(|metadata| metadata.name.is_none()) {
             name_vms(paths)?;
+        }
+        if fresh
+            && let Ok(metadata) = metadata(&dir)
+            && let Some(copy_of) = &metadata.copy_of
+        {
+            bail!(
+                "{} is a copy of the VM of {} already; `{} reset` deletes it so that \
+                 `{} run --fresh` starts it over from the {} image",
+                paths.display(dir.path()),
+                paths.display(copy_of),
+                sendit_for(&dir, project),
+                sendit_in(project),
+                metadata.image,
+            );
         }
         return Ok(None);
     }
@@ -104,7 +119,7 @@ enum Source {
         dir: VmDir,
         metadata: Metadata,
         /// Keeps the parent from starting until it is copied.
-        _lock: File,
+        _lock: Lock,
     },
 }
 
@@ -169,9 +184,10 @@ fn source(
     Ok((Source::Base, Some(note)))
 }
 
-/// Makes the project's VM from what `new_vm` decided. Returns the note on
-/// why it isn't a copy of its parent VM, if it has one and needn't be
-/// fresh.
+/// Makes the project's VM from what `new_vm` decided, while holding the
+/// VM's lock, as `sendit run` does from before `new_vm`: nothing else
+/// makes it meanwhile. Returns the note on why it isn't a copy of its
+/// parent VM, if it has one and needn't be fresh.
 pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<String>> {
     let dir = &dir(paths, project);
     // `sendit run` checked, but the image may have been deleted since.
@@ -277,8 +293,9 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::super::lock::lock;
+    use super::super::ssh::quote;
     use super::super::test_util::*;
-    use super::super::{Origin, State, state};
+    use super::super::{Origin, State, state, write_metadata};
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -394,6 +411,30 @@ mod tests {
     }
 
     #[test]
+    fn gives_steps_after_reset_by_directory() {
+        let temp = crate::util::TempDir::new("vm-reset-hint");
+        let paths = Paths::new(temp.path().join("home"));
+        let project = Project::at(temp.path()).unwrap();
+        let vm = dir(&paths, &project);
+        write_vm(&vm, temp.path(), Some("app-wt"));
+        let mut metadata = metadata(&vm).unwrap();
+        metadata.copy_of = Some(temp.path().join("main"));
+        write_metadata(&vm, &metadata).unwrap();
+        let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
+        let Err(error) = new_vm(&paths, &project, &ImageName::default(), true, &never) else {
+            panic!("a fresh copy");
+        };
+        let error = error.to_string();
+        // Tests don't run in the project. The name is gone after the reset.
+        let expected = format!(
+            "`sendit -n app-wt reset` deletes it so that `sendit -C {} run --fresh` starts \
+             it over",
+            quote(&temp.path().to_string_lossy())
+        );
+        assert!(error.contains(&expected), "{error}");
+    }
+
+    #[test]
     fn fresh_vms_of_worktrees_start_from_the_base_image() {
         let temp = crate::util::TempDir::new("vm-fresh");
         let paths = Paths::new(temp.path().join("home"));
@@ -487,9 +528,11 @@ mod tests {
         fs::remove_file(parent.efi_vars()).unwrap();
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
         assert!(make_vm(&paths, &wt, &"rust".parse().unwrap(), false, &never).is_err());
+        // Apart from the parent's lock, taken to copy it.
         let left: Vec<_> = fs::read_dir(paths.vms_dir())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
+            .filter(|name| *name != *parent.lock().file_name().unwrap())
             .collect();
         assert_eq!(left, [parent.path().file_name().unwrap()]);
     }

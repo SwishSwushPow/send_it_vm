@@ -114,8 +114,16 @@ fn explains_what_to_do_in_a_fresh_home() {
         &env.sendit(&["run", "--image", "rust"]),
         "the rust image is not provisioned yet; run `sendit provision rust`",
     );
-    // Failing to start left nothing behind.
-    assert_eq!(fs::read_dir(env.home.join(".sendit")).unwrap().count(), 0);
+    // Failing to start left nothing behind but the VM's lock, which stays.
+    let left: Vec<_> = fs::read_dir(env.home.join(".sendit"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        left.iter()
+            .all(|name| name.starts_with('.') && name.ends_with(".lock")),
+        "{left:?}"
+    );
 
     let (status, _) = env.ok(&["status"]);
     let lines: Vec<_> = status.lines().collect();
