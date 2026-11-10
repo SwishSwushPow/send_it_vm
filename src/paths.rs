@@ -57,7 +57,12 @@ impl Paths {
     /// hold the home directory or sendit's other files. It is made if
     /// missing, but the folder it is in must exist, so that a drive that
     /// isn't connected is an error rather than VMs made somewhere else.
-    pub fn with_vms_dir(mut self, dir: &Path) -> Result<Self> {
+    pub fn with_vms_dir(self, dir: &Path) -> Result<Self> {
+        self.with_vms_dir_in(dir, Path::new("/Volumes"))
+    }
+
+    /// `with_vms_dir`, with the drives mounted in `volumes`.
+    fn with_vms_dir_in(mut self, dir: &Path, volumes: &Path) -> Result<Self> {
         // Without a trailing slash, for display.
         let dir: PathBuf = self.expand_tilde(dir).components().collect();
         ensure!(
@@ -75,14 +80,16 @@ impl Paths {
                 "{} doesn't exist; create it, or connect the drive it is on",
                 parent.display()
             );
-            if let Some(volume) = unmounted_volume(&canonical(&dir), Path::new("/Volumes")) {
-                bail!(
-                    "{} is not a mounted drive; connect the drive it is on",
-                    volume.display()
-                );
-            }
         }
         let real = canonical(&dir);
+        // What is left of a drive that isn't connected, even with the
+        // folder in it, is on the Mac's own disk.
+        if let Some(volume) = unmounted_volume(&real, volumes) {
+            bail!(
+                "{} is not a mounted drive; connect the drive it is on",
+                volume.display()
+            );
+        }
         // A folder that doesn't exist yet can't be where a volume is mounted.
         let volume_root = exists
             && match real.parent() {
@@ -718,6 +725,23 @@ mod tests {
             Some(volumes.join("Ext"))
         );
         assert_eq!(unmounted_volume(&temp.path().join("vms"), &volumes), None);
+        // Refused whether the folder exists or not, and as the volume itself:
+        // VMs would end up on the Mac's own disk.
+        let paths = Paths::new(temp.path().join("home"));
+        for dir in [
+            volumes.join("Ext/vms"),
+            volumes.join("Ext/sendit"),
+            volumes.join("Ext"),
+        ] {
+            if dir.ends_with("sendit") {
+                fs::create_dir(&dir).unwrap();
+            }
+            let error = format!(
+                "{:#}",
+                paths.clone().with_vms_dir_in(&dir, &volumes).unwrap_err()
+            );
+            assert!(error.contains("Ext is not a mounted drive"), "{error}");
+        }
         // The data volume is mounted below /System/Volumes on every Mac.
         let system = Path::new("/System/Volumes");
         assert_eq!(unmounted_volume(&system.join("Data/sendit"), system), None);
