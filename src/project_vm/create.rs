@@ -162,7 +162,7 @@ fn source(
                 );
                 let no_terminal = format!(
                     "the VM of {main} is running; stop it to start this worktree's VM as a \
-                     copy of it, or confirm in a terminal to start from the {image} image"
+                     copy of it, or start from the {image} image with --fresh"
                 );
                 if ask(&question, &no_terminal)? {
                     return Ok((Source::Base, None));

@@ -901,9 +901,15 @@ fn asks_before_risky_shares() {
         let output = env.sendit(&["run", "--mount", &spec]);
         assert_fails_with(
             &output,
-            "not sharing these without a terminal to confirm it:",
+            "not sharing these without a terminal to confirm it, or --yes:",
         );
         assert_fails_with(&output, reason);
+        // With --yes, it gets as far as making the VM, which fails on the
+        // image's missing disk.
+        assert_fails_with(
+            &env.sendit(&["run", "--yes", "--mount", &spec]),
+            "from the default image",
+        );
     }
     // The same for shares from the config file.
     env.config("mounts = [\"~\"]\n");

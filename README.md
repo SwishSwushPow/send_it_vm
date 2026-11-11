@@ -68,7 +68,7 @@ The project is mounted at `/home/dev/<name>`, where login shells start. `run` al
 - `--image NAME`: the base image to create the VM from. Later runs keep using it.
 - `--network MODE` and `--network-allow DEST`: what the VM may connect to (see [Network](#network)). Repeatable for `--network-allow`.
 
-`run` asks before sharing a directory, even read-only, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), following symlinks, e.g. a provisioning script linked from a dotfiles repository: through those the VM could become root or run commands on the Mac. It also asks before sharing the project's git repository through another share, e.g. of a parent folder, or for a linked worktree, of the main worktree, as only the project's own share hides `.git`. sendit can't trace hard links, so link scripts and image files with symlinks.
+`run` asks before sharing a directory, even read-only, that contains your home directory, or that contains or sits inside sendit's own files (`~/.config/sendit`, `~/.cache/sendit`, `~/.sendit` or `$SENDIT_VM_DIR`), following symlinks, e.g. a provisioning script linked from a dotfiles repository: through those the VM could become root or run commands on the Mac. It also asks before sharing the project's git repository through another share, e.g. of a parent folder, or for a linked worktree, of the main worktree, as only the project's own share hides `.git`. `-y`/`--yes` shares them without asking, e.g. for a program that has asked already. sendit can't trace hard links, so link scripts and image files with symlinks.
 
 ## Configuration
 

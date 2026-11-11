@@ -247,6 +247,11 @@ pub struct RunArgs {
     #[arg(short, long, conflicts_with = "command")]
     pub detach: bool,
 
+    /// Share directories that let the VM get around its limits, e.g. your
+    /// home directory, without asking; for programs that asked already
+    #[arg(short, long)]
+    pub yes: bool,
+
     /// Command to run once the VM is up, instead of attaching its console:
     /// over SSH as `sendit ssh <COMMAND>` does, and the VM shuts down when
     /// it ends, with sendit exiting with its exit code. Its arguments

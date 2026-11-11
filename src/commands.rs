@@ -83,7 +83,7 @@ pub fn run(paths: &Paths, cli: &Cli, args: &RunArgs, cwd: &Path) -> Result<i32> 
     }
     // In the background, the process that started this one has asked, and
     // there is no terminal to ask on.
-    if detach != Detach::Background {
+    if detach != Detach::Background && !args.yes {
         confirm_shares(paths, &settings)?;
     }
     let note = match new_vm {
@@ -121,7 +121,7 @@ pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
             "These shares let the VM get around its limits, e.g. become root or run \
              commands on this Mac:{list}\nShare them anyway?"
         ),
-        &format!("not sharing these without a terminal to confirm it:{list}"),
+        &format!("not sharing these without a terminal to confirm it, or --yes:{list}"),
     )
 }
 
