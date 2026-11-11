@@ -125,6 +125,10 @@ pub struct SenditApp {
     pub ops: Vec<SharedOp>,
     next_op: u64,
     pub selected_op: Option<u64>,
+    /// The output view's scroll position, and which operation's output,
+    /// how long, it was last scrolled to the end of.
+    pub op_scroll: ScrollHandle,
+    pub op_seen: (u64, usize),
 
     // The preferences page.
     pub prefs_draft: Prefs,
@@ -307,6 +311,8 @@ impl SenditApp {
             ops: Vec::new(),
             next_op: 1,
             selected_op: None,
+            op_scroll: ScrollHandle::new(),
+            op_seen: (0, 0),
             pref_terminal_command,
             pref_editor_command,
             pref_sendit,
@@ -406,11 +412,19 @@ impl SenditApp {
         .detach();
     }
 
-    /// The environment sendit runs with: the VM folder of the preferences.
+    /// The environment sendit runs with: the VM folder this app uses,
+    /// unless it is the default, whether the preferences or the
+    /// environment the app started with chose it. A terminal doesn't get
+    /// the app's environment.
     fn sendit_env(&self) -> Vec<(String, PathBuf)> {
-        match &self.prefs.vm_dir {
-            Some(dir) => vec![("SENDIT_VM_DIR".to_string(), dir.clone())],
-            None => Vec::new(),
+        let Ok(paths) = &self.paths else {
+            return Vec::new();
+        };
+        let dir = paths.vms_dir();
+        if dir == Paths::new(paths.home().to_path_buf()).vms_dir() {
+            Vec::new()
+        } else {
+            vec![("SENDIT_VM_DIR".to_string(), dir)]
         }
     }
 

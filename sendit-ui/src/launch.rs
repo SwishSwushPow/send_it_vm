@@ -151,7 +151,16 @@ pub fn open_in_terminal(terminal: Terminal, custom: &str, launch: &Launch) -> Re
     let mut command = match terminal {
         Terminal::Ghostty => {
             let mut command = Command::new("/usr/bin/open");
-            command.args(["-na", "Ghostty", "--args", "-e", &path_str]);
+            // As Ghostty's help says to pass arguments on macOS: a new
+            // instance, which quits again when its window closes.
+            command.args([
+                "-na",
+                "Ghostty",
+                "--args",
+                "--quit-after-last-window-closed=true",
+                "-e",
+                &path_str,
+            ]);
             command
         }
         Terminal::Apple => {

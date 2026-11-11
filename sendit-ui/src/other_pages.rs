@@ -320,6 +320,13 @@ impl SenditApp {
             Some(op) => {
                 let op_ref = op.clone();
                 let op = op.lock().unwrap();
+                // Follows new output to the end, as a terminal does.
+                if self.op_seen != (op.id, op.output.len()) {
+                    self.op_seen = (op.id, op.output.len());
+                    self.op_scroll.scroll_to_bottom();
+                }
+                let lines: Vec<&str> = op.output.lines().collect();
+                let skipped = lines.len().saturating_sub(MAX_LINES);
                 v_flex()
                     .flex_1()
                     .min_w_0()
@@ -359,14 +366,24 @@ impl SenditApp {
                             .p_3()
                             .rounded(cx.theme().radius)
                             .bg(cx.theme().secondary)
-                            .overflow_y_scrollbar()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.op_scroll)
                             .child(
                                 div()
                                     .font_family(cx.theme().mono_font_family.clone())
                                     .text_xs()
                                     .whitespace_normal()
+                                    .when(skipped > 0, |this| {
+                                        this.child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("… {skipped} earlier lines")),
+                                        )
+                                    })
                                     .children(
-                                        op.output.lines().map(|line| div().child(line.to_string())),
+                                        lines[skipped..]
+                                            .iter()
+                                            .map(|line| div().child(line.to_string())),
                                     )
                                     .when(op.output.is_empty(), |this| {
                                         this.child("No output yet.")
@@ -484,6 +501,9 @@ impl SenditApp {
             )
     }
 }
+
+/// The most lines of an operation's output shown at once.
+const MAX_LINES: usize = 400;
 
 fn state_tag(state: OpState) -> gpui_kit::component::tag::Tag {
     use gpui_kit::component::tag::Tag;
