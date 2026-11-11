@@ -55,14 +55,13 @@ use crate::provision;
 use crate::util;
 use crate::vm::VmDir;
 use crate::worktree;
-use ssh::quote;
 
 pub use create::{NewVm, create, delete, new_vm};
 pub use lock::{BUSY, State, state};
 pub use naming::{find, name_vms, rename};
 pub use origin::Origin;
 pub use run::{Detach, background_project, lock_to_run, run, stop};
-pub use ssh::ssh;
+pub use ssh::{login, proxy, quote, ssh};
 
 /// Written into a project VM's directory when it is created, and again
 /// when it gets a name later or is renamed.

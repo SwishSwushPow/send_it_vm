@@ -27,6 +27,7 @@ sendit run -d             # boot the VM in the background
 sendit ssh                # open another shell in the running VM
 sendit ssh cargo test     # ... or run a command there
 sendit ssh --root         # ... as root, e.g. to install packages
+sendit ssh-config         # let ssh and Rex reach each running VM as sendit-<name>
 sendit stop               # shut the running VM down
 sendit status             # show the VM and its effective settings
 sendit reset              # delete the VM; the next run starts from a fresh copy
@@ -49,6 +50,8 @@ A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, 
 `sendit run -d` (`--detach`) runs the VM in the background, e.g. for a server in it that you reach from the Mac. sendit returns once the VM answers over SSH; then `sendit ssh` reaches it and `sendit stop` shuts it down, and closing the terminal doesn't. If you press Ctrl-C before that, or the VM doesn't answer within two minutes, sendit shuts it down again. Its console output goes to `run/console.log` in the VM's directory. A VM in the background keeps all the memory it has used until it stops; `sendit list` shows which ones are still running.
 
 `sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
+
+`sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`: `ssh sendit-my-app`, `scp`, an editor's remote mode, or in Rex, the host `ssh://sendit-my-app` if the VM has Rex ([`rex.sh`](provision-scripts/rex.sh)), with no Tailscale needed. It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to add a line that includes it to the top of `~/.ssh/config`, once; `-y`/`--yes` adds it without asking. A `~/.ssh/config` that is a link, e.g. into a repository of dotfiles, stays one. The block stays the same as VMs come and go: for each connection, `sendit ssh-proxy` finds the VM by its name and connects to it as `sendit ssh` does, checking the VM's host key, and ssh's connection runs through that one. You log in as the VM's user, never as root, and the block turns agent and X11 forwarding off ahead of your settings for all hosts; others among them, such as `LocalForward`, still apply. The block names sendit's path, so run `sendit ssh-config` again after moving sendit.
 
 Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable, and be allowed with `network-allow` (see [Network](#network)). The VM takes the Mac's time zone on every boot.
 
@@ -183,7 +186,7 @@ The VM is a boundary, but not one that makes it safe to run anything in it and t
 
 Nothing is written into project directories.
 
-- `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys
+- `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys and the Host block of `sendit ssh-config` (in `ssh/`)
 - `~/.sendit/<project>_<uuid>/`: one directory per project VM, and next to it, its lock, `.<project>_<uuid>.lock`, which sendit keeps when it deletes the VM
 - `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 

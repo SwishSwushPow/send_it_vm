@@ -67,6 +67,8 @@ impl Command {
             Self::List => Some("list"),
             Self::Images { .. } => Some("images"),
             Self::Prune { .. } => Some("prune"),
+            Self::SshConfig { .. } => Some("ssh-config"),
+            Self::SshProxy { .. } => Some("ssh-proxy"),
             Self::Provision { .. }
             | Self::Run(_)
             | Self::Ssh { .. }
@@ -115,6 +117,21 @@ pub enum Command {
         /// `sh -c '...'`. One that starts with - goes after --
         #[arg(trailing_var_arg = true, value_name = "COMMAND")]
         command: Vec<String>,
+    },
+    /// Let ssh, and programs that use it such as Rex, reach each running VM
+    /// as sendit-<name>: write a Host block for them and offer to include
+    /// it in ~/.ssh/config
+    SshConfig {
+        /// Add the Include line to ~/.ssh/config without asking
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// For ssh's ProxyCommand: connect to the VM whose host name is HOST,
+    /// sendit-<name>, and carry standard input and output to its SSH server
+    #[command(hide = true)]
+    SshProxy {
+        #[arg(value_name = "HOST")]
+        host: String,
     },
     /// Show the project's VM and its effective settings
     Status,
@@ -490,6 +507,8 @@ mod tests {
             &["images", "--delete", "rust"],
             &["provision", "rust"],
             &["provision", "--all"],
+            &["ssh-config"],
+            &["ssh-proxy", "sendit-app"],
         ] {
             for flag in [&["-n", "app"][..], &["--name", "app"]] {
                 // Before the subcommand and after it.

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- `sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`, e.g. `ssh sendit-my-app`, or in Rex, the host `ssh://sendit-my-app`. It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to include it at the top of `~/.ssh/config`. For each connection, the block's ProxyCommand, `sendit ssh-proxy`, finds the VM by its name and connects to it as `sendit ssh` does, checking the VM's host key, so the block stays the same while VMs boot with other IP addresses, are renamed or reset.
+
 ### Changed
 
 - **Breaking:** `SENDIT_VM_DIR` must name a folder that holds only sendit's VMs, since sendit excludes it from Time Machine backups as a whole. With anything else in it, every command stops and names what's there; move those things elsewhere and they are backed up again, as the exclusion is on the folder, not on them. sendit now creates the folder when it doesn't exist, as long as the folder it is in does.

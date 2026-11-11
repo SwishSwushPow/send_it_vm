@@ -11,6 +11,7 @@ mod paths;
 mod project_vm;
 mod provision;
 mod sign;
+mod ssh_config;
 mod util;
 mod vm;
 mod worktree;
@@ -100,6 +101,11 @@ fn sendit() -> Result<ExitCode> {
             Ok(())
         }
         Command::Ssh { root, command } => project_vm::ssh(&paths, &project()?, *root, command),
+        Command::SshConfig { yes } => ssh_config::setup(&paths, *yes),
+        Command::SshProxy { host } => {
+            let project = project_vm::find(&paths, &ssh_config::vm_name(host)?)?;
+            project_vm::proxy(&paths, &project)
+        }
         Command::Stop => project_vm::stop(&paths, &project()?),
         Command::Rename { new_name } => project_vm::rename(&paths, &project()?, new_name),
         Command::Reset { yes } => {

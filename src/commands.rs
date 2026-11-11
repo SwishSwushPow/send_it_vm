@@ -643,7 +643,7 @@ fn project_dir(path: &Path) -> ProjectDir {
     }
 }
 
-const PASS_YES: &str = "not asking for confirmation without a terminal; pass --yes";
+pub const PASS_YES: &str = "not asking for confirmation without a terminal; pass --yes";
 
 /// The user answered no to a question, so nothing was done. `main` exits
 /// with 1 for it, without a message: the user knows.

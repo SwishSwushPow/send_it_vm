@@ -489,6 +489,19 @@ fn finds_vms_by_name() {
         &sendit(&["ssh", "-n", "app", "--", "true"]),
         "the VM is not running; start it with `sendit -n app run`",
     );
+    // So does ssh's ProxyCommand, by the VM's host name.
+    assert_fails_with(
+        &sendit(&["ssh-proxy", "sendit-app"]),
+        "the VM is not running; start it with `sendit -n app run`",
+    );
+    assert_fails_with(
+        &sendit(&["ssh-proxy", "sendit-nope"]),
+        "no VM is named nope",
+    );
+    assert_fails_with(
+        &sendit(&["ssh-proxy", "app"]),
+        "\"app\" is not the host name of a sendit VM, sendit-<name>",
+    );
     let (_, deleted) = ok(&["-n", "app", "reset", "--yes"]);
     assert!(
         deleted.starts_with("Deleted ~/.sendit/project_"),
@@ -496,6 +509,77 @@ fn finds_vms_by_name() {
     );
     assert!(!vm.exists());
     assert_fails_with(&sendit(&["-n", "app", "status"]), "no VM is named app");
+}
+
+#[test]
+fn sets_up_ssh_host_names() {
+    let env = Env::new("ssh-config");
+    let user_config = env.home.join(".ssh/config");
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    assert_fails_with(
+        &env.sendit(&["ssh-config"]),
+        "~/.cache/sendit/ssh/id_ed25519 is missing",
+    );
+    let keys = env.home.join(".cache/sendit/ssh");
+    fs::create_dir_all(&keys).unwrap();
+    fs::write(keys.join("id_ed25519"), "").unwrap();
+
+    // Without a terminal to ask on, only with --yes.
+    assert_fails_with(
+        &env.sendit(&["ssh-config"]),
+        "not asking for confirmation without a terminal; pass --yes",
+    );
+    assert!(!user_config.exists());
+    let (_, said) = env.ok(&["ssh-config", "--yes"]);
+    assert!(
+        said.contains("Include ~/.cache/sendit/ssh/config\n"),
+        "{said}"
+    );
+    assert!(said.contains("Added them."), "{said}");
+    let block = fs::read_to_string(keys.join("config")).unwrap();
+    assert!(block.contains("\nHost sendit-*\n"), "{block}");
+    assert!(
+        block.contains(&format!("    ProxyCommand {SENDIT} ssh-proxy %n\n")),
+        "{block}"
+    );
+    let written = fs::read_to_string(&user_config).unwrap();
+    assert_eq!(
+        written,
+        "# Added by `sendit ssh-config`: the host names of sendit's VMs.\n\
+         Include ~/.cache/sendit/ssh/config\n\n"
+    );
+    assert_eq!(mode(&user_config), 0o600);
+    assert_eq!(mode(&env.home.join(".ssh")), 0o700);
+
+    // Once is enough, and needs no answer then.
+    let (_, said) = env.ok(&["ssh-config"]);
+    assert!(
+        said.starts_with("~/.ssh/config includes ~/.cache/sendit/ssh/config already."),
+        "{said}"
+    );
+    assert_eq!(fs::read_to_string(&user_config).unwrap(), written);
+
+    // A config file linked from elsewhere gets the line at its top, and
+    // stays linked, with its permissions.
+    let dotfiles = env.home.join("dotfiles/ssh_config");
+    fs::create_dir_all(dotfiles.parent().unwrap()).unwrap();
+    fs::write(&dotfiles, "Host *\n    ForwardAgent yes\n").unwrap();
+    fs::set_permissions(&dotfiles, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::remove_file(&user_config).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, &user_config).unwrap();
+    env.ok(&["ssh-config", "--yes"]);
+    assert!(
+        fs::symlink_metadata(&user_config)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(&dotfiles).unwrap(),
+        format!("{written}Host *\n    ForwardAgent yes\n")
+    );
+    assert_eq!(mode(&dotfiles), 0o644);
 }
 
 #[test]

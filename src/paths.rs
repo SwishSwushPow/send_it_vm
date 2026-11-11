@@ -195,6 +195,12 @@ impl Paths {
         self.ssh_dir().join("id_ed25519")
     }
 
+    /// The Host block of `sendit ssh-config`, which `~/.ssh/config`
+    /// includes.
+    pub fn ssh_config(&self) -> PathBuf {
+        self.ssh_dir().join("config")
+    }
+
     /// The private key for logging in as root: only the host can become
     /// root in a VM.
     pub fn root_ssh_key(&self) -> PathBuf {

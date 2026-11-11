@@ -1,5 +1,5 @@
 //! Reaching a running VM over SSH: `sendit ssh`, the command of `sendit
-//! run COMMAND`, and waiting until the VM answers.
+//! run COMMAND`, `sendit ssh-proxy`, and waiting until the VM answers.
 
 use std::io::IsTerminal;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -19,6 +19,24 @@ use crate::vm::{VmDir, net};
 /// Replaces this process with an SSH session to the project's running VM,
 /// as root if `root`, running `command` if given.
 pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> Result<()> {
+    let dir = running(paths, project)?;
+    let error = ssh_command(paths, &dir, root, Remote::Login(command))?.exec();
+    Err(error).context("running ssh")
+}
+
+/// Replaces this process with an SSH connection to the project's running
+/// VM, as its user, that carries standard input and output to the VM's own
+/// SSH server: ssh's ProxyCommand for the VM's host name in the file of
+/// `sendit ssh-config`. This connection checks the VM's host key, as
+/// `sendit ssh` does; the one through it needs no check of its own.
+pub fn proxy(paths: &Paths, project: &Project) -> Result<()> {
+    let dir = running(paths, project)?;
+    let error = ssh_command(paths, &dir, false, Remote::Forward)?.exec();
+    Err(error).context("running ssh")
+}
+
+/// The directory of the project's VM, if the VM is running.
+fn running(paths: &Paths, project: &Project) -> Result<VmDir> {
     let dir = dir(paths, project);
     match state(&dir)? {
         State::Stopped => bail!(
@@ -26,10 +44,8 @@ pub fn ssh(paths: &Paths, project: &Project, root: bool, command: &[String]) -> 
             sendit_for(&dir, project)
         ),
         State::Busy => bail!("{BUSY}; try again once it runs"),
-        State::Running(_) => {}
+        State::Running(_) => Ok(dir),
     }
-    let error = ssh_command(paths, &dir, root, Remote::Login(command))?.exec();
-    Err(error).context("running ssh")
 }
 
 /// What an SSH connection to a VM is for.
@@ -40,6 +56,9 @@ enum Remote<'a> {
     Login(&'a [String]),
     /// Only finding out whether the VM answers yet.
     Probe,
+    /// Carrying standard input and output to the VM's SSH server, for
+    /// another ssh to connect through.
+    Forward,
 }
 
 /// The ssh command that connects to the VM in `dir`, as root if `root`.
@@ -62,10 +81,14 @@ fn ssh_command(paths: &Paths, dir: &VmDir, root: bool, remote: Remote) -> Result
         Remote::Probe => {
             ssh.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=2"]);
         }
+        // No terminal to ask on: whatever ssh would ask fails instead.
+        Remote::Forward => {
+            ssh.args(["-o", "BatchMode=yes", "-W", "127.0.0.1:22"]);
+        }
     }
     ssh.arg(format!("{user}@{ip}"));
     match remote {
-        Remote::Login([]) => {}
+        Remote::Login([]) | Remote::Forward => {}
         Remote::Login(command) => {
             ssh.arg(login_shell_command(command));
         }
@@ -107,7 +130,7 @@ const KEY_VAR: &str = "SENDIT_SSH_KEY";
 const KNOWN_HOSTS_VAR: &str = "SENDIT_KNOWN_HOSTS";
 
 /// The user and SSH key to log in to a VM with, as root if `root`.
-pub(super) fn login(paths: &Paths, root: bool) -> Result<(&'static str, PathBuf)> {
+pub fn login(paths: &Paths, root: bool) -> Result<(&'static str, PathBuf)> {
     let (user, key) = if root {
         ("root", paths.root_ssh_key())
     } else {
@@ -148,7 +171,7 @@ pub(super) fn shell_command(args: &[String]) -> String {
 }
 
 /// `arg` as one word for a POSIX shell.
-pub(super) fn quote(arg: &str) -> String {
+pub fn quote(arg: &str) -> String {
     let safe = !arg.is_empty()
         && arg
             .bytes()
