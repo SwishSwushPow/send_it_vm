@@ -30,6 +30,43 @@ pub fn schedule(window: AnyWindowHandle, view: Entity<SenditApp>, cx: &mut App) 
                 {
                     app.select(Selection::Vm(name), cx);
                 }
+                // An action, as its button would do it.
+                if let Ok(action) = std::env::var("SENDIT_UI_ACTION") {
+                    let (verb, arg) = action.split_once(':').unwrap_or((&action, ""));
+                    match verb {
+                        "build" => app.run_op(
+                            format!("Build the {arg} image"),
+                            vec!["provision".into(), arg.into()],
+                            crate::ops::FollowUp::None,
+                            Some("provision".into()),
+                            window,
+                            cx,
+                        ),
+                        "start-dir" => {
+                            let dir = std::path::PathBuf::from(arg);
+                            app.select(Selection::New(dir.clone()), cx);
+                            app.start_vm(
+                                format!("Start {arg}"),
+                                &crate::runopts::Target::Dir(dir),
+                                &crate::runopts::RunOptions {
+                                    mounts: std::env::var("SENDIT_UI_MOUNTS").unwrap_or_default(),
+                                    ..Default::default()
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                        "stop" => app.run_op(
+                            format!("Stop {arg}"),
+                            vec!["-n".into(), arg.into(), "stop".into()],
+                            crate::ops::FollowUp::None,
+                            Some(format!("vm:{arg}")),
+                            window,
+                            cx,
+                        ),
+                        _ => eprintln!("unknown action {action}"),
+                    }
+                }
                 app.panel = match std::env::var("SENDIT_UI_PANEL").as_deref() {
                     Ok("start") => Panel::StartOptions,
                     Ok("worktree") => Panel::Worktree,
@@ -39,7 +76,13 @@ pub fn schedule(window: AnyWindowHandle, view: Entity<SenditApp>, cx: &mut App) 
                 };
             })
         });
-        cx.background_executor().timer(Duration::from_secs(3)).await;
+        let wait = std::env::var("SENDIT_UI_WAIT")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+            .unwrap_or(3);
+        cx.background_executor()
+            .timer(Duration::from_secs(wait))
+            .await;
         // Drawn here: a window that isn't on screen may not draw itself.
         let _ = cx.update_window(window, |_, window, cx| {
             window.draw(cx).clear(cx);

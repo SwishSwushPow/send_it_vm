@@ -134,6 +134,9 @@ pub struct SenditApp {
     pub pref_vm_dir: Entity<InputState>,
     pub prefs_error: Option<String>,
 
+    /// Set once the user chose to quit while operations ran: the app
+    /// quits when they have stopped.
+    quitting: bool,
     _refresh: Task<()>,
 }
 
@@ -235,6 +238,9 @@ impl SenditApp {
             loop {
                 let job = this.update_in(cx, |this, window, cx| {
                     this.handle_finished_ops(window, cx);
+                    if this.quitting && this.running_ops() == 0 {
+                        cx.quit();
+                    }
                     if this.ops.iter().any(|op| op.lock().unwrap().is_running()) {
                         cx.notify();
                     }
@@ -306,9 +312,15 @@ impl SenditApp {
             pref_sendit,
             pref_vm_dir,
             prefs_error,
+            quitting: false,
             _refresh: refresh,
         };
         app.load_sendit_version(cx);
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.request_quit(window, cx))
+                .unwrap_or(true)
+        });
         app
     }
 
@@ -708,6 +720,40 @@ impl SenditApp {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Quits, or asks first while operations run, which are then
+    /// interrupted as Ctrl-C would, and waited for. Returns whether the
+    /// app may quit right away.
+    pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let running = self.running_ops();
+        if running == 0 {
+            cx.quit();
+            return true;
+        }
+        let what = match running {
+            1 => "1 operation runs".to_string(),
+            n => format!("{n} operations run"),
+        };
+        self.confirm(
+            format!("Quit while {what}?"),
+            "They are interrupted as Ctrl-C would: a VM that is starting is shut down again, \
+             a build is cancelled. VMs that already run in the background keep running.",
+            "Interrupt and quit",
+            window,
+            cx,
+            |this, window, cx| {
+                for op in &this.ops {
+                    op.lock().unwrap().interrupt();
+                }
+                this.quitting = true;
+                window.push_notification(
+                    Notification::info("Quitting once the running operations have stopped…"),
+                    cx,
+                );
+            },
+        );
+        false
     }
 
     /// Reads what `prune` would delete for the chosen scope.

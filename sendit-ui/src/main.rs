@@ -26,7 +26,6 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx| {
             gpui_kit::init(cx);
-            cx.on_action(|_: &Quit, cx| cx.quit());
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
             cx.set_menus([Menu::new("sendit").items([MenuItem::action("Quit", Quit)])]);
             cx.on_window_closed(|cx, _| {
@@ -50,12 +49,22 @@ fn main() {
                 window_min_size: Some(size(px(900.), px(560.))),
                 ..WindowOptions::default()
             };
-            let (_window, _view) = gpui_kit::open_window(options, cx, |window, cx| {
+            let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| app::SenditApp::new(window, cx))
             })
             .expect("failed to open the window");
+            let quit_view = view.clone();
+            cx.on_action(move |_: &Quit, cx| {
+                let view = quit_view.clone();
+                let asked = window.update(cx, |_, window, cx| {
+                    view.update(cx, |app, cx| app.request_quit(window, cx))
+                });
+                if asked.is_err() {
+                    cx.quit();
+                }
+            });
             #[cfg(feature = "screenshot")]
-            screenshot::schedule(_window, _view, cx);
+            screenshot::schedule(window, view, cx);
             cx.activate(true);
         });
 }

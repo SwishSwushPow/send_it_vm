@@ -16,6 +16,10 @@ Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with 
 
 Virtualization.framework only runs binaries signed with the virtualization entitlement. Builds from a clone are signed at link time by `scripts/link-and-sign.sh`; a binary installed from crates.io signs itself (ad hoc) on its first run and starts again.
 
+## Desktop app
+
+[`sendit-ui/`](sendit-ui) is a desktop app for sendit. It shows the VMs, base images and configuration, starts, stops, builds and cleans up, and opens shells in your terminal app. It runs this `sendit` for all of that, so install sendit first; see [its README](sendit-ui/README.md).
+
 ## Usage
 
 ```sh
