@@ -1,0 +1,34 @@
+[package]
+name = "sendit-ui"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A desktop app for sendit: its VMs, base images and configuration"
+publish = false
+
+# A workspace of its own, so that GPUI's dependencies stay out of sendit's
+# Cargo.lock, its CI and its audit.
+[workspace]
+
+[[bin]]
+name = "sendit-ui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+gpui-kit = "0.9.1"
+libc = "0.2.189"
+send_it_vm = { path = ".." }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+toml_edit = "0.25.19"
+gpui-pre = { version = "=0.3.12", optional = true, features = ["test-support"] }
+gpui-pre-macos = { version = "=0.3.12", optional = true, features = ["test-support"] }
+image = { version = "0.25.1", optional = true, default-features = false, features = ["png"] }
+
+[features]
+# For development: with SENDIT_UI_SCREENSHOT=file.png set, saves the window
+# as an image after a few seconds and quits. SENDIT_UI_PAGE picks the page
+# (vms, images, config, maintenance, activity, preferences), SENDIT_UI_SELECT
+# a VM by name.
+screenshot = ["dep:gpui-pre", "dep:gpui-pre-macos", "dep:image"]
