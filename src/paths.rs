@@ -117,18 +117,10 @@ impl Paths {
             );
         }
         if exists {
-            let foreign = foreign_entries(&dir)?;
-            if !foreign.is_empty() {
-                let mut names = foreign[..foreign.len().min(5)].join(", ");
-                if foreign.len() > 5 {
-                    names.push_str(&format!(", and {} more", foreign.len() - 5));
-                }
-                bail!(
-                    "{} holds files that aren't sendit's: {names}; sendit keeps this folder \
-                     out of Time Machine backups, so it may hold only its VMs. Move them \
-                     elsewhere, or choose another folder",
-                    dir.display()
-                );
+            // Only a warning: an error would also keep `stop` and `ssh`
+            // from reaching a VM that runs, e.g. over Finder's files.
+            if let Some(warning) = foreign_warning(&dir) {
+                eprintln!("warning: {warning}");
             }
         } else {
             match fs::create_dir(&dir) {
@@ -484,6 +476,31 @@ fn is_sendit_entry(name: &OsStr) -> bool {
         || name.starts_with("._")
 }
 
+/// What to warn about files in the folder of the VMs, `dir`, that aren't
+/// sendit's, if there are any: they aren't backed up.
+fn foreign_warning(dir: &Path) -> Option<String> {
+    let foreign = match foreign_entries(dir) {
+        Ok(foreign) if foreign.is_empty() => return None,
+        Ok(foreign) => foreign,
+        Err(error) => {
+            return Some(format!(
+                "could not check that {} holds only sendit's files: {error:#}",
+                dir.display()
+            ));
+        }
+    };
+    let mut names = foreign[..foreign.len().min(5)].join(", ");
+    if foreign.len() > 5 {
+        names.push_str(&format!(", and {} more", foreign.len() - 5));
+    }
+    Some(format!(
+        "{} holds files that aren't sendit's: {names}; sendit keeps this folder out of \
+         Time Machine backups, so they aren't backed up. Move them elsewhere, or choose \
+         another folder",
+        dir.display()
+    ))
+}
+
 /// The names in `dir` that aren't sendit's, sorted.
 fn foreign_entries(dir: &Path) -> Result<Vec<String>> {
     let mut foreign = Vec::new();
@@ -704,21 +721,27 @@ mod tests {
         }
         let paths = Paths::new(home);
         assert!(paths.clone().with_vms_dir(&vms).is_ok());
+        assert_eq!(foreign_warning(&vms), None);
 
+        // Anything else is warned about, but doesn't stop sendit.
         fs::create_dir(vms.join("photos")).unwrap();
         fs::write(vms.join("notes.txt"), "").unwrap();
-        let error = format!("{:#}", paths.clone().with_vms_dir(&vms).unwrap_err());
+        assert!(paths.clone().with_vms_dir(&vms).is_ok());
+        let warning = foreign_warning(&vms).unwrap();
         assert!(
-            error.contains("holds files that aren't sendit's: notes.txt, photos;"),
-            "{error}"
+            warning.contains("holds files that aren't sendit's: notes.txt, photos;"),
+            "{warning}"
         );
-        assert!(error.contains("out of Time Machine backups"), "{error}");
+        assert!(warning.contains("out of Time Machine backups"), "{warning}");
 
         for name in ["a", "b", "c", "d", "e"] {
             fs::write(vms.join(name), "").unwrap();
         }
-        let error = format!("{:#}", paths.with_vms_dir(&vms).unwrap_err());
-        assert!(error.contains(": a, b, c, d, e, and 2 more;"), "{error}");
+        let warning = foreign_warning(&vms).unwrap();
+        assert!(
+            warning.contains(": a, b, c, d, e, and 2 more;"),
+            "{warning}"
+        );
     }
 
     #[test]

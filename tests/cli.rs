@@ -1013,11 +1013,15 @@ fn moves_vms_to_sendit_vm_dir() {
         "{}",
         text(&excluded.stdout)
     );
-    // Anything else in it stops every command.
+    // Anything else in it is warned about, but stops no command.
     fs::write(vms.join("notes.txt"), "").unwrap();
-    assert_fails_with(
-        &sendit(&vms, &["list"]),
-        "holds files that aren't sendit's: notes.txt;",
+    let output = sendit(&vms, &["list"]);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("warning: ")
+            && text(&output.stderr).contains("holds files that aren't sendit's: notes.txt;"),
+        "{}",
+        text(&output.stderr)
     );
     fs::remove_file(vms.join("notes.txt")).unwrap();
 
