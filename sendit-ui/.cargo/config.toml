@@ -1,0 +1,4 @@
+# The repository's linker signs executables with the virtualization
+# entitlement, which sendit needs and this app doesn't: link plainly.
+[target.aarch64-apple-darwin]
+linker = "cc"

@@ -93,6 +93,7 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
     pub title: String,
     /// Keep the window open after the command ends, to read its output.
+    /// Without, it stays open only if the command fails.
     pub hold: bool,
 }
 
@@ -110,13 +111,18 @@ pub fn script(launch: &Launch) -> String {
     }
     script += &format!("printf '\\033]0;%s\\007' {}\n", shell_quote(&launch.title));
     let command = command_line(&launch.argv);
-    if launch.hold {
-        script += &format!(
-            "{command}\nstatus=$?\nprintf '\\n[exited with %d; press Return to close]' \"$status\"\nread _\n"
-        );
+    // Without `hold`, the window still stays open after a failure, so that
+    // its message can be read.
+    let condition = if launch.hold {
+        "true"
     } else {
-        script += &format!("exec {command}\n");
-    }
+        "[ \"$status\" -ne 0 ]"
+    };
+    script += &format!(
+        "{command}\nstatus=$?\nif {condition}; then\n  \
+         printf '\\n[exited with %d; press Return to close]' \"$status\"\n  read _\nfi\n\
+         exit \"$status\"\n"
+    );
     script
 }
 
@@ -170,9 +176,7 @@ pub fn open_in_terminal(terminal: Terminal, custom: &str, launch: &Launch) -> Re
         }
         Terminal::Custom => {
             let line = fill_template(custom, &path_str)?;
-            let mut command = Command::new("/bin/sh");
-            command.args(["-c", &line]);
-            command
+            return spawn_detached(&line);
         }
     };
     let result = run_quietly(&mut command);
@@ -194,14 +198,23 @@ pub fn open_in_editor(
     let file_str = file.display().to_string();
     match editor {
         Editor::Terminal => {
-            // A login shell, which sets $EDITOR in most setups; an app
-            // started from Finder doesn't have it.
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            // An interactive login shell, which sets $EDITOR in most
+            // setups; an app started from Finder doesn't have it. eval
+            // splits it into words, e.g. `code --wait`, also in zsh, which
+            // doesn't on its own. fish and other shells that aren't like sh
+            // can't run that, so zsh, macOS's own, stands in for them.
+            let shell = std::env::var("SHELL")
+                .ok()
+                .filter(|shell| {
+                    let name = Path::new(shell).file_name().and_then(|n| n.to_str());
+                    matches!(name, Some("zsh" | "bash" | "sh" | "ksh" | "dash"))
+                })
+                .unwrap_or_else(|| "/bin/zsh".to_string());
             let launch = Launch {
                 argv: vec![
                     shell.clone(),
                     "-lic".to_string(),
-                    "exec ${VISUAL:-${EDITOR:-vi}} \"$1\"".to_string(),
+                    r#"eval "exec ${VISUAL:-${EDITOR:-vi}} \"\$1\"""#.to_string(),
                     shell,
                     file_str,
                 ],
@@ -214,10 +227,7 @@ pub fn open_in_editor(
             open_in_terminal(terminal, custom_terminal, &launch)
         }
         Editor::TextApp => run_quietly(Command::new("/usr/bin/open").args(["-t", &file_str])),
-        Editor::Custom => {
-            let line = fill_template(custom, &file_str)?;
-            run_quietly(Command::new("/bin/sh").args(["-c", &line]))
-        }
+        Editor::Custom => spawn_detached(&fill_template(custom, &file_str)?),
     }
 }
 
@@ -236,8 +246,23 @@ pub fn fill_template(template: &str, arg: &str) -> Result<String> {
     })
 }
 
-/// Runs `command`, which returns at once, and fails with its output unless
-/// it succeeds.
+/// Starts the shell command `line` without waiting for it: a terminal or
+/// editor may run until the user quits it. It is waited for in the
+/// background, so that it doesn't linger as a zombie.
+fn spawn_detached(line: &str) -> Result<()> {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", line])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("running {line}"))?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
+/// Runs `command`, which returns at once, as `open` does, and fails with
+/// its output unless it succeeds.
 fn run_quietly(command: &mut Command) -> Result<()> {
     let output = command
         .stdin(Stdio::null())
@@ -278,14 +303,67 @@ mod tests {
         };
         let text = script(&launch);
         assert!(text.starts_with("#!/bin/sh\nrm -f \"$0\"\ncd '/p q' 2>/dev/null || cd\n"));
-        assert!(text.ends_with("exec /x/sendit -n app ssh\n"));
+        assert!(
+            text.contains("\n/x/sendit -n app ssh\nstatus=$?\nif [ \"$status\" -ne 0 ]; then\n")
+        );
+        assert!(text.ends_with("exit \"$status\"\n"));
 
         let held = script(&Launch {
             hold: true,
             ..launch
         });
-        assert!(held.contains("/x/sendit -n app ssh\nstatus=$?\n"));
-        assert!(held.ends_with("read _\n"));
+        assert!(held.contains("/x/sendit -n app ssh\nstatus=$?\nif true; then\n"));
+    }
+
+    #[test]
+    fn scripts_run_and_hold_only_on_failure() {
+        // The script, run without a terminal: it ends at once on success
+        // and waits for Return after a failure.
+        for (argv, status, waits) in [
+            (vec!["true".to_string()], 0, false),
+            (
+                vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()],
+                3,
+                true,
+            ),
+        ] {
+            let launch = Launch {
+                argv,
+                cwd: None,
+                title: "t".into(),
+                hold: false,
+            };
+            // From a file of its own, which it deletes.
+            let file = std::env::temp_dir()
+                .join(format!("sendit-ui-script-{}-{status}", std::process::id()));
+            fs::write(&file, script(&launch)).unwrap();
+            let output = Command::new("/bin/sh")
+                .arg(&file)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(!file.exists());
+            assert_eq!(output.status.code(), Some(status));
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(text.contains("press Return"), waits, "{text}");
+        }
+    }
+
+    #[test]
+    fn splits_the_editor_into_words() {
+        // As the editor's login shell runs it, here without the login part.
+        let output = Command::new("/bin/zsh")
+            .args([
+                "-fc",
+                r#"eval "exec ${VISUAL:-${EDITOR:-vi}} \"\$1\"""#,
+                "zsh",
+                "/a b",
+            ])
+            .env_remove("VISUAL")
+            .env("EDITOR", "echo opened")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "opened /a b\n");
     }
 
     #[test]

@@ -138,9 +138,8 @@ pub struct SenditApp {
     pub pref_vm_dir: Entity<InputState>,
     pub prefs_error: Option<String>,
 
-    /// Set once the user chose to quit while operations ran: the app
-    /// quits when they have stopped.
-    quitting: bool,
+    /// The folder of the operations' logs.
+    logs: Result<PathBuf, String>,
     _refresh: Task<()>,
 }
 
@@ -242,9 +241,6 @@ impl SenditApp {
             loop {
                 let job = this.update_in(cx, |this, window, cx| {
                     this.handle_finished_ops(window, cx);
-                    if this.quitting && this.running_ops() == 0 {
-                        cx.quit();
-                    }
                     if this.ops.iter().any(|op| op.lock().unwrap().is_running()) {
                         cx.notify();
                     }
@@ -318,10 +314,13 @@ impl SenditApp {
             pref_sendit,
             pref_vm_dir,
             prefs_error,
-            quitting: false,
+            logs: ops::log_dir().map_err(|e| format!("{e:#}")),
             _refresh: refresh,
         };
         app.load_sendit_version(cx);
+        if let Ok(logs) = &app.logs {
+            ops::delete_old_logs(logs);
+        }
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             this.update(cx, |this, cx| this.request_quit(window, cx))
@@ -364,6 +363,7 @@ impl SenditApp {
                     .flatten()
             }) {
                 self.selection = Some(Selection::Vm(name));
+                self.panel = Panel::None;
                 self.refresh_requested = true;
             }
         }
@@ -412,20 +412,14 @@ impl SenditApp {
         .detach();
     }
 
-    /// The environment sendit runs with: the VM folder this app uses,
-    /// unless it is the default, whether the preferences or the
-    /// environment the app started with chose it. A terminal doesn't get
-    /// the app's environment.
-    fn sendit_env(&self) -> Vec<(String, PathBuf)> {
-        let Ok(paths) = &self.paths else {
-            return Vec::new();
-        };
+    /// What `SENDIT_VM_DIR` is to be for sendit: the VM folder this app
+    /// shows, whether the preferences or the environment the app started
+    /// with chose it, or `None` to unset it for the default. Always set or
+    /// unset, so that sendit acts on the VMs the app shows.
+    fn vm_dir_env(&self) -> Option<PathBuf> {
+        let paths = self.paths.as_ref().ok()?;
         let dir = paths.vms_dir();
-        if dir == Paths::new(paths.home().to_path_buf()).vms_dir() {
-            Vec::new()
-        } else {
-            vec![("SENDIT_VM_DIR".to_string(), dir)]
-        }
+        (dir != Paths::new(paths.home().to_path_buf()).vms_dir()).then_some(dir)
     }
 
     /// Whether an operation with `key` runs.
@@ -465,16 +459,24 @@ impl SenditApp {
             self.notify_error(format!("{title}: already in progress"), window, cx);
             return;
         }
+        let logs = match &self.logs {
+            Ok(logs) => logs.clone(),
+            Err(e) => {
+                self.notify_error(format!("{title}: {e}"), window, cx);
+                return;
+            }
+        };
         let id = self.next_op;
         self.next_op += 1;
         match ops::start(
             id,
             &sendit,
-            &self.sendit_env(),
+            self.vm_dir_env().as_deref(),
             args,
             title.clone(),
             follow_up,
             key,
+            &logs,
         ) {
             Ok(op) => {
                 self.ops.push(op);
@@ -510,6 +512,9 @@ impl SenditApp {
                     op.follow_up.clone(),
                 ));
             }
+        }
+        if !ended.is_empty() && (self.page == Page::Maintenance || self.prune_plan.is_none()) {
+            self.load_prune_plan(cx);
         }
         for (title, state, output, follow_up) in ended {
             self.refresh(cx);
@@ -567,7 +572,7 @@ impl SenditApp {
                 .show_cancel(true)
                 .ok_text("Share and start")
                 .on_ok(move |_, window, cx| {
-                    let args = runopts::with_flag(&args, "--yes");
+                    let args = runopts::retry_with(&args, "--yes");
                     let key = start_key(&args);
                     this.update(cx, |this, cx| {
                         this.run_op(
@@ -607,7 +612,7 @@ impl SenditApp {
                 .show_cancel(true)
                 .ok_text("Start from the image")
                 .on_ok(move |_, window, cx| {
-                    let args = runopts::with_flag(&args, "--fresh");
+                    let args = runopts::retry_with(&args, "--fresh");
                     let key = start_key(&args);
                     this.update(cx, |this, cx| {
                         this.run_op(
@@ -633,7 +638,7 @@ impl SenditApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match options.args(target, false) {
+        match options.args(target) {
             Ok(args) => {
                 let key = start_key(&args);
                 self.run_op(
@@ -663,13 +668,12 @@ impl SenditApp {
             self.notify_error("sendit not found; set its path in Preferences", window, cx);
             return;
         };
-        let mut argv = Vec::new();
-        // The terminal starts with its own environment, not the app's.
-        for (key, value) in self.sendit_env() {
-            if argv.is_empty() {
-                argv.push("/usr/bin/env".to_string());
-            }
-            argv.push(format!("{key}={}", value.display()));
+        // The terminal starts with its own environment, not the app's, in
+        // which a shell's profile may set another.
+        let mut argv = vec!["/usr/bin/env".to_string()];
+        match self.vm_dir_env() {
+            Some(dir) => argv.push(format!("SENDIT_VM_DIR={}", dir.display())),
+            None => argv.extend(["-u".to_string(), "SENDIT_VM_DIR".to_string()]),
         }
         argv.push(sendit.display().to_string());
         argv.extend(args);
@@ -736,9 +740,8 @@ impl SenditApp {
         cx.notify();
     }
 
-    /// Quits, or asks first while operations run, which are then
-    /// interrupted as Ctrl-C would, and waited for. Returns whether the
-    /// app may quit right away.
+    /// Quits, or asks first while operations run, which go on without the
+    /// app. Returns whether the app may quit right away.
     pub fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let running = self.running_ops();
         if running == 0 {
@@ -749,23 +752,20 @@ impl SenditApp {
             1 => "1 operation runs".to_string(),
             n => format!("{n} operations run"),
         };
+        let logs = self
+            .logs
+            .as_ref()
+            .map_or_else(|_| "their logs".to_string(), |dir| self.show_path(dir));
         self.confirm(
             format!("Quit while {what}?"),
-            "They are interrupted as Ctrl-C would: a VM that is starting is shut down again, \
-             a build is cancelled. VMs that already run in the background keep running.",
-            "Interrupt and quit",
+            format!(
+                "They go on without the app, which can't show how they end then. Their output \
+                 goes on in {logs}. To stop them instead, cancel them in Activity first."
+            ),
+            "Quit",
             window,
             cx,
-            |this, window, cx| {
-                for op in &this.ops {
-                    op.lock().unwrap().interrupt();
-                }
-                this.quitting = true;
-                window.push_notification(
-                    Notification::info("Quitting once the running operations have stopped…"),
-                    cx,
-                );
-            },
+            |_, _, cx| cx.quit(),
         );
         false
     }
@@ -794,7 +794,10 @@ impl SenditApp {
     /// Applies the preferences' draft, and saves it.
     pub fn save_prefs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = |state: &Entity<InputState>, cx: &App| state.read(cx).value().trim().to_string();
-        let path = |text: String| (!text.is_empty()).then(|| PathBuf::from(text));
+        let home = std::env::home_dir().unwrap_or_default();
+        let path = |text: String| {
+            (!text.is_empty()).then(|| Paths::new(home.clone()).expand_tilde(Path::new(&text)))
+        };
         let mut prefs = self.prefs_draft.clone();
         prefs.terminal_command = text(&self.pref_terminal_command, cx);
         prefs.editor_command = text(&self.pref_editor_command, cx);

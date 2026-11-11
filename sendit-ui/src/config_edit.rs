@@ -2,6 +2,7 @@
 //! its comments and layout: only the settings that change are rewritten.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -58,8 +59,6 @@ pub struct ConfigFile {
     pub path: PathBuf,
     doc: DocumentMut,
 }
-
-const TEXT_KEYS: [&str; 4] = ["memory", "disk-size", "image", "network"];
 
 impl ConfigFile {
     /// The file at `path`, or an empty one if it doesn't exist.
@@ -185,12 +184,12 @@ impl ConfigFile {
         };
         set(table, "cpus", cpus);
         let texts = [
-            &fields.memory,
-            &fields.disk_size,
-            &fields.image,
-            &fields.network,
+            ("memory", &fields.memory),
+            ("disk-size", &fields.disk_size),
+            ("image", &fields.image),
+            ("network", &fields.network),
         ];
-        for (key, text) in TEXT_KEYS.into_iter().zip(texts) {
+        for (key, text) in texts {
             if image && key != "memory" {
                 continue;
             }
@@ -292,20 +291,39 @@ impl ConfigFile {
         Ok(config)
     }
 
-    /// Writes the file, after checking that sendit can read it. A file
-    /// that is a link, e.g. into a repository of dotfiles, stays one: the
-    /// file it points to is written.
-    pub fn save(&self) -> Result<()> {
+    /// Writes the file, after checking that sendit can read it, and that
+    /// it is still `loaded`, the text it was loaded from, rather than
+    /// changed meanwhile, e.g. in an editor. A file that is a link, e.g.
+    /// into a repository of dotfiles, stays one: the file it points to is
+    /// written. Its permissions stay too.
+    pub fn save(&self, loaded: &str) -> Result<()> {
         self.check()?;
         let target = match fs::symlink_metadata(&self.path) {
             Ok(m) if m.file_type().is_symlink() => fs::canonicalize(&self.path)
                 .with_context(|| format!("following the link {}", self.path.display()))?,
             _ => self.path.clone(),
         };
+        let (now, mode) = match fs::read_to_string(&target) {
+            Ok(text) => (text, Some(fs::metadata(&target)?.permissions().mode())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
+        };
+        if now != loaded {
+            bail!(
+                "{} changed since it was loaded here; Reload loads it, without the changes \
+                 made here",
+                self.path.display()
+            );
+        }
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        send_it_vm::write_atomic(&target, self.text().as_bytes())
+        send_it_vm::write_atomic(&target, self.text().as_bytes())?;
+        if let Some(mode) = mode {
+            fs::set_permissions(&target, fs::Permissions::from_mode(mode))
+                .with_context(|| format!("setting the permissions of {}", target.display()))?;
+        }
+        Ok(())
     }
 }
 
@@ -509,13 +527,17 @@ expose-git = true
         let real = temp.join("dotfiles/config.toml");
         fs::create_dir_all(real.parent().unwrap()).unwrap();
         fs::write(&real, "cpus = 2\n").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
         let link = temp.join("config.toml");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let mut config = ConfigFile::load(&link).unwrap();
         let mut fields = config.fields(&Section::Global);
         fields.cpus = "3".into();
         config.set_fields(&Section::Global, &fields).unwrap();
-        config.save().unwrap();
+        // Not over a change made meanwhile.
+        assert!(config.save("cpus = 1\n").is_err());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 2\n");
+        config.save("cpus = 2\n").unwrap();
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()
@@ -523,6 +545,8 @@ expose-git = true
                 .is_symlink()
         );
         assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 3\n");
+        let mode = fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         fs::remove_dir_all(&temp).unwrap();
     }
 }

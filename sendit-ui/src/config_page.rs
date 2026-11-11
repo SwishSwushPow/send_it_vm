@@ -128,7 +128,7 @@ impl SenditApp {
         let Some(Ok(config)) = &self.config else {
             return;
         };
-        match config.save() {
+        match config.save(&self.config_saved) {
             Ok(()) => {
                 self.config_saved = config.text();
                 self.config_error = None;
@@ -187,7 +187,34 @@ impl SenditApp {
                     return;
                 };
                 // As people write them, e.g. ~/Code/app.
-                let key = sendit_paths.display(&send_it_vm::canonical(&dir));
+                let dir = send_it_vm::canonical(&dir);
+                // Also when written another way, e.g. without ~: sendit
+                // refuses two tables for one project.
+                let existing = match &this.config {
+                    Some(Ok(config)) => {
+                        config
+                            .sections()
+                            .into_iter()
+                            .find_map(|section| match section {
+                                Section::Project(key) => {
+                                    let path =
+                                        sendit_paths.expand_tilde(std::path::Path::new(&key));
+                                    (send_it_vm::canonical(&path) == dir).then_some(key)
+                                }
+                                _ => None,
+                            })
+                    }
+                    _ => None,
+                };
+                let key = sendit_paths.display(&dir);
+                if let Some(existing) = existing {
+                    if this.apply_form(cx) {
+                        this.show_section(Section::Project(existing.clone()), window, cx);
+                        this.config_error =
+                            Some(format!("[projects.\"{existing}\"] configures it already"));
+                    }
+                    return;
+                }
                 let section = Section::Project(key);
                 if !this.apply_form(cx) {
                     return;
@@ -231,8 +258,8 @@ impl SenditApp {
                 Button::new("config-revert")
                     .outline()
                     .small()
-                    .label("Revert")
-                    .disabled(!dirty)
+                    .label("Reload")
+                    .tooltip("Read the file again, without the changes made here")
                     .on_click(cx.listener(|this, _, window, cx| this.load_config(window, cx))),
             )
             .when_some(path.clone(), |this, path| {
@@ -242,7 +269,9 @@ impl SenditApp {
                         .small()
                         .icon(IconName::FileText)
                         .label("Open in editor")
-                        .tooltip("Edit config.toml itself; reload here afterwards with Revert")
+                        .tooltip(
+                            "Edit config.toml itself; read it here again afterwards with Reload",
+                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             if let Some(dir) = path.parent() {
                                 let _ = std::fs::create_dir_all(dir);
@@ -266,7 +295,7 @@ impl SenditApp {
             Some(Err(e)) => v_flex()
                 .gap_2()
                 .child(ui::banner(
-                    format!("The config file can't be read: {e}. Fix it in an editor, then choose Revert."),
+                    format!("The config file can't be read: {e}. Fix it in an editor, then choose Reload."),
                     true,
                     cx,
                 ))

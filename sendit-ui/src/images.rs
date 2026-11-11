@@ -214,11 +214,12 @@ impl SenditApp {
                             args.push("--force".into());
                         }
                         if let Some(extra) = this.provision_args(window, cx) {
-                            for arg in extra {
-                                if !args.contains(&arg) {
-                                    args.push(arg);
-                                }
-                            }
+                            // --force may be there already, from the button.
+                            args.extend(
+                                extra
+                                    .into_iter()
+                                    .filter(|arg| !(force && arg == "--force")),
+                            );
                             this.run_op(
                                 format!("Build the {image} image"),
                                 args,

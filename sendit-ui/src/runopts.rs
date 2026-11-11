@@ -52,14 +52,10 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 
 impl RunOptions {
     /// The arguments of `sendit` that start `target`'s VM in the
-    /// background, with these options. `yes` shares risky directories
-    /// without asking, once the user has agreed.
-    pub fn args(&self, target: &Target, yes: bool) -> Result<Vec<String>> {
+    /// background, with these options.
+    pub fn args(&self, target: &Target) -> Result<Vec<String>> {
         let mut args = target.args();
         args.extend(["run".into(), "-d".into()]);
-        if yes {
-            args.push("--yes".into());
-        }
         let cpus = self.cpus.trim();
         if !cpus.is_empty() {
             let n: u32 = cpus
@@ -138,10 +134,15 @@ impl RunOptions {
     }
 }
 
-/// `args` of a `run -d` again, with `flag` (e.g. `--yes`) added after
-/// `-d`, unless it is there already.
-pub fn with_flag(args: &[String], flag: &str) -> Vec<String> {
+/// `args` of a `run -d` that sendit refused, for trying again with `flag`
+/// (`--yes` or `--fresh`) added after `-d`, unless it is there already.
+/// Without `--from`: a worktree that it was to make has been made, and
+/// sendit refuses `--from` for an existing one.
+pub fn retry_with(args: &[String], flag: &str) -> Vec<String> {
     let mut args = args.to_vec();
+    if let Some(i) = args.iter().position(|arg| arg == "--from") {
+        args.drain(i..(i + 2).min(args.len()));
+    }
     if !args.iter().any(|arg| arg == flag) {
         let at = args
             .iter()
@@ -162,12 +163,12 @@ mod tests {
 
     #[test]
     fn starts_with_defaults() {
-        let args = RunOptions::default().args(&name("app"), false).unwrap();
+        let args = RunOptions::default().args(&name("app")).unwrap();
         assert_eq!(args, ["-n", "app", "run", "-d"]);
         let args = RunOptions::default()
-            .args(&Target::Dir("/p q".into()), true)
+            .args(&Target::Dir("/p q".into()))
             .unwrap();
-        assert_eq!(args, ["-C", "/p q", "run", "-d", "--yes"]);
+        assert_eq!(args, ["-C", "/p q", "run", "-d"]);
     }
 
     #[test]
@@ -186,7 +187,7 @@ mod tests {
             from: "main".into(),
             worktree_path: "/w/x".into(),
         };
-        let args = options.args(&name("app"), false).unwrap();
+        let args = options.args(&name("app")).unwrap();
         assert_eq!(
             args,
             [
@@ -235,14 +236,26 @@ mod tests {
             cpus: "2".into(),
             ..RunOptions::default()
         }
-        .args(&name("app"), false)
+        .args(&name("app"))
         .unwrap();
-        let yes = with_flag(&args, "--yes");
+        let yes = retry_with(&args, "--yes");
         assert_eq!(yes, ["-n", "app", "run", "-d", "--yes", "--cpus", "2"]);
-        assert_eq!(with_flag(&yes, "--yes"), yes);
+        assert_eq!(retry_with(&yes, "--yes"), yes);
         assert_eq!(
-            with_flag(&yes, "--fresh"),
+            retry_with(&yes, "--fresh"),
             ["-n", "app", "run", "-d", "--fresh", "--yes", "--cpus", "2"]
+        );
+        // A worktree made by the first try exists for the second.
+        let args = RunOptions {
+            worktree: "x".into(),
+            from: "main".into(),
+            ..RunOptions::default()
+        }
+        .args(&name("app"))
+        .unwrap();
+        assert_eq!(
+            retry_with(&args, "--fresh"),
+            ["-n", "app", "run", "-d", "--fresh", "--worktree", "x"]
         );
     }
 
@@ -287,7 +300,7 @@ mod tests {
                 ..RunOptions::default()
             },
         ] {
-            assert!(options.args(&name("app"), false).is_err(), "{options:?}");
+            assert!(options.args(&name("app")).is_err(), "{options:?}");
         }
     }
 }

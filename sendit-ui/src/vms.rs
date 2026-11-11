@@ -533,7 +533,9 @@ impl SenditApp {
                 .child("Loading…")
                 .into_any_element(),
             Some((_, Err(e))) => ui::banner(e.clone(), true, cx).into_any_element(),
-            Some((_, Ok(report))) => status_rows(report, cx).into_any_element(),
+            Some((_, Ok(report))) => {
+                status_rows(report, &|path| self.show_path(path), cx).into_any_element()
+            }
         };
         section("Status and settings", cx).child(card(cx).child(body))
     }
@@ -986,14 +988,10 @@ fn describe_vm(report: &StatusReport, show: &dyn Fn(&std::path::Path) -> String)
     }
 }
 
-fn status_rows(report: &StatusReport, cx: &App) -> Div {
+/// The rows of `status`, with paths shown by `show`.
+fn status_rows(report: &StatusReport, show: &dyn Fn(&std::path::Path) -> String, cx: &App) -> Div {
     let settings = &report.settings;
     let image = &report.image;
-    let home = std::env::home_dir().unwrap_or_default();
-    let show = |path: &std::path::Path| match path.strip_prefix(&home) {
-        Ok(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.display()),
-        _ => path.display().to_string(),
-    };
     let network = settings.network.describe();
     let network_value = match &report.applied_network {
         Some(applied) if *applied != network => v_flex()
@@ -1008,11 +1006,7 @@ fn status_rows(report: &StatusReport, cx: &App) -> Div {
     };
     v_flex()
         .gap_2()
-        .child(row(
-            "State",
-            div().child(describe_vm(report, &|path| path.display().to_string())),
-            cx,
-        ))
+        .child(row("State", div().child(describe_vm(report, show)), cx))
         .child(row(
             "Image",
             h_flex()

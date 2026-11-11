@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use send_it_vm::{
-    Config, ImageRow, Paths, PrunePlan, PruneScope, Settings, StatusReport, VmName, VmRow,
+    Config, ImageRow, Paths, Project, PrunePlan, PruneScope, Settings, StatusReport, VmName, VmRow,
 };
 
 /// The VMs, images and the like at one moment.
@@ -43,19 +43,19 @@ pub fn take(paths: &Paths) -> Snapshot {
 
 /// `sendit -n NAME status`, as data.
 pub fn status(paths: &Paths, name: &VmName) -> Result<StatusReport> {
-    let project = send_it_vm::find(paths, name)?;
-    let settings =
-        Config::load(paths)?.resolve(paths, &project, &Settings::default(), paths.home(), false)?;
-    send_it_vm::status_report(paths, &project, &settings)
+    status_of(paths, &send_it_vm::find(paths, name)?)
 }
 
 /// What `sendit status` would show for a project directory without a VM
 /// yet, e.g. before a new VM is started.
 pub fn status_of_dir(paths: &Paths, dir: &Path) -> Result<StatusReport> {
-    let project = send_it_vm::Project::at(dir)?;
+    status_of(paths, &Project::at(dir)?)
+}
+
+fn status_of(paths: &Paths, project: &Project) -> Result<StatusReport> {
     let settings =
-        Config::load(paths)?.resolve(paths, &project, &Settings::default(), paths.home(), false)?;
-    send_it_vm::status_report(paths, &project, &settings)
+        Config::load(paths)?.resolve(paths, project, &Settings::default(), paths.home(), false)?;
+    send_it_vm::status_report(paths, project, &settings)
 }
 
 pub fn prune_plan(paths: &Paths, scope: PruneScope) -> Result<PrunePlan> {

@@ -24,13 +24,13 @@ It looks for `sendit` next to itself, in `~/.cargo/bin`, on `PATH` and in Homebr
 - **Images**: each base image's state, disk use and number of VMs. Build or rebuild them, with CPUs and memory for the build, delete them, and create or edit their image files.
 - **Configuration**: a form over `~/.config/sendit/config.toml`. It covers the settings for all projects, per image and per project. It changes only what you change, so comments and layout stay, and checks the file the way sendit reads it before saving. A config file that is a link, e.g. into a dotfiles repository, stays one.
 - **Maintenance**: clean up VMs as `sendit prune` does, with a preview; set up SSH host names (`sendit ssh-config`); see where sendit keeps things.
-- **Activity**: the sendit commands the app ran, with their output, and Cancel for those that run.
+- **Activity**: the sendit commands the app ran, with their output and log file, and Cancel for those that run.
 
 ## How it works
 
-The app reads VMs, images and the config file through sendit's library (`send_it_vm`), every few seconds, off the main thread. It runs the `sendit` binary for everything that changes them, so locks, signing and background VMs work exactly as on the command line. Questions sendit would ask on a terminal, the app asks first, then passes `--yes`. These are: deleting things, sharing directories that let the VM get around its limits, and starting a worktree's VM from the image while its main worktree's VM runs.
+The app reads VMs, images and the config file through sendit's library (`send_it_vm`), every few seconds, off the main thread. It runs the `sendit` binary for everything that changes them, so locks, signing and background VMs work exactly as on the command line. Questions sendit would ask on a terminal, the app asks first, then passes `--yes`. These are: deleting things, sharing directories that let the VM get around its limits, and starting a worktree's VM from the image while its main worktree's VM runs. For the shares and the worktree, sendit refuses without a terminal and says why; the app shows that and starts again with `--yes` or `--fresh` once you agree. Cleaning up deletes only if the VMs to delete are still the ones listed.
 
-Quitting while something runs asks first, then interrupts it as Ctrl-C would and waits for it to stop. VMs started in the background keep running.
+sendit's output goes to a log file per operation, in `~/Library/Caches/sendit-ui/operations`, which the app shows as it grows. Logs older than a week are deleted. So what the app started goes on if the app quits, e.g. a build. Quitting while something runs asks first; to stop it instead, cancel it in Activity, which interrupts it as Ctrl-C would. VMs started in the background keep running in any case.
 
 ## Development
 

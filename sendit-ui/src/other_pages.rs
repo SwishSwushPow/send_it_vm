@@ -71,10 +71,14 @@ impl SenditApp {
                     .into_any_element()
             }
         };
-        let count = plan
+        // The VMs shown, which are the ones to delete.
+        let shown: Vec<std::path::PathBuf> = plan
             .as_ref()
             .and_then(|plan| plan.as_ref().ok())
-            .map_or(0, |plan| plan.vms().count());
+            .map_or_else(Vec::new, |plan| {
+                plan.vms().map(|vm| vm.dir.path().to_path_buf()).collect()
+            });
+        let count = shown.len();
         section("Clean up VMs", cx).child(
             card(cx)
                 .child(
@@ -120,17 +124,43 @@ impl SenditApp {
                             .loading(busy)
                             .disabled(count == 0 || busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                let shown = shown.clone();
                                 this.confirm(
                                     match count {
                                         1 => "Delete 1 VM?".to_string(),
                                         n => format!("Delete {n} VMs?"),
                                     },
-                                    "Their disks and everything stored in them are deleted; project \
-                                     folders stay. VMs that started since are skipped.",
+                                    "The VMs listed are deleted, with their disks and everything \
+                                     stored in them; project folders stay.",
                                     "Delete",
                                     window,
                                     cx,
                                     move |this, window, cx| {
+                                        // sendit picks the VMs again: only if they are
+                                        // still those shown, which the user agreed to.
+                                        let Ok(paths) = this.paths.clone() else { return };
+                                        match crate::snapshot::prune_plan(&paths, scope) {
+                                            Ok(now) => {
+                                                let same = now
+                                                    .vms()
+                                                    .map(|vm| vm.dir.path())
+                                                    .eq(shown.iter().map(|dir| dir.as_path()));
+                                                if !same {
+                                                    this.prune_plan = Some((scope, Ok(now)));
+                                                    this.notify_error(
+                                                        "The VMs to delete have changed since; check the list again",
+                                                        window,
+                                                        cx,
+                                                    );
+                                                    cx.notify();
+                                                    return;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                this.notify_error(format!("{e:#}"), window, cx);
+                                                return;
+                                            }
+                                        }
                                         let mut args = vec!["prune".to_string()];
                                         match scope {
                                             PruneScope::Missing => {}
@@ -345,6 +375,18 @@ impl SenditApp {
                                             .text_color(cx.theme().muted_foreground),
                                     ),
                             )
+                            .child({
+                                let log = op.log.clone();
+                                Button::new("op-log")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::FileText)
+                                    .label("Log file")
+                                    .tooltip("All of its output, as sendit wrote it")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_in_editor(&log, window, cx)
+                                    }))
+                            })
                             .when(op.is_running(), |this| {
                                 this.child(
                                     Button::new("cancel-op")
