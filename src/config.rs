@@ -275,6 +275,12 @@ impl Config {
         Ok(util::read_toml(&paths.config_file())?.unwrap_or_default())
     }
 
+    /// Parses the text of a config file, e.g. to check an edit before
+    /// writing it.
+    pub fn parse(text: &str) -> Result<Self> {
+        Ok(toml::from_str(text)?)
+    }
+
     /// The `[projects."<path>"]` table matching `project`, else, for a
     /// linked git worktree or a subdirectory of one, the one matching its
     /// counterpart in the main worktree, if any.
@@ -572,12 +578,6 @@ mod tests {
     use super::*;
     use crate::util::TempDir;
     use std::fs;
-
-    impl Config {
-        fn parse(text: &str) -> Result<Self> {
-            Ok(toml::from_str(text)?)
-        }
-    }
 
     #[test]
     fn parses_sizes() {

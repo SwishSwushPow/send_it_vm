@@ -125,7 +125,7 @@ pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
 }
 
 /// One line for each mount that `confirm_shares` asks about.
-fn risky_shares(paths: &Paths, settings: &VmSettings) -> Vec<String> {
+pub fn risky_shares(paths: &Paths, settings: &VmSettings) -> Vec<String> {
     // Resolved, like the mounts' host paths, so that a symlinked
     // ~/.config/sendit is caught through a share of its target. Each link
     // on the way counts too, directory links included: the VM could point
@@ -329,52 +329,124 @@ pub fn reset(
     Ok(())
 }
 
+/// What `list` shows of a VM's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VmState {
+    Running,
+    /// Another sendit process is making, starting, copying or deleting it.
+    Busy,
+    /// Stopped, and made from an outdated base image, so it can't run
+    /// until it is reset.
+    Outdated,
+    Stopped,
+}
+
+impl VmState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Busy => "busy",
+            Self::Outdated => "outdated",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// One VM, as `list` shows it.
+#[derive(Clone, Debug)]
+pub struct VmRow {
+    pub dir: VmDir,
+    pub name: Option<VmName>,
+    pub state: VmState,
+    /// The space its disk takes up.
+    pub disk: ByteSize,
+    /// What its metadata says, unless that can't be read.
+    pub info: Option<VmInfo>,
+}
+
+/// What a VM's metadata says, for `VmRow`.
+#[derive(Clone, Debug)]
+pub struct VmInfo {
+    pub project_path: PathBuf,
+    pub project_dir: ProjectDir,
+    pub image: ImageName,
+    /// Made from an earlier build of its image than the latest.
+    pub earlier_build: bool,
+    /// The project whose VM this one was made as a copy of.
+    pub copy_of: Option<PathBuf>,
+}
+
+/// Every project VM, as `list` shows them, sorted by directory.
+pub fn list_rows(paths: &Paths) -> Result<Vec<VmRow>> {
+    let mut rows = Vec::new();
+    for dir in project_vm::all(paths)? {
+        let metadata = project_vm::metadata(&dir);
+        let state = match project_vm::state(&dir)? {
+            State::Running(_) => VmState::Running,
+            State::Busy => VmState::Busy,
+            State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => VmState::Outdated,
+            State::Stopped => VmState::Stopped,
+        };
+        let (name, info) = match metadata {
+            Ok(metadata) => {
+                // Only a hint: a marker that can't be read doesn't stop the listing.
+                let origin = Origin::of_vm(paths, &dir, &metadata.image);
+                let info = VmInfo {
+                    project_dir: project_dir(&metadata.project_path),
+                    project_path: metadata.project_path,
+                    earlier_build: origin.is_ok_and(|origin| origin.earlier_build()),
+                    image: metadata.image,
+                    copy_of: metadata.copy_of,
+                };
+                (metadata.name, Some(info))
+            }
+            Err(_) => (None, None),
+        };
+        rows.push(VmRow {
+            disk: allocated(&dir.disk()),
+            dir,
+            name,
+            state,
+            info,
+        });
+    }
+    Ok(rows)
+}
+
 pub fn list(paths: &Paths) -> Result<()> {
-    let dirs = project_vm::all(paths)?;
-    if dirs.is_empty() {
+    let rows = list_rows(paths)?;
+    if rows.is_empty() {
         eprintln!("No VMs in {}.", paths.display(&paths.vms_dir()));
         return Ok(());
     }
-    let mut rows = Vec::new();
-    for dir in dirs {
-        let metadata = project_vm::metadata(&dir);
-        let state = match project_vm::state(&dir)? {
-            State::Running(_) => "running",
-            State::Busy => "busy",
-            State::Stopped if metadata.as_ref().is_ok_and(|m| m.outdated()) => "outdated",
-            State::Stopped => "stopped",
-        };
-        let name = metadata
-            .as_ref()
-            .ok()
-            .and_then(|metadata| metadata.name.as_ref())
-            .map_or("?", VmName::as_str)
-            .to_string();
-        let (image, project) = match metadata {
-            Ok(metadata) => {
-                let path = metadata.project_path.display();
-                let project = match project_dir(&metadata.project_path) {
-                    ProjectDir::Present => path.to_string(),
-                    ProjectDir::Missing => format!("{path} (missing)"),
-                    ProjectDir::Unmounted => format!("{path} (volume not mounted)"),
-                    ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
-                };
-                // Only a hint: a marker that can't be read doesn't stop the listing.
-                let origin = Origin::of_vm(paths, &dir, &metadata.image);
-                let image = if origin.is_ok_and(|origin| origin.earlier_build()) {
-                    format!("{} (earlier build)", metadata.image)
-                } else {
-                    metadata.image.to_string()
-                };
-                (image, project)
-            }
-            Err(_) => (
-                "?".to_string(),
-                format!("? ({})", paths.display(dir.path())),
-            ),
-        };
-        rows.push((name, state, allocated(&dir.disk()), image, project));
-    }
+    let rows: Vec<_> = rows
+        .into_iter()
+        .map(|row| {
+            let name = row.name.as_ref().map_or("?", VmName::as_str).to_string();
+            let (image, project) = match row.info {
+                Some(info) => {
+                    let path = info.project_path.display();
+                    let project = match info.project_dir {
+                        ProjectDir::Present => path.to_string(),
+                        ProjectDir::Missing => format!("{path} (missing)"),
+                        ProjectDir::Unmounted => format!("{path} (volume not mounted)"),
+                        ProjectDir::Inaccessible(_) => format!("{path} (inaccessible)"),
+                    };
+                    let image = if info.earlier_build {
+                        format!("{} (earlier build)", info.image)
+                    } else {
+                        info.image.to_string()
+                    };
+                    (image, project)
+                }
+                None => (
+                    "?".to_string(),
+                    format!("? ({})", paths.display(row.dir.path())),
+                ),
+            };
+            (name, row.state.as_str(), row.disk, image, project)
+        })
+        .collect();
     let names = column_width("NAME", rows.iter().map(|row| &row.0));
     let images = column_width("IMAGE", rows.iter().map(|row| &row.3));
     println!(
@@ -390,30 +462,57 @@ pub fn list(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-pub fn images(paths: &Paths, config: &Config) -> Result<()> {
+/// One base image, as `images` shows it.
+#[derive(Clone, Debug)]
+pub struct ImageRow {
+    pub image: ImageName,
+    pub state: BaseState,
+    /// The space its disk takes up, if it is provisioned.
+    pub disk: Option<ByteSize>,
+    /// How many VMs were made from it.
+    pub vms: usize,
+}
+
+/// The images sendit knows of, and those VMs were made from, which stay
+/// listed after they were deleted.
+pub fn image_rows(paths: &Paths, config: &Config) -> Result<Vec<ImageRow>> {
     let vms = vms_per_image(paths)?;
-    // Images that VMs were made from stay listed after they were deleted.
     let images: BTreeSet<_> = provision::images(paths, config)?
         .into_iter()
         .chain(vms.keys().cloned())
         .collect();
+    let mut rows = Vec::new();
+    for image in images {
+        let state = provision::base_state(paths, &image)?;
+        let disk = (state != BaseState::Missing)
+            .then(|| allocated(&VmDir::new(paths.image_dir(&image)).disk()));
+        rows.push(ImageRow {
+            vms: vms.get(&image).copied().unwrap_or(0),
+            image,
+            state,
+            disk,
+        });
+    }
+    Ok(rows)
+}
 
-    let width = column_width("IMAGE", images.iter().map(ImageName::as_str));
+pub fn images(paths: &Paths, config: &Config) -> Result<()> {
+    let rows = image_rows(paths, config)?;
+    let width = column_width("IMAGE", rows.iter().map(|row| row.image.as_str()));
     println!("{:<width$}  {:<15} {:>9}  VMS", "IMAGE", "STATE", "DISK");
-    for image in &images {
-        let (state, provisioned) = match provision::base_state(paths, image)? {
-            BaseState::Missing => ("missing", false),
-            BaseState::Outdated => ("outdated", true),
-            BaseState::ScriptsChanged => ("scripts changed", true),
-            BaseState::Current => ("provisioned", true),
+    for row in &rows {
+        let state = match row.state {
+            BaseState::Missing => "missing",
+            BaseState::Outdated => "outdated",
+            BaseState::ScriptsChanged => "scripts changed",
+            BaseState::Current => "provisioned",
         };
-        let disk = if provisioned {
-            allocated(&VmDir::new(paths.image_dir(image)).disk()).approx()
-        } else {
-            "-".to_string()
-        };
-        let count = vms.get(image).copied().unwrap_or(0);
-        println!("{:<width$}  {state:<15} {disk:>9}  {count}", image.as_str());
+        let disk = row.disk.map_or("-".to_string(), ByteSize::approx);
+        println!(
+            "{:<width$}  {state:<15} {disk:>9}  {}",
+            row.image.as_str(),
+            row.vms
+        );
     }
     Ok(())
 }
@@ -525,54 +624,118 @@ pub enum PruneScope {
     All,
 }
 
-pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
-    let mut orphans = Vec::new();
-    let mut old = Vec::new();
-    let mut others = Vec::new();
+/// What `prune` would delete, and the VMs it skips.
+#[derive(Clone, Debug, Default)]
+pub struct PrunePlan {
+    /// VMs whose project directory no longer exists.
+    pub orphans: Vec<PruneVm>,
+    /// VMs made from an outdated base image.
+    pub outdated: Vec<PruneVm>,
+    /// Other stopped VMs, for `PruneScope::All`.
+    pub others: Vec<PruneVm>,
+    /// Why VMs that would be deleted are left alone, e.g. "Skipping
+    /// /path: it is still running."
+    pub skipped: Vec<String>,
+}
+
+impl PrunePlan {
+    /// Every VM to delete, in the order `prune` lists them.
+    pub fn vms(&self) -> impl Iterator<Item = &PruneVm> {
+        self.orphans
+            .iter()
+            .chain(&self.outdated)
+            .chain(&self.others)
+    }
+}
+
+/// A VM that `prune` would delete.
+#[derive(Clone, Debug)]
+pub struct PruneVm {
+    pub dir: VmDir,
+    pub name: Option<VmName>,
+    /// Its project directory, "?" if its metadata can't be read.
+    pub project: String,
+}
+
+impl PruneVm {
+    /// How `prune` lists it: its name, if it has one, and its project.
+    pub fn listed(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name}  {}", self.project),
+            None => self.project.clone(),
+        }
+    }
+}
+
+/// The VMs `prune` deletes for `scope`, which aren't running or busy.
+pub fn prune_plan(paths: &Paths, scope: PruneScope) -> Result<PrunePlan> {
+    let mut plan = PrunePlan::default();
     for dir in project_vm::all(paths)? {
         let all = scope == PruneScope::All;
-        // The project and, to list it, the VM's name and its project.
-        let (project, listed, group) = match project_vm::metadata(&dir) {
+        let (vm, group) = match project_vm::metadata(&dir) {
             Ok(metadata) => {
                 let path = &metadata.project_path;
                 let group = match project_dir(path) {
-                    ProjectDir::Missing => &mut orphans,
-                    _ if scope >= PruneScope::Outdated && metadata.outdated() => &mut old,
-                    _ if all => &mut others,
+                    ProjectDir::Missing => &mut plan.orphans,
+                    _ if scope >= PruneScope::Outdated && metadata.outdated() => &mut plan.outdated,
+                    _ if all => &mut plan.others,
                     ProjectDir::Present => continue,
                     ProjectDir::Unmounted => {
-                        eprintln!("Skipping {}: its volume is not mounted.", path.display());
+                        plan.skipped.push(format!(
+                            "Skipping {}: its volume is not mounted.",
+                            path.display()
+                        ));
                         continue;
                     }
                     ProjectDir::Inaccessible(e) => {
-                        eprintln!("Skipping {}: {e}", path.display());
+                        plan.skipped
+                            .push(format!("Skipping {}: {e}", path.display()));
                         continue;
                     }
                 };
-                let project = path.display().to_string();
-                let listed = match &metadata.name {
-                    Some(name) => format!("{name}  {project}"),
-                    None => project.clone(),
+                let vm = PruneVm {
+                    project: path.display().to_string(),
+                    name: metadata.name,
+                    dir,
                 };
-                (project, listed, group)
+                (vm, group)
             }
-            Err(_) if all => ("?".to_string(), "?".to_string(), &mut others),
+            Err(_) if all => {
+                let vm = PruneVm {
+                    dir,
+                    name: None,
+                    project: "?".to_string(),
+                };
+                (vm, &mut plan.others)
+            }
             Err(_) => continue,
         };
-        match project_vm::state(&dir)? {
+        match project_vm::state(&vm.dir)? {
             State::Stopped => {}
             State::Busy => {
-                eprintln!("Skipping {project}: another sendit process is using it.");
+                plan.skipped.push(format!(
+                    "Skipping {}: another sendit process is using it.",
+                    vm.project
+                ));
                 continue;
             }
             State::Running(_) => {
-                eprintln!("Skipping {project}: it is still running.");
+                plan.skipped
+                    .push(format!("Skipping {}: it is still running.", vm.project));
                 continue;
             }
         }
-        group.push((dir, listed));
+        group.push(vm);
     }
-    if orphans.is_empty() && old.is_empty() && others.is_empty() {
+    Ok(plan)
+}
+
+pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
+    let plan = prune_plan(paths, scope)?;
+    for skipped in &plan.skipped {
+        eprintln!("{skipped}");
+    }
+    if plan.vms().next().is_none() {
         eprintln!(
             "{}",
             match scope {
@@ -586,44 +749,48 @@ pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
         return Ok(());
     }
     for (heading, vms) in [
-        ("VMs whose project directory no longer exists:", &orphans),
-        ("VMs made from an outdated base image:", &old),
-        ("Other VMs:", &others),
+        (
+            "VMs whose project directory no longer exists:",
+            &plan.orphans,
+        ),
+        ("VMs made from an outdated base image:", &plan.outdated),
+        ("Other VMs:", &plan.others),
     ] {
         if vms.is_empty() {
             continue;
         }
         eprintln!("{heading}");
-        for (dir, listed) in vms {
-            eprintln!("  {listed}  ({})", paths.display(dir.path()));
+        for vm in vms {
+            eprintln!("  {}  ({})", vm.listed(), paths.display(vm.dir.path()));
         }
     }
-    let count = match orphans.len() + old.len() + others.len() {
+    let count = match plan.vms().count() {
         1 => "1 VM".to_string(),
         n => format!("{n} VMs"),
     };
     if !yes {
         confirmed(&format!("Delete {count}?"), PASS_YES)?;
     }
-    for (dir, _) in orphans.iter().chain(&old).chain(&others) {
-        project_vm::delete(dir)?;
+    for vm in plan.vms() {
+        project_vm::delete(&vm.dir)?;
     }
     eprintln!("Deleted {count}.");
     Ok(())
 }
 
 /// Whether a VM's project directory is still there.
-enum ProjectDir {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectDir {
     Present,
     Missing,
     /// Below `/Volumes/<name>`, and that volume isn't mounted: the project
     /// may well come back.
     Unmounted,
-    /// Can't tell, e.g. for lack of permissions.
-    Inaccessible(std::io::Error),
+    /// Can't tell, e.g. for lack of permissions: why.
+    Inaccessible(String),
 }
 
-fn project_dir(path: &Path) -> ProjectDir {
+pub fn project_dir(path: &Path) -> ProjectDir {
     match path.try_exists() {
         Ok(true) => ProjectDir::Present,
         Ok(false) => {
@@ -637,7 +804,7 @@ fn project_dir(path: &Path) -> ProjectDir {
                 _ => ProjectDir::Missing,
             }
         }
-        Err(e) => ProjectDir::Inaccessible(e),
+        Err(e) => ProjectDir::Inaccessible(e.to_string()),
     }
 }
 
@@ -764,26 +931,73 @@ fn vm_state(
     Ok((state, applied))
 }
 
-pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    let image = &project_vm::image(paths, project, settings.image.as_ref());
-    let base_dir = paths.image_dir(image);
-    let base_state = provision::base_state(paths, image)?.describe(image);
+/// What `status` shows of a project's VM.
+#[derive(Clone, Debug)]
+pub struct StatusReport {
+    /// The image the project uses, and its state.
+    pub image: ImageName,
+    pub base_dir: PathBuf,
+    pub base_state: BaseState,
+    pub project: PathBuf,
+    pub vm_dir: VmDir,
+    /// The VM's state in words, e.g. "running at 192.168.64.3", with what
+    /// to do about it if it is behind its image.
+    pub state: String,
+    /// While it runs, what its network rules let it connect to.
+    pub applied_network: Option<String>,
+    pub name: Option<VmName>,
+    /// The project whose VM this one was made as a copy of.
+    pub copy_of: Option<PathBuf>,
+    /// The project's effective settings.
+    pub settings: VmSettings,
+}
+
+/// The project's VM and its effective `settings`, for `status`.
+pub fn status_report(
+    paths: &Paths,
+    project: &Project,
+    settings: &VmSettings,
+) -> Result<StatusReport> {
+    let image = project_vm::image(paths, project, settings.image.as_ref());
+    let base_dir = paths.image_dir(&image);
+    let base_state = provision::base_state(paths, &image)?;
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
-    let (state, applied) = vm_state(paths, project, image, &vm_dir, metadata.as_ref())?;
+    let (state, applied_network) = vm_state(paths, project, &image, &vm_dir, metadata.as_ref())?;
+    let (name, copy_of) = metadata.map_or((None, None), |m| (m.name, m.copy_of));
+    Ok(StatusReport {
+        image,
+        base_dir,
+        base_state,
+        project: project.root.clone(),
+        vm_dir,
+        state,
+        applied_network,
+        name,
+        copy_of,
+        settings: settings.clone(),
+    })
+}
+
+pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
+    let report = status_report(paths, project, settings)?;
+    let image = &report.image;
     println!(
-        "image    {image} in {} ({base_state})",
-        paths.display(&base_dir)
+        "image    {image} in {} ({})",
+        paths.display(&report.base_dir),
+        report.base_state.describe(image)
     );
-    println!("project  {}", project.root.display());
-    println!("vm       {} ({state})", paths.display(vm_dir.path()));
-    if let Some(metadata) = metadata {
-        if let Some(name) = metadata.name {
-            println!("name     {name}");
-        }
-        if let Some(copy_of) = metadata.copy_of {
-            println!("copy of  the VM of {}", paths.display(&copy_of));
-        }
+    println!("project  {}", report.project.display());
+    println!(
+        "vm       {} ({})",
+        paths.display(report.vm_dir.path()),
+        report.state
+    );
+    if let Some(name) = report.name {
+        println!("name     {name}");
+    }
+    if let Some(copy_of) = report.copy_of {
+        println!("copy of  the VM of {}", paths.display(&copy_of));
     }
     println!("cpus     {}", settings.cpus);
     println!("memory   {}", settings.memory);
@@ -797,7 +1011,7 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         }
     );
     let network = settings.network.describe();
-    match applied {
+    match report.applied_network {
         Some(applied) if applied != network => {
             println!("network  {applied}");
             println!("         configured: {network}, from the VM's next start");
@@ -883,6 +1097,98 @@ mod tests {
         assert!(!kept.exists());
         assert!(!broken.exists());
         assert!(other.exists());
+    }
+
+    #[test]
+    fn lists_vms_and_plans_prunes_as_data() {
+        let temp = TempDir::new("rows");
+        let paths = Paths::new(temp.path().join("home"));
+        let present = temp.path().join("present");
+        fs::create_dir_all(&present).unwrap();
+        let vm = |id: &str, name: &str, project: &Path, base_revision: u32| {
+            let dir = paths
+                .vms_dir()
+                .join(format!("{id}_6ba7b811-9dad-11d1-80b4-00c04fd430c8"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("project.toml"),
+                format!(
+                    "project_path = \"{}\"\nimage = \"rust\"\nbase_revision = {base_revision}\n\
+                     name = \"{name}\"\n",
+                    project.display()
+                ),
+            )
+            .unwrap();
+        };
+        let current = provision::BASE_REVISION;
+        vm("a", "kept", &present, current);
+        vm("b", "old", &present, current - 1);
+        vm("c", "orphan", &temp.path().join("gone"), current);
+
+        let rows = list_rows(&paths).unwrap();
+        let summary: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                let info = row.info.as_ref().unwrap();
+                (
+                    row.name.as_ref().unwrap().as_str(),
+                    row.state,
+                    info.image.as_str(),
+                    info.project_dir.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("kept", VmState::Stopped, "rust", ProjectDir::Present),
+                ("old", VmState::Outdated, "rust", ProjectDir::Present),
+                ("orphan", VmState::Stopped, "rust", ProjectDir::Missing),
+            ]
+        );
+
+        let names = |plan: &PrunePlan| -> Vec<String> {
+            plan.vms()
+                .map(|vm| vm.name.as_ref().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(&prune_plan(&paths, PruneScope::Missing).unwrap()),
+            ["orphan"]
+        );
+        let plan = prune_plan(&paths, PruneScope::Outdated).unwrap();
+        assert_eq!(names(&plan), ["orphan", "old"]);
+        assert_eq!(
+            plan.outdated[0].listed(),
+            format!("old  {}", present.display())
+        );
+        assert_eq!(
+            names(&prune_plan(&paths, PruneScope::All).unwrap()),
+            ["orphan", "old", "kept"]
+        );
+        // Nothing was deleted.
+        assert_eq!(list_rows(&paths).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn rows_images_with_their_vms() {
+        let temp = TempDir::new("image-rows");
+        let paths = Paths::new(temp.path().join("home"));
+        let config = Config::parse("image = \"go\"\n[images.rust]\ncpus = 2\n").unwrap();
+        let rows = image_rows(&paths, &config).unwrap();
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| (row.image.as_str(), row.state, row.disk, row.vms))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("default", BaseState::Missing, None, 0),
+                ("go", BaseState::Missing, None, 0),
+                ("rust", BaseState::Missing, None, 0),
+            ]
+        );
+        assert!(Config::parse("cpus = \"many\"").is_err());
     }
 
     #[test]

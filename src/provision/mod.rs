@@ -114,6 +114,7 @@ pub fn build(marker: &Path) -> Result<Option<Build>> {
     }))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BaseState {
     /// Not provisioned yet.
     Missing,
