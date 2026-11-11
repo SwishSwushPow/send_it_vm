@@ -93,7 +93,7 @@ pub struct Launch {
     pub cwd: Option<PathBuf>,
     pub title: String,
     /// Keep the window open after the command ends, to read its output.
-    /// Without, it stays open only if the command fails.
+    /// Without, it stays open only if the command fails within seconds.
     pub hold: bool,
 }
 
@@ -111,15 +111,17 @@ pub fn script(launch: &Launch) -> String {
     }
     script += &format!("printf '\\033]0;%s\\007' {}\n", shell_quote(&launch.title));
     let command = command_line(&launch.argv);
-    // Without `hold`, the window still stays open after a failure, so that
-    // its message can be read.
+    // Without `hold`, the window still stays open after a failure within
+    // seconds, e.g. sendit's for a VM that stopped meanwhile, so that its
+    // message can be read; not after a shell session whose last command
+    // failed.
     let condition = if launch.hold {
         "true"
     } else {
-        "[ \"$status\" -ne 0 ]"
+        "[ \"$status\" -ne 0 ] && [ $(($(date +%s) - start)) -lt 10 ]"
     };
     script += &format!(
-        "{command}\nstatus=$?\nif {condition}; then\n  \
+        "start=$(date +%s)\n{command}\nstatus=$?\nif {condition}; then\n  \
          printf '\\n[exited with %d; press Return to close]' \"$status\"\n  read _\nfi\n\
          exit \"$status\"\n"
     );
@@ -176,7 +178,7 @@ pub fn open_in_terminal(terminal: Terminal, custom: &str, launch: &Launch) -> Re
         }
         Terminal::Custom => {
             let line = fill_template(custom, &path_str)?;
-            return spawn_detached(&line);
+            return spawn_detached(&line, Some(path));
         }
     };
     let result = run_quietly(&mut command);
@@ -227,7 +229,7 @@ pub fn open_in_editor(
             open_in_terminal(terminal, custom_terminal, &launch)
         }
         Editor::TextApp => run_quietly(Command::new("/usr/bin/open").args(["-t", &file_str])),
-        Editor::Custom => spawn_detached(&fill_template(custom, &file_str)?),
+        Editor::Custom => spawn_detached(&fill_template(custom, &file_str)?, None),
     }
 }
 
@@ -248,8 +250,9 @@ pub fn fill_template(template: &str, arg: &str) -> Result<String> {
 
 /// Starts the shell command `line` without waiting for it: a terminal or
 /// editor may run until the user quits it. It is waited for in the
-/// background, so that it doesn't linger as a zombie.
-fn spawn_detached(line: &str) -> Result<()> {
+/// background, so that it doesn't linger as a zombie; if it fails, its
+/// `script` is deleted, which it was to run, and the failure is logged.
+fn spawn_detached(line: &str, script: Option<PathBuf>) -> Result<()> {
     let mut child = Command::new("/bin/sh")
         .args(["-c", line])
         .stdin(Stdio::null())
@@ -257,7 +260,17 @@ fn spawn_detached(line: &str) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .with_context(|| format!("running {line}"))?;
-    std::thread::spawn(move || child.wait());
+    let line = line.to_string();
+    std::thread::spawn(move || {
+        if let Ok(status) = child.wait()
+            && !status.success()
+        {
+            eprintln!("sendit-ui: `{line}` failed ({status})");
+            if let Some(script) = script {
+                let _ = fs::remove_file(script);
+            }
+        }
+    });
     Ok(())
 }
 
@@ -303,9 +316,7 @@ mod tests {
         };
         let text = script(&launch);
         assert!(text.starts_with("#!/bin/sh\nrm -f \"$0\"\ncd '/p q' 2>/dev/null || cd\n"));
-        assert!(
-            text.contains("\n/x/sendit -n app ssh\nstatus=$?\nif [ \"$status\" -ne 0 ]; then\n")
-        );
+        assert!(text.contains("\n/x/sendit -n app ssh\nstatus=$?\nif [ \"$status\" -ne 0 ] && "));
         assert!(text.ends_with("exit \"$status\"\n"));
 
         let held = script(&Launch {

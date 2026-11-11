@@ -125,10 +125,10 @@ impl SenditApp {
         if !self.apply_form(cx) {
             return;
         }
-        let Some(Ok(config)) = &self.config else {
+        let Some(Ok(config)) = &mut self.config else {
             return;
         };
-        match config.save(&self.config_saved) {
+        match config.save() {
             Ok(()) => {
                 self.config_saved = config.text();
                 self.config_error = None;

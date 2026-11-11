@@ -58,6 +58,9 @@ pub struct Fields {
 pub struct ConfigFile {
     pub path: PathBuf,
     doc: DocumentMut,
+    /// The file as it was read or last written, byte for byte, which
+    /// `doc` may not reproduce exactly, e.g. without a final newline.
+    on_disk: String,
 }
 
 impl ConfigFile {
@@ -78,6 +81,7 @@ impl ConfigFile {
         Ok(Self {
             path: path.to_path_buf(),
             doc,
+            on_disk: text.to_string(),
         })
     }
 
@@ -292,11 +296,11 @@ impl ConfigFile {
     }
 
     /// Writes the file, after checking that sendit can read it, and that
-    /// it is still `loaded`, the text it was loaded from, rather than
-    /// changed meanwhile, e.g. in an editor. A file that is a link, e.g.
-    /// into a repository of dotfiles, stays one: the file it points to is
+    /// it is still as it was read or last written, rather than changed
+    /// meanwhile, e.g. in an editor. A file that is a link, e.g. into a
+    /// repository of dotfiles, stays one: the file it points to is
     /// written. Its permissions stay too.
-    pub fn save(&self, loaded: &str) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         self.check()?;
         let target = match fs::symlink_metadata(&self.path) {
             Ok(m) if m.file_type().is_symlink() => fs::canonicalize(&self.path)
@@ -308,7 +312,7 @@ impl ConfigFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), None),
             Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
         };
-        if now != loaded {
+        if now != self.on_disk {
             bail!(
                 "{} changed since it was loaded here; Reload loads it, without the changes \
                  made here",
@@ -318,7 +322,9 @@ impl ConfigFile {
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        send_it_vm::write_atomic(&target, self.text().as_bytes())?;
+        let text = self.text();
+        send_it_vm::write_atomic(&target, text.as_bytes())?;
+        self.on_disk = text;
         if let Some(mode) = mode {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode))
                 .with_context(|| format!("setting the permissions of {}", target.display()))?;
@@ -535,9 +541,11 @@ expose-git = true
         fields.cpus = "3".into();
         config.set_fields(&Section::Global, &fields).unwrap();
         // Not over a change made meanwhile.
-        assert!(config.save("cpus = 1\n").is_err());
-        assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 2\n");
-        config.save("cpus = 2\n").unwrap();
+        fs::write(&real, "cpus = 1\n").unwrap();
+        assert!(config.save().is_err());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 1\n");
+        fs::write(&real, "cpus = 2\n").unwrap();
+        config.save().unwrap();
         assert!(
             fs::symlink_metadata(&link)
                 .unwrap()
@@ -547,6 +555,20 @@ expose-git = true
         assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 3\n");
         let mode = fs::metadata(&real).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+        // Again, over what it wrote itself.
+        fields.cpus = "4".into();
+        config.set_fields(&Section::Global, &fields).unwrap();
+        config.save().unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "cpus = 4\n");
+
+        // A file that toml_edit doesn't write back byte for byte.
+        let plain = temp.join("plain.toml");
+        fs::write(&plain, "cpus = 2").unwrap();
+        let mut config = ConfigFile::load(&plain).unwrap();
+        fields.cpus = "3".into();
+        config.set_fields(&Section::Global, &fields).unwrap();
+        config.save().unwrap();
+        assert!(fs::read_to_string(&plain).unwrap().starts_with("cpus = 3"));
         fs::remove_dir_all(&temp).unwrap();
     }
 }

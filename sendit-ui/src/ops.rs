@@ -8,6 +8,7 @@
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -155,7 +156,10 @@ pub fn start(
         .args(&args)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
-        .stderr(out);
+        .stderr(out)
+        // Not signalled with the app, e.g. by Ctrl-C in the terminal that
+        // started it.
+        .process_group(0);
     if let Some(home) = std::env::home_dir() {
         command.current_dir(home);
     }

@@ -453,6 +453,11 @@ impl SenditApp {
             self.notify_error("sendit not found; set its path in Preferences", window, cx);
             return;
         };
+        // sendit would act on other VMs than the app can show.
+        if let Err(e) = &self.paths {
+            self.notify_error(format!("{title}: {e}"), window, cx);
+            return;
+        }
         if let Some(key) = &key
             && self.busy(key)
         {
@@ -668,6 +673,10 @@ impl SenditApp {
             self.notify_error("sendit not found; set its path in Preferences", window, cx);
             return;
         };
+        if let Err(e) = &self.paths {
+            self.notify_error(e.clone(), window, cx);
+            return;
+        }
         // The terminal starts with its own environment, not the app's, in
         // which a shell's profile may set another.
         let mut argv = vec!["/usr/bin/env".to_string()];
