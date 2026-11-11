@@ -76,10 +76,12 @@ impl Op {
     /// shut down is forced off.
     pub fn interrupt(&self) {
         if let Some(child) = &self.child {
+            // To its process group, of which it is the leader, as Ctrl-C
+            // reaches what it started too.
             // SAFETY: plain syscall. The child hasn't been waited for (it
-            // is taken out under the same lock once it has), so its PID is
-            // still its own.
-            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+            // is taken out under the same lock once it has), so its PID,
+            // and with it the group's ID, is still its own.
+            unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGINT) };
         }
     }
 
