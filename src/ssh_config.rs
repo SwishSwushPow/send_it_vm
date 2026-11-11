@@ -25,7 +25,7 @@ use crate::project_vm::{self, quote};
 use crate::util;
 
 /// What the host names of VMs start with; their names follow.
-const HOST_PREFIX: &str = "sendit-";
+pub const HOST_PREFIX: &str = "sendit-";
 
 /// The name of the VM whose host name is `host`.
 pub fn vm_name(host: &str) -> Result<VmName> {
@@ -86,6 +86,19 @@ pub fn setup(paths: &Paths, yes: bool) -> Result<()> {
          and so does Rex with the host ssh://{HOST_PREFIX}<name>. `sendit list` shows the names."
     );
     Ok(())
+}
+
+/// Whether `~/.ssh/config` includes the Host block of `setup`, which is
+/// written too. Only a hint, e.g. for a desktop app: false if either can't
+/// be read.
+pub fn is_set_up(paths: &Paths) -> bool {
+    let file = paths.ssh_config();
+    let forms = [paths.display(&file), file.display().to_string()];
+    file.exists()
+        && resolve_link(&paths.home().join(".ssh/config"))
+            .ok()
+            .and_then(|target| fs::read_to_string(target).ok())
+            .is_some_and(|text| includes(&text, &forms))
 }
 
 /// The comment above the Include line in `~/.ssh/config`.
@@ -216,6 +229,23 @@ mod tests {
         ] {
             assert!(!includes(text, &forms), "{text}");
         }
+    }
+
+    #[test]
+    fn tells_whether_set_up() {
+        let temp = crate::util::TempDir::new("ssh-set-up");
+        let paths = Paths::new(temp.path().to_path_buf());
+        assert!(!is_set_up(&paths));
+        fs::create_dir_all(paths.ssh_dir()).unwrap();
+        fs::write(paths.ssh_config(), "Host sendit-*\n").unwrap();
+        assert!(!is_set_up(&paths));
+        fs::create_dir_all(temp.path().join(".ssh")).unwrap();
+        fs::write(
+            temp.path().join(".ssh/config"),
+            "Include ~/.cache/sendit/ssh/config\n",
+        )
+        .unwrap();
+        assert!(is_set_up(&paths));
     }
 
     #[test]
