@@ -1027,11 +1027,7 @@ fn status_rows(report: &StatusReport, cx: &App) -> Div {
                 ),
             cx,
         ))
-        .child(row(
-            "Project",
-            mono(report.project.display().to_string(), cx),
-            cx,
-        ))
+        .child(row("Project", mono(show(&report.project), cx), cx))
         .child(row("VM folder", mono(show(report.vm_dir.path()), cx), cx))
         .when_some(report.copy_of.as_ref(), |this, copy_of| {
             this.child(row(

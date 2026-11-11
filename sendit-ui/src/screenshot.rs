@@ -84,7 +84,16 @@ pub fn schedule(window: AnyWindowHandle, view: Entity<SenditApp>, cx: &mut App) 
             .timer(Duration::from_secs(wait))
             .await;
         // Drawn here: a window that isn't on screen may not draw itself.
+        // Twice, so that animations such as a dialog's entrance have run.
+        let _ = cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx));
+        cx.background_executor().timer(Duration::from_secs(1)).await;
         let _ = cx.update_window(window, |_, window, cx| {
+            use gpui_kit::component::WindowExt;
+            eprintln!("dialog open: {}", window.has_active_dialog(cx));
+            for op in &view.read(cx).ops {
+                let op = op.lock().unwrap();
+                eprintln!("op {}: {:?}\n{}", op.title, op.state, op.output.trim_end());
+            }
             window.draw(cx).clear(cx);
             match window.render_to_image() {
                 Ok(image) => {
