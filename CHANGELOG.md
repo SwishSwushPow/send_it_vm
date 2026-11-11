@@ -4,6 +4,8 @@
 
 ### Added
 
+- sendit's crate has a library too, `send_it_vm`, through which a desktop app can read the VMs, base images and configuration as data. It is sendit's internals, not a stable API. `sendit list`, `images`, `status` and `prune` print the same as before.
+
 - `sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`, e.g. `ssh sendit-my-app`, or in Rex, the host `ssh://sendit-my-app`. It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to include it at the top of `~/.ssh/config`. For each connection, the block's ProxyCommand, `sendit ssh-proxy`, finds the VM by its name and connects to it as `sendit ssh` does, checking the VM's host key, so the block stays the same while VMs boot with other IP addresses, are renamed or reset.
 
 ### Changed
