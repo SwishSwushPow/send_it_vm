@@ -1,0 +1,120 @@
+#!/bin/bash
+# Rex as rex.sh sets it up, which it calls, and also reachable over your
+# tailnet, so Rex on your other devices reaches the VM as dev, e.g. Rex for
+# iOS: enter sendit-<project>.<tailnet>.ts.net in Add Remote Host….
+# Logging in on the console or with `sendit ssh` shows the address, and so
+# does sendit-rex-address in the VM. Needs tailscale.sh, which it calls.
+#
+# It runs Rex's login server as root. That identifies each caller by their
+# Tailscale login, through the VM's own tailscaled, and hands them dev's
+# Rex server, the one rex.sh runs: the same sessions as over SSH. It
+# listens on the VM's tailnet addresses only: HTTPS on port 443 through
+# Tailscale Serve, and plain HTTP that Tailscale encrypts on port 7297. Rex
+# for Mac and Rex for iOS refuse plain HTTP, so they need Serve, and so
+# HTTPS certificates turned on for the tailnet (admin console, DNS page);
+# the rex CLI can use either. The VM keeps no Tailscale state, so the Serve
+# configuration is set again at every boot. Each new VM gets a certificate
+# from Let's Encrypt on its first HTTPS connection, which allows only 5 a
+# week for the same name: reset one project's VM more often than that, and
+# Rex can't reach it over HTTPS until the week is up.
+#
+# Any person on your tailnet may connect, as dev only; tagged devices,
+# such as other sendit VMs, may not. root is never listed: it could unmount
+# the mask over the project's .git. With other people on your tailnet,
+# replace "tailscale:*" below with "tailscale:<your login>".
+
+sendit-provision rex.sh
+sendit-provision tailscale.sh
+
+sudo tee /etc/rex/accounts.jsonc > /dev/null <<'EOF'
+// Written by sendit's rex-tailscale.sh. Only dev, never root.
+{
+  "version": 1,
+  "accounts": {
+    "dev": { "principals": ["tailscale:*"] },
+  },
+}
+EOF
+
+# After sendit-tailscale, since the tailnet addresses only exist once it
+# has logged in. Restarting tailscaled (see tailscale.sh) restarts the
+# login server too (Requires), after the new login; dev's server and its
+# sessions keep running meanwhile.
+sudo mkdir -p /etc/systemd/system/rex-login-server.service.d
+sudo tee /etc/systemd/system/rex-login-server.service.d/sendit.conf > /dev/null <<'EOF'
+[Unit]
+Requires=tailscaled.service
+After=tailscaled.service sendit-tailscale.service
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/rex login-server --listen unix:///run/rex/login-server.sock \
+  --accounts /etc/rex/accounts.jsonc --runtime-root /run/rex --log-format text \
+  --pam-service rex-login-server --extra-listen tailnet://:7297 \
+  --extra-listen tailnet-serve:///run/rex/serve.sock
+EOF
+
+# Set again after every login (PartOf), since tailscaled forgets it. With
+# HTTPS certificates off for the tailnet, `tailscale serve` waits for
+# someone to turn them on instead of failing, so give up after a while;
+# port 7297 works regardless.
+sudo tee /etc/systemd/system/sendit-rex-serve.service > /dev/null <<'EOF'
+[Unit]
+Description=Serve Rex over HTTPS on the tailnet
+Requires=sendit-tailscale.service
+PartOf=sendit-tailscale.service
+After=sendit-tailscale.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/tailscale serve --bg --yes --https=443 unix:/run/rex/serve.sock
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable rex-login-server.service sendit-rex-serve.service
+
+# The address to add in Rex. While the VM is still booting, it may not be
+# on the tailnet yet; wait for that up to the given number of seconds. The
+# name is usually sendit-<project>, but Tailscale adds a number to it while
+# an earlier device of that name is still around.
+sudo tee /usr/local/bin/sendit-rex-address > /dev/null <<'EOF'
+#!/bin/sh
+set -u
+wait=${1:-0}
+while ! systemctl is-active --quiet sendit-rex-serve.service; do
+    if [ "$wait" -le 0 ] || [ "$(systemctl is-system-running)" != starting ]; then
+        echo 'not on the tailnet yet; see systemctl status sendit-tailscale sendit-rex-serve' >&2
+        exit 1
+    fi
+    sleep 1
+    wait=$((wait - 1))
+done
+name=$(tailscale status --json | jq -r '.Self.DNSName // empty')
+if [ -z "$name" ]; then
+    echo 'not on the tailnet' >&2
+    exit 1
+fi
+echo "https://${name%.}"
+EOF
+sudo chmod 755 /usr/local/bin/sendit-rex-address
+
+# Shown below the login message, on the console and in `sendit ssh`, but
+# not for commands they run, nor in Rex itself.
+sudo tee /etc/profile.d/sendit-rex.sh > /dev/null <<'EOF'
+case $- in
+*i*)
+    if [ -z "${REX_SESSION-}" ]; then
+        if sendit_rex=$(sendit-rex-address 10 2>&1); then
+            printf '  Rex: %s (Add Remote Host… in Rex on your other devices)\n\n' "$sendit_rex"
+        else
+            printf '  Rex: %s\n\n' "$sendit_rex"
+        fi
+        unset sendit_rex
+    fi
+    ;;
+esac
+EOF

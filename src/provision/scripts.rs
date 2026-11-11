@@ -709,7 +709,7 @@ mod tests {
         );
         for (name, _) in script_files(&root.join("provision-scripts")).unwrap() {
             let expected: &[&str] = match name.as_str() {
-                "rex.sh" => &["tailscale.sh"],
+                "rex-tailscale.sh" => &["rex.sh", "tailscale.sh"],
                 "tailscale.sh" => &["tailscale-secret.sh"],
                 _ => &[],
             };

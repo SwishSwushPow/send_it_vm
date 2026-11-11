@@ -131,7 +131,7 @@ sendit-provision rust.sh
 sendit-provision helix.sh
 sudo apt-get install -y postgresql-client
 sendit-provision tailscale.sh
-sendit-provision rex.sh    # calls tailscale.sh too, which runs only once
+sendit-provision rex-tailscale.sh    # calls tailscale.sh too, which runs only once
 ```
 
 The image file sets the order, and can run its own commands in between or call a script only `if` something holds. Scripts can call `sendit-provision` too; each runs at most once per build, so several can share one they all need. The image file and the scripts run with `bash -e -o pipefail`: a failing command, pipelines included, stops the script it's in, and a failing script stops the build. A failed script fails the build even if the script that called it carries on, e.g. with `sendit-provision x.sh || true`. So does one that is still running when the image file ends, e.g. one started in the background with `&` and never waited for, and a call of a script that is still running fails.
@@ -161,7 +161,8 @@ These take the same form as `--mount`, with host paths absolute or starting with
 | [`claude-md.sh`](provision-scripts/claude-md.sh) | Installs a `CLAUDE.md` that tells Claude Code about the VM, as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it |
 | [`pi.sh`](provision-scripts/pi.sh) | Installs Node.js and the Pi coding agent |
 | [`tailscale.sh`](provision-scripts/tailscale.sh) | Joins each VM to your tailnet on boot as `sendit-<project>`, so your other devices can reach it; needs setup in the Tailscale admin console, described in the script |
-| [`rex.sh`](provision-scripts/rex.sh) | Installs Rex and serves it over HTTPS through Tailscale Serve, so Rex on your other devices can reach the VM; calls `tailscale.sh` |
+| [`rex.sh`](provision-scripts/rex.sh) | Installs Rex and runs a Rex server as the VM's user from boot, which Rex for Mac reaches over SSH with [`sendit ssh-config`](#usage) |
+| [`rex-tailscale.sh`](provision-scripts/rex-tailscale.sh) | Rex as `rex.sh` sets it up, and also served over HTTPS through Tailscale Serve, so Rex on your other devices, e.g. Rex for iOS, can reach the VM; calls `rex.sh` and `tailscale.sh` |
 
 [`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 
