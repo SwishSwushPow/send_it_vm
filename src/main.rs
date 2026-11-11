@@ -1,29 +1,12 @@
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-compile_error!("sendit requires macOS on Apple silicon");
-
-mod cli;
-mod commands;
-mod config;
-mod image;
-mod mounts;
-mod network;
-mod paths;
-mod project_vm;
-mod provision;
-mod sign;
-mod ssh_config;
-mod util;
-mod vm;
-mod worktree;
-
 use std::process::ExitCode;
 
 use anyhow::Result;
 
-use crate::cli::{Cli, Command};
-use crate::commands::{Declined, PruneScope};
-use crate::config::{Config, Settings};
-use crate::paths::{Paths, Project};
+use send_it_vm::cli::{Cli, Command};
+use send_it_vm::commands::{self, Declined, PruneScope};
+use send_it_vm::config::{Config, Settings};
+use send_it_vm::paths::{Paths, Project};
+use send_it_vm::{project_vm, provision, sign, ssh_config, util};
 
 fn main() -> ExitCode {
     match sendit() {

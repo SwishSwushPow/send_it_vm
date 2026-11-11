@@ -74,6 +74,8 @@ pub struct CatchSignals {
 }
 
 impl CatchSignals {
+    // Installing signal handlers is no default value.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         // SAFETY: the handler only touches an atomic, which is signal-safe.
         let previous = CAUGHT_SIGNALS.map(|signal| unsafe {
