@@ -12,13 +12,13 @@ You provision a Debian 13 (trixie, arm64) base image once, or several with diffe
 
 ## Building
 
-Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with `cargo install send_it_vm`, or `cargo install --path sendit-vm` from a clone. What changed in each version is in [the changelog](sendit-vm/CHANGELOG.md).
+Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with `cargo install send_it_vm`, or `cargo install --path sendit-vm` from a clone. What changed in each version is in [the changelog](https://github.com/SwishSwushPow/send_it_vm/blob/main/sendit-vm/CHANGELOG.md).
 
 Virtualization.framework only runs binaries signed with the virtualization entitlement. Builds from a clone are signed at link time by `scripts/link-and-sign.sh`; a binary installed from crates.io signs itself (ad hoc) on its first run and starts again.
 
 ## Desktop app
 
-[`sendit-ui/`](sendit-ui) is a desktop app for sendit. It shows the VMs, base images and configuration, starts, stops, builds and cleans up, and opens shells in your terminal app. It runs this `sendit` for all of that, so install sendit first; see [its README](sendit-ui/README.md).
+[`sendit-ui/`](https://github.com/SwishSwushPow/send_it_vm/tree/main/sendit-ui) is a desktop app for sendit. It shows the VMs, base images and configuration, starts, stops, builds and cleans up, and opens shells in your terminal app. It runs this `sendit` for all of that, so install sendit first; see [its README](https://github.com/SwishSwushPow/send_it_vm/blob/main/sendit-ui/README.md).
 
 ## Usage
 
@@ -55,7 +55,7 @@ A command given to `sendit run` or `sendit ssh` runs as the VM's user (or root, 
 
 `sendit ssh` ignores `~/.ssh/config`, so settings like `ForwardAgent yes` under `Host *` don't hand your SSH agent to the VM.
 
-`sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`: `ssh sendit-my-app`, `scp`, an editor's remote mode, or Rex as `ssh://sendit-my-app` (see [`rex.sh`](provision-scripts/rex.sh)). It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to include it at the top of `~/.ssh/config`. For each connection, `sendit ssh-proxy` finds the VM by its name and checks its host key, as `sendit ssh` does. You log in as the VM's user, with agent and X11 forwarding off whatever your `Host *` settings say; others, such as `LocalForward`, still apply. The block names sendit's path, so run `sendit ssh-config` again after moving sendit.
+`sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`: `ssh sendit-my-app`, `scp`, an editor's remote mode, or Rex as `ssh://sendit-my-app` (see [`rex.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/rex.sh)). It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to include it at the top of `~/.ssh/config`. For each connection, `sendit ssh-proxy` finds the VM by its name and checks its host key, as `sendit ssh` does. You log in as the VM's user, with agent and X11 forwarding off whatever your `Host *` settings say; others, such as `LocalForward`, still apply. The block names sendit's path, so run `sendit ssh-config` again after moving sendit.
 
 Inside the VM, the host is `host.sendit.internal`. Host services must listen on more than `127.0.0.1` to be reachable, and be allowed with `network-allow` (see [Network](#network)). The VM takes the Mac's time zone on every boot.
 
@@ -155,20 +155,20 @@ A script can ask for host directories to be shared with the image's VMs, in comm
 
 These take the same form as `--mount`, with host paths absolute or starting with `~`, and come after the top-level mounts and before the project's. A host directory that doesn't exist is left out with a notice. A script's mounts apply to every image that calls it, even from an `if` that doesn't run. Each VM keeps those of the build it was made from, so a changed mount line takes a rebuild of the image and a `sendit reset` of the VMs that should get it. `sendit provision` lists them and `sendit status` shows them. Read the mount lines of a script you copy: they give the VM access to files on the Mac.
 
-[`provision-scripts/`](provision-scripts) has example scripts:
+[`provision-scripts/`](https://github.com/SwishSwushPow/send_it_vm/tree/main/provision-scripts) has example scripts:
 
 | Script | What it does |
 | --- | --- |
-| [`rust.sh`](provision-scripts/rust.sh) | Installs Rust with rustup, with clippy and rustfmt |
-| [`helix.sh`](provision-scripts/helix.sh) | Installs the Helix editor from its release build, grammars included |
-| [`claude-code.sh`](provision-scripts/claude-code.sh) | Installs Claude Code with its native installer |
-| [`claude-md.sh`](provision-scripts/claude-md.sh) | Installs a `CLAUDE.md` that tells Claude Code about the VM, as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it |
-| [`pi.sh`](provision-scripts/pi.sh) | Installs Node.js and the Pi coding agent |
-| [`tailscale.sh`](provision-scripts/tailscale.sh) | Joins each VM to your tailnet on boot as `sendit-<project>`, so your other devices can reach it; needs setup in the Tailscale admin console, described in the script |
-| [`rex.sh`](provision-scripts/rex.sh) | Installs Rex and runs a Rex server as the VM's user from boot, which Rex for Mac reaches over SSH with [`sendit ssh-config`](#usage) |
-| [`rex-tailscale.sh`](provision-scripts/rex-tailscale.sh) | Rex as `rex.sh` sets it up, and also served over HTTPS through Tailscale Serve, so Rex on your other devices, e.g. Rex for iOS, can reach the VM; calls `rex.sh` and `tailscale.sh` |
+| [`rust.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/rust.sh) | Installs Rust with rustup, with clippy and rustfmt |
+| [`helix.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/helix.sh) | Installs the Helix editor from its release build, grammars included |
+| [`claude-code.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/claude-code.sh) | Installs Claude Code with its native installer |
+| [`claude-md.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/claude-md.sh) | Installs a `CLAUDE.md` that tells Claude Code about the VM, as `/etc/claude-code/CLAUDE.md`, so a `~/.claude` shared from the Mac doesn't hide it |
+| [`pi.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/pi.sh) | Installs Node.js and the Pi coding agent |
+| [`tailscale.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/tailscale.sh) | Joins each VM to your tailnet on boot as `sendit-<project>`, so your other devices can reach it; needs setup in the Tailscale admin console, described in the script |
+| [`rex.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/rex.sh) | Installs Rex and runs a Rex server as the VM's user from boot, which Rex for Mac reaches over SSH with [`sendit ssh-config`](#usage) |
+| [`rex-tailscale.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/provision-scripts/rex-tailscale.sh) | Rex as `rex.sh` sets it up, and also served over HTTPS through Tailscale Serve, so Rex on your other devices, e.g. Rex for iOS, can reach the VM; calls `rex.sh` and `tailscale.sh` |
 
-[`images/example.sh`](images/example.sh) calls some of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
+[`images/example.sh`](https://github.com/SwishSwushPow/send_it_vm/blob/main/images/example.sh) calls some of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 
 ### Git worktrees
 
@@ -205,6 +205,6 @@ To keep the VMs elsewhere, e.g. on an external drive, set `SENDIT_VM_DIR` to a f
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/SwishSwushPow/send_it_vm/blob/main/LICENSE-APACHE) or [MIT license](https://github.com/SwishSwushPow/send_it_vm/blob/main/LICENSE-MIT), at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

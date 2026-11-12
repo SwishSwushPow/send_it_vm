@@ -6,7 +6,11 @@
 set -e
 cd "$(dirname "$0")"
 cargo build --release
-target=${CARGO_TARGET_DIR:-../target}
+# Wherever cargo builds to: ../target, unless CARGO_TARGET_DIR or a cargo
+# config names another.
+target=$(cargo metadata --no-deps --format-version 1 |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+: "${target:?cargo metadata named no target directory}"
 app="$target/Send it.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

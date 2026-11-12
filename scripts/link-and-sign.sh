@@ -1,8 +1,9 @@
 #!/bin/sh
 # Linker wrapper: links with the system linker, then ad-hoc signs executables
 # with the virtualization entitlement (required by Virtualization.framework).
-# Set as the linker in .cargo/config.toml, so every build is signed:
-# `cargo build`, `cargo run`, `cargo test` and `cargo install --path .`.
+# Set as the linker in .cargo/config.toml, so every build of sendit is signed:
+# `cargo build`, `cargo run`, `cargo test` and `cargo install --path sendit-vm`.
+# sendit-ui, the other member of the workspace, is linked without it.
 set -e
 cc "$@"
 
