@@ -189,11 +189,13 @@ pub fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut Ap
     sync_theme(appearance, window, cx);
 }
 
-/// Draws with the theme for `appearance`, given how macOS is set.
+/// Draws with the theme for `appearance`, given how macOS is set, and
+/// shows the Dock icon to match.
 fn sync_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
     // The app's appearance rather than the window's: GPUI updates the
     // window's a tick after an override is cleared, the app's at once.
     let mode = appearance.theme_mode(cx.window_appearance());
+    crate::icon::set_dock_icon(mode.is_dark());
     if cx.theme().mode != mode {
         Theme::change(mode, Some(window), cx);
     }

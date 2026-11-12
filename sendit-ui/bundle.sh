@@ -7,8 +7,9 @@ cd "$(dirname "$0")"
 cargo build --release
 app="target/Send it.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/sendit-ui "$app/Contents/MacOS/"
+cp icon/Assets.car icon/AppIcon.icns "$app/Contents/Resources/"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,6 +20,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Send it</string>
     <key>CFBundleIdentifier</key><string>io.github.swishswushpow.sendit-ui</string>
     <key>CFBundleExecutable</key><string>sendit-ui</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>$version</string>
     <key>CFBundleShortVersionString</key><string>$version</string>

@@ -5,6 +5,7 @@
 mod app;
 mod config_edit;
 mod config_page;
+mod icon;
 mod images;
 mod launch;
 mod ops;

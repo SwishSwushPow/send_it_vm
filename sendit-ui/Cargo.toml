@@ -18,6 +18,10 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 gpui-kit = "0.9.1"
 libc = "0.2.189"
+# To show the icon in the Dock when the app runs outside its bundle.
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSData", "NSString"] }
 send_it_vm = { path = ".." }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"

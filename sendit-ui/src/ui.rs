@@ -294,16 +294,26 @@ impl SenditApp {
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(
-                v_flex()
+                h_flex()
                     .px_4()
                     .pt_10()
                     .pb_4()
-                    .child(div().text_lg().font_bold().child("Send it"))
+                    .gap_3()
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Per-project Debian VMs"),
+                        img(crate::icon::sidebar(cx.theme().mode.is_dark()))
+                            .size(px(36.))
+                            .flex_shrink_0(),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(div().text_lg().font_bold().child("Send it"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Per-project Debian VMs"),
+                            ),
                     ),
             )
             .child(v_flex().px_2().gap_1().children(items.into_iter().map(
