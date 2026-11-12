@@ -16,6 +16,10 @@
 - `sendit run` says that the image is not provisioned yet, or outdated, before it asks about risky shares, so that you don't confirm shares for a VM it can't make.
 - Only one sendit process at a time makes, runs, copies or deletes a VM: `sendit run` holds the VM's lock from before it decides whether to make the VM, also while it asks about it. Until the VM boots, the VM is "busy": a second `sendit run`, `ssh`, `stop` and `reset` say so instead of taking it for running, `sendit list` and `sendit status` show it as busy, and `sendit prune` skips it. Each VM's lock is now a file next to its directory, `.<project>_<uuid>.lock`, which stays when the VM is deleted. Stop running VMs before upgrading: this version doesn't see the locks of VMs started by earlier ones.
 
+### Removed
+
+- sendit no longer stops with an error while `~/.config/sendit/provision-scripts/` has subfolders, the layout before 0.8 that image files replaced. It ignores them, so move any scripts still in them up a level and call them from an image file.
+
 ### Fixed
 
 - **Security:** `sendit run` shared the project's `.git` without a word through any other share that contained it, e.g. `mounts = ["~/Code"]`, though only the project's own share hides it. It now asks first, unless `.git` is exposed. The same goes for the repository that a project in one of its subfolders is in, and the one that a linked worktree's or submodule's `.git` file points to, also when that is in the project, e.g. a `.git` file that points to `.bare`.

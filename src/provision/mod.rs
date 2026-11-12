@@ -30,9 +30,7 @@ use crate::vm::{self, ConsoleMode, ProvisionLog, VmDir, VmSpec};
 use scripts::{
     CustomScript, ScriptStamp, custom_scripts, describe_mounts, describe_scripts, mounts_of,
 };
-pub use scripts::{
-    ScriptMount, check_no_subfolders, dangling_image_file, describe_dangling, same_mounts,
-};
+pub use scripts::{ScriptMount, dangling_image_file, describe_dangling, same_mounts};
 
 /// Logical size of the base disk. Project VMs grow their clone further, but
 /// can't shrink it, so this is also the smallest disk size they can have.
@@ -143,7 +141,6 @@ impl BaseState {
 }
 
 pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
-    check_no_subfolders(paths)?;
     let base = VmDir::new(paths.image_dir(image));
     let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
         return Ok(BaseState::Missing);
@@ -174,7 +171,6 @@ pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
 /// All images: `default`, and every image that the config file names, has
 /// an image file or has been provisioned, in name order.
 pub fn images(paths: &Paths, config: &Config) -> Result<Vec<ImageName>> {
-    check_no_subfolders(paths)?;
     let mut images = BTreeSet::from([ImageName::default()]);
     images.extend(config.images().cloned());
     for entry in util::read_dir(&paths.image_files_dir())? {

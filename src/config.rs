@@ -447,9 +447,6 @@ fn script_mounts(
     image: &ImageName,
     fresh: bool,
 ) -> Result<Vec<MountSpec>> {
-    // The scripts aren't read here, but their old layout must not be left
-    // out without a word, also by `run`.
-    provision::check_no_subfolders(paths)?;
     let mut mounts = Vec::new();
     let origin = project_vm::Origin::of(paths, project, image, fresh)?;
     for ScriptMount { script, mount } in origin.mounts().iter().cloned() {

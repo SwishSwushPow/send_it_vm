@@ -192,26 +192,6 @@ fn check_script_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fails if `Paths::provision_scripts_dir` has subfolders: the scripts in
-/// them, the old way to give an image scripts of its own, would be left out
-/// without a word.
-pub fn check_no_subfolders(paths: &Paths) -> Result<()> {
-    for entry in util::read_dir(&paths.provision_scripts_dir())? {
-        let path = entry?.path();
-        let hidden = path
-            .file_name()
-            .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."));
-        ensure!(
-            hidden || !path.is_dir(),
-            "{}/: subfolders are no longer supported; images are defined by {} \
-             (see the CHANGELOG)",
-            paths.display(&path),
-            paths.display(&paths.image_files_dir().join("NAME.sh"))
-        );
-    }
-    Ok(())
-}
-
 /// Where the image file of `image` points if it is a symlink to nothing,
 /// e.g. into a dotfiles repository that isn't there (yet). `custom_scripts`
 /// finds no image file then, so `provision` refuses to build the image
@@ -241,7 +221,6 @@ pub fn describe_dangling(paths: &Paths, image: &ImageName, target: &Path) -> Str
 /// symlink to nothing (see `dangling_image_file`).
 pub(super) fn custom_scripts(paths: &Paths, image: &ImageName) -> Result<Vec<CustomScript>> {
     let dir = paths.provision_scripts_dir();
-    check_no_subfolders(paths)?;
     let image_file = paths.image_file(image);
     let content = match fs::read(&image_file) {
         Ok(content) => content,
@@ -315,7 +294,6 @@ fn why_missing(paths: &Paths, name: &str) -> String {
             Err(_) => format!("there is no {shown}"),
         },
         _ if !name.ends_with(".sh") => format!("only *.sh files can be called, not {shown}"),
-        // A directory stops `check_no_subfolders` first.
         _ => format!("{shown} isn't a file"),
     }
 }
@@ -719,22 +697,6 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn refuses_subfolders_of_shared_scripts() {
-        let home = TempDir::new("script-subfolders");
-        let paths = Paths::new(home.path().to_path_buf());
-        // A repository's metadata is fine.
-        fs::create_dir_all(paths.provision_scripts_dir().join(".git")).unwrap();
-        assert!(custom_scripts(&paths, &image("rust")).unwrap().is_empty());
-        // An image's own scripts in the old layout, even without image files.
-        write_config(&paths, "provision-scripts/rust/10-cargo.sh", "cargo");
-        assert_eq!(
-            script_error(&paths, &ImageName::default()),
-            "~/.config/sendit/provision-scripts/rust/: subfolders are no longer supported; \
-             images are defined by ~/.config/sendit/images/NAME.sh (see the CHANGELOG)"
-        );
     }
 
     #[test]
