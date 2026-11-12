@@ -12,7 +12,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use send_it_vm::{
-    Activity, HOST_PREFIX, Mode, ProjectDir, Stale, StatusReport, VmName, VmRow, VmState, VmStatus,
+    HOST_PREFIX, Mode, ProjectDir, Stale, StatusReport, VmName, VmRow, VmState, VmStatus,
 };
 
 use crate::app::{Panel, Selection, SenditApp};
@@ -955,37 +955,23 @@ fn describe_vm(report: &StatusReport, show: &dyn Fn(&std::path::Path) -> String)
         }
         VmStatus::Made { activity, stale } => (activity, stale),
     };
-    let state = match activity {
-        Activity::Stopped => "stopped".to_string(),
-        Activity::Busy => {
-            "busy, another sendit process is making, starting, copying or deleting it".to_string()
-        }
-        Activity::Running { ip: Some(ip) } => format!("running at {ip}"),
-        Activity::Running { ip: None } => "running".to_string(),
+    let state = activity.describe();
+    let Some(stale) = stale else {
+        return state;
     };
-    match stale {
-        None => state,
-        Some(Stale::OtherImage(made_from)) => {
-            format!("{state}; made from the {made_from} image, Reset… makes it again from {image}")
-        }
-        Some(Stale::Outdated) => {
-            format!("{state}; made from an outdated base image, Reset… makes it again")
-        }
-        Some(Stale::EarlierBuild { shares, fresh_too }) => {
-            let what = if *shares {
-                format!("shares what an earlier build of the {image} image asked for")
-            } else {
-                format!("made from an earlier build of the {image} image")
-            };
-            let how = if *fresh_too {
-                "Reset… and then Start with options…, ticking “make its VM from the base \
-                 image”, make it again"
-            } else {
-                "Reset… makes it again"
-            };
-            format!("{state}; {what}, {how} from the current one")
-        }
-    }
+    let how = match stale {
+        Stale::OtherImage(_) => format!("Reset… makes it again from {image}"),
+        Stale::Outdated => "Reset… makes it again".to_string(),
+        Stale::EarlierBuild {
+            fresh_too: true, ..
+        } => "Reset… and then Start with options…, ticking “make its VM from the base image”, \
+              make it again from the current one"
+            .to_string(),
+        Stale::EarlierBuild {
+            fresh_too: false, ..
+        } => "Reset… makes it again from the current one".to_string(),
+    };
+    format!("{state}; {}, {how}", stale.describe(image))
 }
 
 /// The rows of `status`, with paths shown by `show`.

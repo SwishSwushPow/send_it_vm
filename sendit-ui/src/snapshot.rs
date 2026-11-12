@@ -18,16 +18,22 @@ pub struct Snapshot {
 }
 
 pub fn take(paths: &Paths) -> Snapshot {
-    let (vms, vms_error) = match send_it_vm::list_rows(paths) {
+    let listed = send_it_vm::list_rows(paths);
+    // Counted from the rows just read, rather than reading every VM again,
+    // unless the listing failed.
+    let vm_images = match &listed {
+        Ok(rows) => Ok(rows
+            .iter()
+            .filter_map(|row| Some(row.info.as_ref()?.image.clone()))
+            .collect()),
+        Err(_) => send_it_vm::vm_images(paths),
+    };
+    let (vms, vms_error) = match listed {
         Ok(vms) => (vms, None),
         Err(e) => (Vec::new(), Some(format!("{e:#}"))),
     };
-    // Counted from the rows just read, rather than reading every VM again.
-    let vm_images = vms
-        .iter()
-        .filter_map(|row| Some(row.info.as_ref()?.image.clone()));
     let (images, images_error) = match Config::load(paths)
-        .and_then(|config| send_it_vm::image_rows(paths, &config, vm_images))
+        .and_then(|config| send_it_vm::image_rows(paths, &config, vm_images?))
     {
         Ok(images) => (images, None),
         Err(e) => (Vec::new(), Some(format!("{e:#}"))),
