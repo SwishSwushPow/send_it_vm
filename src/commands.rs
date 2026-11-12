@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, IsTerminal, Write};
+use std::net::Ipv4Addr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -125,7 +126,7 @@ pub fn confirm_shares(paths: &Paths, settings: &VmSettings) -> Result<()> {
 }
 
 /// One line for each mount that `confirm_shares` asks about.
-pub fn risky_shares(paths: &Paths, settings: &VmSettings) -> Vec<String> {
+fn risky_shares(paths: &Paths, settings: &VmSettings) -> Vec<String> {
     // Resolved, like the mounts' host paths, so that a symlinked
     // ~/.config/sendit is caught through a share of its target. Each link
     // on the way counts too, directory links included: the VM could point
@@ -474,9 +475,14 @@ pub struct ImageRow {
 }
 
 /// The images sendit knows of, and those VMs were made from, which stay
-/// listed after they were deleted.
-pub fn image_rows(paths: &Paths, config: &Config) -> Result<Vec<ImageRow>> {
-    let vms = vms_per_image(paths)?;
+/// listed after they were deleted. `vm_images` has the image of each VM,
+/// e.g. from the rows of `list_rows`, which a caller may have read already.
+pub fn image_rows(
+    paths: &Paths,
+    config: &Config,
+    vm_images: impl IntoIterator<Item = ImageName>,
+) -> Result<Vec<ImageRow>> {
+    let vms = vms_per_image(vm_images);
     let images: BTreeSet<_> = provision::images(paths, config)?
         .into_iter()
         .chain(vms.keys().cloned())
@@ -497,7 +503,7 @@ pub fn image_rows(paths: &Paths, config: &Config) -> Result<Vec<ImageRow>> {
 }
 
 pub fn images(paths: &Paths, config: &Config) -> Result<()> {
-    let rows = image_rows(paths, config)?;
+    let rows = image_rows(paths, config, vm_images(paths)?)?;
     let width = column_width("IMAGE", rows.iter().map(|row| row.image.as_str()));
     println!("{:<width$}  {:<15} {:>9}  VMS", "IMAGE", "STATE", "DISK");
     for row in &rows {
@@ -541,7 +547,7 @@ pub fn delete_images(
             "the {image} image isn't provisioned"
         );
     }
-    let vms = vms_per_image(paths)?;
+    let vms = vms_per_image(vm_images(paths)?);
     eprintln!("Base images to delete:");
     for image in &images {
         let dir = if paths.image_dir(image).is_dir() {
@@ -588,15 +594,22 @@ pub fn delete_images(
     Ok(())
 }
 
-/// How many VMs were made from each image, of those that have any.
-fn vms_per_image(paths: &Paths) -> Result<BTreeMap<ImageName, usize>> {
+/// The image each VM was made from, of those whose metadata can be read.
+fn vm_images(paths: &Paths) -> Result<Vec<ImageName>> {
+    Ok(project_vm::all(paths)?
+        .iter()
+        .filter_map(|dir| Some(project_vm::metadata(dir).ok()?.image))
+        .collect())
+}
+
+/// How many VMs were made from each image, of those that have any, from
+/// the image of each VM.
+fn vms_per_image(vm_images: impl IntoIterator<Item = ImageName>) -> BTreeMap<ImageName, usize> {
     let mut vms = BTreeMap::<ImageName, usize>::new();
-    for dir in project_vm::all(paths)? {
-        if let Ok(metadata) = project_vm::metadata(&dir) {
-            *vms.entry(metadata.image).or_default() += 1;
-        }
+    for image in vm_images {
+        *vms.entry(image).or_default() += 1;
     }
-    Ok(vms)
+    vms
 }
 
 /// The space a disk file takes up. Blocks shared with other files (as
@@ -633,9 +646,8 @@ pub struct PrunePlan {
     pub outdated: Vec<PruneVm>,
     /// Other stopped VMs, for `PruneScope::All`.
     pub others: Vec<PruneVm>,
-    /// Why VMs that would be deleted are left alone, e.g. "Skipping
-    /// /path: it is still running."
-    pub skipped: Vec<String>,
+    /// VMs that would be deleted, but are left alone.
+    pub skipped: Vec<Skipped>,
 }
 
 impl PrunePlan {
@@ -653,16 +665,59 @@ impl PrunePlan {
 pub struct PruneVm {
     pub dir: VmDir,
     pub name: Option<VmName>,
-    /// Its project directory, "?" if its metadata can't be read.
-    pub project: String,
+    /// Its project directory, unless its metadata can't be read.
+    pub project: Option<PathBuf>,
 }
 
 impl PruneVm {
+    /// Its project directory, or "?" if that isn't known.
+    pub fn project_shown(&self) -> String {
+        self.project
+            .as_ref()
+            .map_or("?".to_string(), |project| project.display().to_string())
+    }
+
     /// How `prune` lists it: its name, if it has one, and its project.
     pub fn listed(&self) -> String {
         match &self.name {
-            Some(name) => format!("{name}  {}", self.project),
-            None => self.project.clone(),
+            Some(name) => format!("{name}  {}", self.project_shown()),
+            None => self.project_shown(),
+        }
+    }
+}
+
+/// A VM that `prune` leaves alone, though its scope takes it in.
+#[derive(Clone, Debug)]
+pub struct Skipped {
+    pub vm: PruneVm,
+    pub reason: SkipReason,
+}
+
+/// Why `prune` leaves a VM alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Its project is below `/Volumes/<name>`, which isn't mounted: the
+    /// project may well come back.
+    Unmounted,
+    /// Whether its project directory is there can't be told: why.
+    Inaccessible(String),
+    /// Another sendit process is using it.
+    Busy,
+    Running,
+}
+
+impl Skipped {
+    /// What `prune` says about it, e.g. "Skipping /path: it is still
+    /// running."
+    pub fn message(&self) -> String {
+        let project = self.vm.project_shown();
+        match &self.reason {
+            SkipReason::Unmounted => format!("Skipping {project}: its volume is not mounted."),
+            SkipReason::Inaccessible(e) => format!("Skipping {project}: {e}"),
+            SkipReason::Busy => {
+                format!("Skipping {project}: another sendit process is using it.")
+            }
+            SkipReason::Running => format!("Skipping {project}: it is still running."),
         }
     }
 }
@@ -670,33 +725,32 @@ impl PruneVm {
 /// The VMs `prune` deletes for `scope`, which aren't running or busy.
 pub fn prune_plan(paths: &Paths, scope: PruneScope) -> Result<PrunePlan> {
     let mut plan = PrunePlan::default();
+    let all = scope == PruneScope::All;
     for dir in project_vm::all(paths)? {
-        let all = scope == PruneScope::All;
         let (vm, group) = match project_vm::metadata(&dir) {
             Ok(metadata) => {
-                let path = &metadata.project_path;
-                let group = match project_dir(path) {
+                let project_dir = project_dir(&metadata.project_path);
+                let outdated = metadata.outdated();
+                let vm = PruneVm {
+                    dir,
+                    name: metadata.name,
+                    project: Some(metadata.project_path),
+                };
+                let group = match project_dir {
                     ProjectDir::Missing => &mut plan.orphans,
-                    _ if scope >= PruneScope::Outdated && metadata.outdated() => &mut plan.outdated,
+                    _ if scope >= PruneScope::Outdated && outdated => &mut plan.outdated,
                     _ if all => &mut plan.others,
                     ProjectDir::Present => continue,
                     ProjectDir::Unmounted => {
-                        plan.skipped.push(format!(
-                            "Skipping {}: its volume is not mounted.",
-                            path.display()
-                        ));
+                        let reason = SkipReason::Unmounted;
+                        plan.skipped.push(Skipped { vm, reason });
                         continue;
                     }
                     ProjectDir::Inaccessible(e) => {
-                        plan.skipped
-                            .push(format!("Skipping {}: {e}", path.display()));
+                        let reason = SkipReason::Inaccessible(e);
+                        plan.skipped.push(Skipped { vm, reason });
                         continue;
                     }
-                };
-                let vm = PruneVm {
-                    project: path.display().to_string(),
-                    name: metadata.name,
-                    dir,
                 };
                 (vm, group)
             }
@@ -704,28 +758,21 @@ pub fn prune_plan(paths: &Paths, scope: PruneScope) -> Result<PrunePlan> {
                 let vm = PruneVm {
                     dir,
                     name: None,
-                    project: "?".to_string(),
+                    project: None,
                 };
                 (vm, &mut plan.others)
             }
             Err(_) => continue,
         };
-        match project_vm::state(&vm.dir)? {
-            State::Stopped => {}
-            State::Busy => {
-                plan.skipped.push(format!(
-                    "Skipping {}: another sendit process is using it.",
-                    vm.project
-                ));
+        let reason = match project_vm::state(&vm.dir)? {
+            State::Stopped => {
+                group.push(vm);
                 continue;
             }
-            State::Running(_) => {
-                plan.skipped
-                    .push(format!("Skipping {}: it is still running.", vm.project));
-                continue;
-            }
-        }
-        group.push(vm);
+            State::Busy => SkipReason::Busy,
+            State::Running(_) => SkipReason::Running,
+        };
+        plan.skipped.push(Skipped { vm, reason });
     }
     Ok(plan)
 }
@@ -733,7 +780,7 @@ pub fn prune_plan(paths: &Paths, scope: PruneScope) -> Result<PrunePlan> {
 pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
     let plan = prune_plan(paths, scope)?;
     for skipped in &plan.skipped {
-        eprintln!("{skipped}");
+        eprintln!("{}", skipped.message());
     }
     if plan.vms().next().is_none() {
         eprintln!(
@@ -843,92 +890,170 @@ pub fn confirm(question: &str, no_terminal: &str) -> Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "Yes"))
 }
 
-/// The state of the project's VM for `status`, e.g. "stopped; made from
-/// an earlier build …", and while it runs, what its network rules let it
-/// connect to, which flags of `sendit run` or a later change to the config
-/// file may have made different from its settings.
-fn vm_state(
+/// What `status` tells of the project's VM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VmStatus {
+    /// Not made yet. `run` makes it as a copy of a parent project's VM,
+    /// e.g. that of a linked git worktree's main worktree, if there is one.
+    NotCreated { copies: Option<ParentVm> },
+    Made {
+        activity: Activity,
+        /// Why it is behind its image, if it is: then a reset makes it
+        /// again. Also while it runs: the config file may have changed
+        /// since it started.
+        stale: Option<Stale>,
+    },
+}
+
+/// The VM that `run` copies to make a project's VM.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentVm {
+    /// The project it belongs to.
+    pub project: PathBuf,
+    /// Made from an earlier build of the image than the latest: `run
+    /// --fresh` makes a VM from the current one instead.
+    pub behind: bool,
+}
+
+/// What a VM that was made is doing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Stopped,
+    /// Another sendit process is making, starting, copying or deleting it.
+    Busy,
+    /// With its IP address, once it has one.
+    Running {
+        ip: Option<Ipv4Addr>,
+    },
+}
+
+/// Why a VM is behind the image its project uses, so that a reset makes it
+/// again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stale {
+    /// Made from another image, named here.
+    OtherImage(ImageName),
+    /// Made from an outdated base image: it can't start until it is reset.
+    Outdated,
+    /// Made from an earlier build of the image, or sharing what one asked
+    /// for (`shares`). With `fresh_too`, a VM made again would be a copy of
+    /// a parent VM that is behind too, which `run --fresh` avoids.
+    EarlierBuild { shares: bool, fresh_too: bool },
+}
+
+/// The state of the project's VM for `status`, and while it runs, what its
+/// network rules let it connect to, which flags of `sendit run` or a later
+/// change to the config file may have made different from its settings.
+fn vm_status(
     paths: &Paths,
     project: &Project,
     image: &ImageName,
     vm_dir: &VmDir,
     metadata: Option<&Metadata>,
-) -> Result<(String, Option<String>)> {
-    let sendit = project_vm::sendit_for(vm_dir, project);
+) -> Result<(VmStatus, Option<String>)> {
     // Whether a new VM would be made from an earlier build than the latest.
     let new_vm_behind =
         || -> Result<bool> { Ok(Origin::of_new_vm(paths, project, image, false)?.behind()) };
-    let mut applied = None;
-    let state = if !vm_dir.path().exists() {
-        let parent = project_vm::parent_metadata(paths, project);
-        match parent {
-            Some(m) if m.image == *image && !m.outdated() => {
-                let copy = format!(
-                    "not created; `{sendit} run` copies the VM of {}",
-                    paths.display(&m.project_path)
-                );
-                if new_vm_behind()? {
-                    format!(
-                        "{copy}, made from an earlier build of the {image} image; \
-                         `{sendit} run --fresh` makes it from the current one"
-                    )
-                } else {
-                    copy
-                }
-            }
-            _ => "not created".to_string(),
-        }
-    } else {
-        let state = match project_vm::state(vm_dir)? {
-            State::Stopped => "stopped".to_string(),
-            State::Busy => {
-                "busy, another sendit process is making, starting, copying or deleting it"
-                    .to_string()
-            }
-            State::Running(_) => {
-                applied = network::applied(&vm_dir.meta());
-                match vm::net::vm_ip(vm_dir)? {
-                    Some(ip) => format!("running at {ip}"),
-                    None => "running".to_string(),
-                }
-            }
+    if !vm_dir.path().exists() {
+        let copies = match project_vm::parent_metadata(paths, project) {
+            Some(m) if m.image == *image && !m.outdated() => Some(ParentVm {
+                project: m.project_path,
+                behind: new_vm_behind()?,
+            }),
+            _ => None,
         };
-        // Also while it runs: the config file may have changed since.
-        match metadata {
-            Some(m) if m.image != *image => format!(
-                "{state}; made from the {} image, `{sendit} reset` recreates it from {image}",
-                m.image
-            ),
-            Some(m) if m.outdated() => {
-                format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
+        return Ok((VmStatus::NotCreated { copies }, None));
+    }
+    let mut applied = None;
+    let activity = match project_vm::state(vm_dir)? {
+        State::Stopped => Activity::Stopped,
+        State::Busy => Activity::Busy,
+        State::Running(_) => {
+            applied = network::applied(&vm_dir.meta());
+            Activity::Running {
+                ip: vm::net::vm_ip(vm_dir)?,
             }
-            Some(_) => {
-                let origin = Origin::of_vm(paths, vm_dir, image)?;
-                let shares = origin.other_shares();
-                if shares || origin.earlier_build() {
-                    // A worktree's VM made again is a copy of its parent VM,
-                    // which may be behind too.
-                    let how = if new_vm_behind()? {
-                        // Without the name, which goes with the VM.
-                        let again = project_vm::sendit_in(project);
-                        format!("`{sendit} reset` and `{again} run --fresh` recreate it")
-                    } else {
-                        format!("`{sendit} reset` recreates it")
-                    };
-                    let what = if shares {
-                        format!("shares what an earlier build of the {image} image asked for")
-                    } else {
-                        format!("made from an earlier build of the {image} image")
-                    };
-                    format!("{state}; {what}, {how} from the current one")
-                } else {
-                    state
-                }
-            }
-            None => state,
         }
     };
-    Ok((state, applied))
+    let stale = match metadata {
+        Some(m) if m.image != *image => Some(Stale::OtherImage(m.image.clone())),
+        Some(m) if m.outdated() => Some(Stale::Outdated),
+        Some(_) => {
+            let origin = Origin::of_vm(paths, vm_dir, image)?;
+            let shares = origin.other_shares();
+            if shares || origin.earlier_build() {
+                // A worktree's VM made again is a copy of its parent VM,
+                // which may be behind too.
+                Some(Stale::EarlierBuild {
+                    shares,
+                    fresh_too: new_vm_behind()?,
+                })
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    Ok((VmStatus::Made { activity, stale }, applied))
+}
+
+/// `status` in words, e.g. "stopped; made from an earlier build …", with
+/// the sendit commands that make the VM again if it is behind.
+fn describe_vm(paths: &Paths, project: &Project, report: &StatusReport) -> String {
+    let sendit = project_vm::sendit_for(&report.vm_dir, project);
+    let image = &report.image;
+    let (activity, stale) = match &report.vm {
+        VmStatus::NotCreated { copies: None } => return "not created".to_string(),
+        VmStatus::NotCreated {
+            copies: Some(parent),
+        } => {
+            let copy = format!(
+                "not created; `{sendit} run` copies the VM of {}",
+                paths.display(&parent.project)
+            );
+            return if parent.behind {
+                format!(
+                    "{copy}, made from an earlier build of the {image} image; \
+                     `{sendit} run --fresh` makes it from the current one"
+                )
+            } else {
+                copy
+            };
+        }
+        VmStatus::Made { activity, stale } => (activity, stale),
+    };
+    let state = match activity {
+        Activity::Stopped => "stopped".to_string(),
+        Activity::Busy => {
+            "busy, another sendit process is making, starting, copying or deleting it".to_string()
+        }
+        Activity::Running { ip: Some(ip) } => format!("running at {ip}"),
+        Activity::Running { ip: None } => "running".to_string(),
+    };
+    match stale {
+        None => state,
+        Some(Stale::OtherImage(made_from)) => format!(
+            "{state}; made from the {made_from} image, `{sendit} reset` recreates it from {image}"
+        ),
+        Some(Stale::Outdated) => {
+            format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
+        }
+        Some(Stale::EarlierBuild { shares, fresh_too }) => {
+            let how = if *fresh_too {
+                // Without the name, which goes with the VM.
+                let again = project_vm::sendit_in(project);
+                format!("`{sendit} reset` and `{again} run --fresh` recreate it")
+            } else {
+                format!("`{sendit} reset` recreates it")
+            };
+            let what = if *shares {
+                format!("shares what an earlier build of the {image} image asked for")
+            } else {
+                format!("made from an earlier build of the {image} image")
+            };
+            format!("{state}; {what}, {how} from the current one")
+        }
+    }
 }
 
 /// What `status` shows of a project's VM.
@@ -940,9 +1065,7 @@ pub struct StatusReport {
     pub base_state: BaseState,
     pub project: PathBuf,
     pub vm_dir: VmDir,
-    /// The VM's state in words, e.g. "running at 192.168.64.3", with what
-    /// to do about it if it is behind its image.
-    pub state: String,
+    pub vm: VmStatus,
     /// While it runs, what its network rules let it connect to.
     pub applied_network: Option<String>,
     pub name: Option<VmName>,
@@ -963,7 +1086,7 @@ pub fn status_report(
     let base_state = provision::base_state(paths, &image)?;
     let vm_dir = project_vm::dir(paths, project);
     let metadata = project_vm::metadata(&vm_dir).ok();
-    let (state, applied_network) = vm_state(paths, project, &image, &vm_dir, metadata.as_ref())?;
+    let (vm, applied_network) = vm_status(paths, project, &image, &vm_dir, metadata.as_ref())?;
     let (name, copy_of) = metadata.map_or((None, None), |m| (m.name, m.copy_of));
     Ok(StatusReport {
         image,
@@ -971,7 +1094,7 @@ pub fn status_report(
         base_state,
         project: project.root.clone(),
         vm_dir,
-        state,
+        vm,
         applied_network,
         name,
         copy_of,
@@ -991,14 +1114,15 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
     println!(
         "vm       {} ({})",
         paths.display(report.vm_dir.path()),
-        report.state
+        describe_vm(paths, project, &report)
     );
-    if let Some(name) = report.name {
+    if let Some(name) = &report.name {
         println!("name     {name}");
     }
-    if let Some(copy_of) = report.copy_of {
-        println!("copy of  the VM of {}", paths.display(&copy_of));
+    if let Some(copy_of) = &report.copy_of {
+        println!("copy of  the VM of {}", paths.display(copy_of));
     }
+    let settings = &report.settings;
     println!("cpus     {}", settings.cpus);
     println!("memory   {}", settings.memory);
     println!("disk     {} max", settings.disk_size);
@@ -1011,8 +1135,8 @@ pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result
         }
     );
     let network = settings.network.describe();
-    match report.applied_network {
-        Some(applied) if applied != network => {
+    match &report.applied_network {
+        Some(applied) if *applied != network => {
             println!("network  {applied}");
             println!("         configured: {network}, from the VM's next start");
         }
@@ -1171,11 +1295,43 @@ mod tests {
     }
 
     #[test]
+    fn tells_why_vms_are_skipped() {
+        let temp = TempDir::new("prune-skip");
+        let paths = Paths::new(temp.path().join("home"));
+        let dir = paths
+            .vms_dir()
+            .join("app_6ba7b811-9dad-11d1-80b4-00c04fd430c8");
+        fs::create_dir_all(&dir).unwrap();
+        // Of a project on a volume that isn't mounted.
+        fs::write(
+            dir.join("project.toml"),
+            format!(
+                "project_path = \"/Volumes/sendit-not-mounted/app\"\nimage = \"default\"\n\
+                 base_revision = {}\nname = \"app\"\n",
+                provision::BASE_REVISION
+            ),
+        )
+        .unwrap();
+
+        let plan = prune_plan(&paths, PruneScope::Missing).unwrap();
+        assert_eq!(plan.vms().count(), 0);
+        let [skipped] = &plan.skipped[..] else {
+            panic!("{:?}", plan.skipped);
+        };
+        assert_eq!(skipped.reason, SkipReason::Unmounted);
+        assert_eq!(skipped.vm.name.as_ref().map(VmName::as_str), Some("app"));
+        assert_eq!(
+            skipped.message(),
+            "Skipping /Volumes/sendit-not-mounted/app: its volume is not mounted."
+        );
+    }
+
+    #[test]
     fn rows_images_with_their_vms() {
         let temp = TempDir::new("image-rows");
         let paths = Paths::new(temp.path().join("home"));
         let config = Config::parse("image = \"go\"\n[images.rust]\ncpus = 2\n").unwrap();
-        let rows = image_rows(&paths, &config).unwrap();
+        let rows = image_rows(&paths, &config, vm_images(&paths).unwrap()).unwrap();
         let rows: Vec<_> = rows
             .iter()
             .map(|row| (row.image.as_str(), row.state, row.disk, row.vms))
