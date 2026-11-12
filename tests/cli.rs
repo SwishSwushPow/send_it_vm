@@ -539,8 +539,15 @@ fn sets_up_ssh_host_names() {
     assert!(said.contains("Added them."), "{said}");
     let block = fs::read_to_string(keys.join("config")).unwrap();
     assert!(block.contains("\nHost sendit-*\n"), "{block}");
+    // ssh runs the ProxyCommand with a shell, so a path with a space comes
+    // in single quotes.
+    let proxy = if SENDIT.contains(' ') {
+        format!("'{SENDIT}'")
+    } else {
+        SENDIT.to_string()
+    };
     assert!(
-        block.contains(&format!("    ProxyCommand {SENDIT} ssh-proxy %n\n")),
+        block.contains(&format!("    ProxyCommand {proxy} ssh-proxy %n\n")),
         "{block}"
     );
     let written = fs::read_to_string(&user_config).unwrap();
