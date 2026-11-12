@@ -1,6 +1,6 @@
-//! sendit's internals, as a library for a desktop app, which reads VMs,
-//! images and the config file through it. This is not a stable API: it
-//! changes with sendit, without notice.
+//! sendit's internals, as a library for sendit-ui, the desktop app in
+//! `sendit-ui/`, which reads VMs, images and the config file through it.
+//! This is not a stable API: it changes with sendit, without notice.
 //!
 //! Only what reads, plus the few helpers the app shares, is exported. The
 //! rest, e.g. running a VM or writing the ssh config, re-runs or names
