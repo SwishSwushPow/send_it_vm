@@ -330,7 +330,6 @@ pub fn reset(
 }
 
 pub fn list(paths: &Paths) -> Result<()> {
-    project_vm::name_vms(paths)?;
     let dirs = project_vm::all(paths)?;
     if dirs.is_empty() {
         eprintln!("No VMs in {}.", paths.display(&paths.vms_dir()));
@@ -527,7 +526,6 @@ pub enum PruneScope {
 }
 
 pub fn prune(paths: &Paths, scope: PruneScope, yes: bool) -> Result<()> {
-    project_vm::name_vms(paths)?;
     let mut orphans = Vec::new();
     let mut old = Vec::new();
     let mut others = Vec::new();
@@ -767,7 +765,6 @@ fn vm_state(
 }
 
 pub fn status(paths: &Paths, project: &Project, settings: &VmSettings) -> Result<()> {
-    project_vm::name_vms(paths)?;
     let image = &project_vm::image(paths, project, settings.image.as_ref());
     let base_dir = paths.image_dir(image);
     let base_state = provision::base_state(paths, image)?.describe(image);

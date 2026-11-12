@@ -28,8 +28,7 @@
 //! it from anywhere: its folder's name, or for a linked git worktree, its
 //! main worktree's VM's name and the worktree's folder name, with a number
 //! added if another VM has that name already. VMs made before sendit named
-//! them get one when a command next shows or looks up names, or makes or
-//! runs a VM. Names are given out and changed while holding a lock, so no
+//! them have none until they are renamed. Names are given out and changed while holding a lock, so no
 //! two VMs get the same.
 //!
 //! This module has the VMs' metadata; the submodules tell which image build
@@ -58,13 +57,13 @@ use crate::worktree;
 
 pub use create::{NewVm, create, delete, new_vm};
 pub use lock::{BUSY, State, state};
-pub use naming::{find, name_vms, rename};
+pub use naming::{find, rename};
 pub use origin::Origin;
 pub use run::{Detach, background_project, lock_to_run, run, stop};
 pub use ssh::{login, proxy, quote, ssh};
 
 /// Written into a project VM's directory when it is created, and again
-/// when it gets a name later or is renamed.
+/// when it is renamed.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub project_path: PathBuf,
@@ -74,7 +73,7 @@ pub struct Metadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_of: Option<PathBuf>,
     /// The name `-n` finds the VM by. Missing only for VMs made before
-    /// sendit named them, until `name_vms` gives them one.
+    /// sendit named them, until they are renamed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<VmName>,
 }

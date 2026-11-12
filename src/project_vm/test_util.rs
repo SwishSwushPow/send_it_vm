@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use super::create::{Ask, create, plan};
 use super::{Metadata, Origin, State, dir, state};
-use crate::paths::{ImageName, Paths, Project};
+use crate::paths::{ImageName, Paths, Project, VmName};
 use crate::provision;
 use crate::vm::VmDir;
 use crate::worktree;
@@ -34,8 +34,11 @@ pub(super) fn subdirectory_with_parent(temp: &Path, paths: &Paths, sub: &str) ->
         image: "rust".parse().unwrap(),
         base_revision: provision::BASE_REVISION,
         copy_of: None,
-        // As made before sendit named VMs.
-        name: None,
+        // Named after its folder, as sendit names a new VM.
+        name: main
+            .root
+            .file_name()
+            .and_then(|name| VmName::from_text(&name.to_string_lossy())),
     };
     fs::write(parent.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
     fs::write(parent.disk(), "disk").unwrap();

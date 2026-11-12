@@ -27,7 +27,6 @@ fn project_of(dir: &VmDir, metadata: &Metadata) -> Project {
 
 /// The project whose VM is named `name`.
 pub fn find(paths: &Paths, name: &VmName) -> Result<Project> {
-    name_vms(paths)?;
     for dir in all(paths)? {
         if let Ok(metadata) = metadata(&dir)
             && metadata.name.as_ref() == Some(name)
@@ -71,56 +70,8 @@ pub fn rename(paths: &Paths, project: &Project, name: &VmName) -> Result<()> {
     Ok(())
 }
 
-/// Gives each VM without a name, made before sendit named VMs, the name it
-/// would get if it were made now. Commands that show or look up names call
-/// this first.
-pub fn name_vms(paths: &Paths) -> Result<()> {
-    // Without taking the lock, which would leave its file behind, unless
-    // there is a VM to name.
-    let unnamed = all(paths)?
-        .iter()
-        .any(|dir| metadata(dir).is_ok_and(|metadata| metadata.name.is_none()));
-    if !unnamed {
-        return Ok(());
-    }
-    let _names = lock_names(paths)?;
-    name_unnamed(paths).map(drop)
-}
-
-/// What `name_vms` does, for a caller that holds the names lock. Returns
-/// the names the VMs have then. A VM whose metadata can't be written stays
-/// without a name, with a warning: that doesn't stop the command.
-pub(super) fn name_unnamed(paths: &Paths) -> Result<BTreeSet<VmName>> {
-    let mut unnamed = Vec::new();
-    for dir in all(paths)? {
-        if let Ok(metadata) = metadata(&dir)
-            && metadata.name.is_none()
-        {
-            unnamed.push((dir, metadata));
-        }
-    }
-    let mut taken = names(paths)?;
-    // Main worktrees first: the names of linked worktrees' VMs start with
-    // theirs. The sort is stable, so the order is otherwise that of `all`.
-    unnamed.sort_by_key(|(_, metadata)| worktree::main_worktree(&metadata.project_path).is_some());
-    for (dir, mut metadata) in unnamed {
-        let name = unique_name(wanted_name(paths, &project_of(&dir, &metadata)), &taken);
-        metadata.name = Some(name.clone());
-        match write_metadata(&dir, &metadata) {
-            Ok(()) => {
-                taken.insert(name);
-            }
-            Err(error) => eprintln!(
-                "warning: could not name the VM in {}: {error:#}",
-                paths.display(dir.path())
-            ),
-        }
-    }
-    Ok(taken)
-}
-
 /// The names the VMs have.
-fn names(paths: &Paths) -> Result<BTreeSet<VmName>> {
+pub(super) fn names(paths: &Paths) -> Result<BTreeSet<VmName>> {
     Ok(all(paths)?
         .iter()
         .filter_map(|dir| metadata(dir).ok()?.name)
@@ -187,7 +138,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn names_vms_and_finds_them_by_name() {
+    fn finds_vms_by_name_and_renames_them() {
         let temp = crate::util::TempDir::new("vm-names");
         let paths = Paths::new(temp.path().join("home"));
         let project = |path: &str| {
@@ -197,27 +148,15 @@ mod tests {
             (dir(&paths, &project), project)
         };
         let (a, app) = project("a/My App");
-        let (b, other_app) = project("b/my_app");
+        let (_, other_app) = project("b/my_app");
         let (c, named) = project("c/web");
         let (_, none) = project("d/none");
-        write_vm(&a, &app.root, None);
-        write_vm(&b, &other_app.root, None);
+        write_vm(&a, &app.root, Some("my-app-2"));
+        write_vm(&dir(&paths, &other_app), &other_app.root, Some("my-app-3"));
         write_vm(&c, &named.root, Some("my-app"));
         let name = |vm: &VmDir| metadata(vm).unwrap().name.unwrap().to_string();
 
-        // The names taken already stay; those made from the folder names
-        // get numbers, in the order of the VMs' directories.
-        name_vms(&paths).unwrap();
-        let (first, second) = if a.path() < b.path() {
-            (&a, &b)
-        } else {
-            (&b, &a)
-        };
-        assert_eq!(name(first), "my-app-2");
-        assert_eq!(name(second), "my-app-3");
-        assert_eq!(name(&c), "my-app");
-
-        let found = find(&paths, &name(&a).parse().unwrap()).unwrap();
+        let found = find(&paths, &"my-app-2".parse().unwrap()).unwrap();
         assert_eq!((found.root, found.id), (app.root.clone(), app.id.clone()));
         let error = find(&paths, &"web".parse().unwrap()).unwrap_err();
         assert_eq!(
@@ -226,7 +165,10 @@ mod tests {
         );
         // Also once the project directory is gone.
         fs::remove_dir(&app.root).unwrap();
-        assert_eq!(find(&paths, &name(&a).parse().unwrap()).unwrap().id, app.id);
+        assert_eq!(
+            find(&paths, &"my-app-2".parse().unwrap()).unwrap().id,
+            app.id
+        );
 
         let web: VmName = "web".parse().unwrap();
         rename(&paths, &named, &web).unwrap();
@@ -249,38 +191,13 @@ mod tests {
     }
 
     #[test]
-    fn takes_the_names_lock_only_to_name_vms() {
-        let temp = crate::util::TempDir::new("vm-names-lock");
-        let paths = Paths::new(temp.path().join("home"));
-        let project = Project::at(temp.path()).unwrap();
-        write_vm(&dir(&paths, &project), temp.path(), Some("app"));
-        name_vms(&paths).unwrap();
-        assert!(!paths.names_lock().exists());
-    }
-
-    #[test]
-    fn names_what_it_can() {
-        use std::os::unix::fs::PermissionsExt;
-        // Root writes into a read-only directory all the same.
-        // SAFETY: plain syscall.
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-        let temp = crate::util::TempDir::new("vm-names-read-only");
+    fn renaming_names_a_vm_without_a_name() {
+        let temp = crate::util::TempDir::new("vm-names-unnamed");
         let paths = Paths::new(temp.path().join("home"));
         let project = Project::at(temp.path()).unwrap();
         let vm = dir(&paths, &project);
+        // As made before sendit named VMs.
         write_vm(&vm, temp.path(), None);
-        let mode = |mode| fs::set_permissions(vm.path(), fs::Permissions::from_mode(mode));
-
-        // A VM whose metadata can't be written stays without a name, with
-        // a warning, and the command carries on.
-        mode(0o555).unwrap();
-        let named = name_vms(&paths);
-        mode(0o755).unwrap();
-        named.unwrap();
-        assert_eq!(metadata(&vm).unwrap().name, None);
-        // Renaming it gives it a name.
         let app: VmName = "app".parse().unwrap();
         rename(&paths, &project, &app).unwrap();
         assert_eq!(metadata(&vm).unwrap().name, Some(app));
@@ -291,24 +208,14 @@ mod tests {
         let temp = crate::util::TempDir::new("vm-names-worktrees");
         let paths = Paths::new(temp.path().join("home"));
         let (wt, parent) = subdirectory_with_parent(temp.path(), &paths, "apps/web");
-        let vm = dir(&paths, &wt);
-        write_vm(&vm, &wt.root, None);
-        let name = |vm: &VmDir| metadata(vm).unwrap().name.unwrap().to_string();
-
-        name_vms(&paths).unwrap();
-        assert_eq!(name(&parent), "web");
-        assert_eq!(name(&vm), "web-wt");
+        assert_eq!(wanted_name(&paths, &wt).as_str(), "web-wt");
 
         // After the name of the main worktree's VM, not its folder.
-        fs::remove_file(vm.metadata()).unwrap();
-        write_vm(&vm, &wt.root, None);
-        rename(
-            &paths,
-            &project_of(&parent, &metadata(&parent).unwrap()),
-            &"site".parse().unwrap(),
-        )
-        .unwrap();
-        name_vms(&paths).unwrap();
-        assert_eq!(name(&vm), "site-wt");
+        let parent_project = project_of(&parent, &metadata(&parent).unwrap());
+        rename(&paths, &parent_project, &"site".parse().unwrap()).unwrap();
+        assert_eq!(wanted_name(&paths, &wt).as_str(), "site-wt");
+        // Without a VM there, after the folder.
+        fs::remove_dir_all(parent.path()).unwrap();
+        assert_eq!(wanted_name(&paths, &wt).as_str(), "web-wt");
     }
 }

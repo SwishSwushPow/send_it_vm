@@ -6,7 +6,7 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 
 use super::lock::{Lock, try_lock};
-use super::naming::{lock_names, name_unnamed, name_vms, unique_name, wanted_name};
+use super::naming::{lock_names, names, unique_name, wanted_name};
 use super::{Metadata, dir, metadata, parent, sendit_for, sendit_in};
 use crate::commands;
 use crate::paths::{ImageName, Paths, Project};
@@ -50,8 +50,7 @@ impl NewVm {
 }
 
 /// What the project's VM is to be made from, of `image`, unless it exists:
-/// `None` then, and it gets a name if it has none; a `fresh` one fails if
-/// it is a copy of its parent VM. A `fresh` VM is made
+/// `None` then; a `fresh` one fails if it is a copy of its parent VM. A `fresh` VM is made
 /// from the base image even for a git worktree, whose VM is otherwise a
 /// copy of its parent VM; while that runs, only if the user agrees when
 /// asked with `ask`.
@@ -64,10 +63,6 @@ pub fn new_vm(
 ) -> Result<Option<NewVm>> {
     let dir = dir(paths, project);
     if dir.path().exists() {
-        // Made before sendit named VMs: `-n` finds it from now on.
-        if metadata(&dir).is_ok_and(|metadata| metadata.name.is_none()) {
-            name_vms(paths)?;
-        }
         if fresh
             && let Ok(metadata) = metadata(&dir)
             && let Some(copy_of) = &metadata.copy_of
@@ -272,9 +267,7 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
         }
         // Until the VM is in place, where the next one made finds its name.
         let _names = lock_names(paths)?;
-        // Older VMs first, so that the new one doesn't take the name one of
-        // them would get.
-        let taken = name_unnamed(paths)?;
+        let taken = names(paths)?;
         let metadata = toml::to_string(&Metadata {
             project_path: project.root.clone(),
             image: image.clone(),
@@ -339,12 +332,8 @@ mod tests {
         assert_eq!(metadata.image, rust);
         assert_eq!(metadata.copy_of.as_ref(), Some(&parent_project));
         assert!(!vm.machine_id().exists() && !vm.mac().exists());
-        // Named after the parent, which got its name first.
+        // Named after the parent.
         assert_eq!(metadata.name, Some("main-wt".parse().unwrap()));
-        assert_eq!(
-            self::metadata(&parent).unwrap().name,
-            Some("main".parse().unwrap())
-        );
         // The parent can start again.
         assert_eq!(state_once_released(&parent), State::Stopped);
     }
@@ -398,19 +387,18 @@ mod tests {
     }
 
     #[test]
-    fn leaves_an_existing_vm_alone_and_names_it() {
+    fn leaves_an_existing_vm_alone() {
         let temp = crate::util::TempDir::new("vm-existing");
         let paths = Paths::new(temp.path().join("home"));
         let project = Project::at(temp.path()).unwrap();
         let vm = dir(&paths, &project);
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
-        write_vm(&vm, temp.path(), None);
+        write_vm(&vm, temp.path(), Some("app"));
         assert!(
             new_vm(&paths, &project, &ImageName::default(), false, &never)
                 .unwrap()
                 .is_none()
         );
-        assert!(metadata(&vm).unwrap().name.is_some());
     }
 
     #[test]

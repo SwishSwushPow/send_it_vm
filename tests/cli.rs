@@ -1,6 +1,6 @@
 //! Tests that drive the sendit binary without booting VMs, so they run in
-//! CI: what it says in a home without images or VMs, how it lists, names
-//! and finds them (made up for the test), how it reports bad configuration,
+//! CI: what it says in a home without images or VMs, how it lists and
+//! finds them (made up for the test), how it reports bad configuration,
 //! which shares it refuses, and how it signs itself.
 //!
 //! Each test gets a scratch home and project directory of its own in
@@ -189,7 +189,8 @@ fn tells_when_the_vm_is_from_an_earlier_build() {
     fs::write(
         vm.join("project.toml"),
         format!(
-            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n",
+            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n\
+             name = \"project\"\n",
             env.project.display()
         ),
     )
@@ -318,7 +319,8 @@ fn lists_vms_and_images() {
             fs::write(
                 dir.join("project.toml"),
                 format!(
-                    "project_path = \"{}\"\nimage = \"{image}\"\nbase_revision = {revision}\n",
+                    "project_path = \"{}\"\nimage = \"{image}\"\nbase_revision = {revision}\n\
+                     name = \"{name}\"\n",
                     project.display()
                 ),
             )
@@ -335,8 +337,6 @@ fn lists_vms_and_images() {
     vm("old", "c3", Some((&env.project, "default", 0)));
     vm("broken", "c4", None);
 
-    // Each gets a name when they are first listed: that of its project's
-    // folder, numbered if taken, in the order of their directories.
     let (list, _) = env.ok(&["list"]);
     let project = env.project.display().to_string();
     let gone = gone.display().to_string();
@@ -350,7 +350,7 @@ fn lists_vms_and_images() {
         rows,
         [
             vec!["NAME", "STATE", "DISK", "IMAGE", "PROJECT"],
-            vec!["project", "stopped", "0", "B", "rust", "<project>"],
+            vec!["app", "stopped", "0", "B", "rust", "<project>"],
             vec![
                 "?",
                 "stopped",
@@ -371,7 +371,7 @@ fn lists_vms_and_images() {
                 "<gone>",
                 "(missing)"
             ],
-            vec!["project-2", "outdated", "0", "B", "default", "<project>"],
+            vec!["old", "outdated", "0", "B", "default", "<project>"],
         ],
         "{list}"
     );
@@ -442,17 +442,16 @@ fn finds_vms_by_name() {
         .map(|vm| env.home.join(vm))
         .unwrap();
     fs::create_dir_all(&vm).unwrap();
-    // As made before sendit named VMs.
     fs::write(
         vm.join("project.toml"),
         format!(
-            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n",
+            "project_path = \"{}\"\nimage = \"default\"\nbase_revision = 999\n\
+             name = \"project\"\n",
             env.project_path()
         ),
     )
     .unwrap();
 
-    // Looking it up names it.
     let (status, _) = ok(&["-n", "project", "status"]);
     let lines: Vec<_> = status.lines().collect();
     assert_eq!(lines[1], format!("project  {}", env.project_path()));
@@ -461,11 +460,6 @@ fn finds_vms_by_name() {
         "{status}"
     );
     assert_eq!(lines[3], "name     project");
-    assert!(
-        fs::read_to_string(vm.join("project.toml"))
-            .unwrap()
-            .contains("name = \"project\""),
-    );
     assert_eq!(ok(&["stop", "-n", "project"]).1, "The VM is not running.\n");
     assert_fails_with(
         &sendit(&["-n", "nope", "stop"]),
