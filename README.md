@@ -164,7 +164,7 @@ These take the same form as `--mount`, with host paths absolute or starting with
 | [`rex.sh`](provision-scripts/rex.sh) | Installs Rex and runs a Rex server as the VM's user from boot, which Rex for Mac reaches over SSH with [`sendit ssh-config`](#usage) |
 | [`rex-tailscale.sh`](provision-scripts/rex-tailscale.sh) | Rex as `rex.sh` sets it up, and also served over HTTPS through Tailscale Serve, so Rex on your other devices, e.g. Rex for iOS, can reach the VM; calls `rex.sh` and `tailscale.sh` |
 
-[`images/example.sh`](images/example.sh) calls most of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
+[`images/example.sh`](images/example.sh) calls some of them. Copy what you want to `~/.config/sendit/provision-scripts/` and `~/.config/sendit/images/`.
 
 ### Git worktrees
 
@@ -188,12 +188,12 @@ The VM is a boundary, but not one that makes it safe to run anything in it and t
 Nothing is written into project directories.
 
 - `~/.cache/sendit/`: Debian downloads, the base images (in `images/`), and SSH keys and the Host block of `sendit ssh-config` (in `ssh/`)
-- `~/.sendit/<project>_<uuid>/`: one directory per project VM, and next to it, its lock, `.<project>_<uuid>.lock`, which sendit keeps when it deletes the VM
+- `~/.sendit/<project>_<uuid>/`: one directory per project VM, and next to it, its lock, `.<project>_<uuid>.lock`, which sendit keeps when it deletes the VM. While one sendit process makes, starts, copies or deletes the VM, the others see it as busy, as `sendit list` and `sendit status` show.
 - `~/.config/sendit/`: configuration, image files (in `images/`) and the provisioning scripts they call (in `provision-scripts/`)
 
 sendit excludes `~/.cache/sendit/` and the VM folder (`~/.sendit` or `$SENDIT_VM_DIR`) from Time Machine backups: they hold only what sendit can make again, and a VM's disk changes on every run. Keep anything you can't lose in the project directory. It also makes both accessible only to you, since base images, VM disks and the files of a build hold whatever the provisioning scripts put there, secrets included.
 
-To keep the VMs elsewhere, e.g. on an external drive, set `SENDIT_VM_DIR` to a folder that is only for sendit. sendit uses it in place of `~/.sendit` and always excludes it from Time Machine backups as a whole, so it should hold nothing but sendit's VMs: anything else in it isn't backed up, and sendit warns about it on every command. sendit creates the folder if it doesn't exist, but not the folders it is in, so a drive that isn't connected is an error, not VMs made on your Mac. It can't be the root of a volume, your home folder or a folder containing it, and it can't overlap `~/.cache/sendit` or `~/.config/sendit`. Things to know about other drives:
+To keep the VMs elsewhere, e.g. on an external drive, set `SENDIT_VM_DIR` to a folder that is only for sendit. sendit uses it in place of `~/.sendit` and always excludes it from Time Machine backups as a whole, so it should hold nothing but sendit's VMs: anything else in it isn't backed up, and sendit warns about it on every command. sendit creates the folder if it doesn't exist, but not the folders it is in, and refuses a folder under `/Volumes` whose drive isn't mounted, so a drive that isn't connected is an error, not VMs made on your Mac. It can't be the root of a volume, your home folder or a folder containing it, and it can't overlap `~/.cache/sendit` or `~/.config/sendit`. Things to know about other drives:
 
 - A VM's disk is a copy of the base image instead of an instant clone, so each VM takes the base image's space on top of its own changes.
 - Format the drive as APFS: HFS+ and exFAT have no sparse files, so every VM takes its full disk size, 64 GiB by default.
