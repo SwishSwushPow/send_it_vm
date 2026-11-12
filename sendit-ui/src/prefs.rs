@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use gpui_kit::WindowAppearance;
+use gpui_kit::component::ThemeMode;
 use serde::{Deserialize, Serialize};
 
 use crate::launch::{Editor, Terminal};
@@ -11,6 +13,7 @@ use crate::launch::{Editor, Terminal};
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Prefs {
+    pub appearance: Appearance,
     pub terminal: Terminal,
     /// For `Terminal::Custom`, with `{}` for the script to run.
     pub terminal_command: String,
@@ -24,6 +27,38 @@ pub struct Prefs {
     /// app started from Finder doesn't see what the shell's profile sets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vm_dir: Option<PathBuf>,
+}
+
+/// Whether the app is light or dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Appearance {
+    /// As macOS is set, also when that changes.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// What to set the app's windows to: `None` follows the system.
+    pub fn window_appearance(self) -> Option<WindowAppearance> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(WindowAppearance::Light),
+            Self::Dark => Some(WindowAppearance::Dark),
+        }
+    }
+
+    /// The theme for a window that looks like `window`, i.e. the system's
+    /// appearance unless this one overrides it.
+    pub fn theme_mode(self, window: WindowAppearance) -> ThemeMode {
+        match self {
+            Self::System => window.into(),
+            Self::Light => ThemeMode::Light,
+            Self::Dark => ThemeMode::Dark,
+        }
+    }
 }
 
 impl Prefs {
@@ -59,6 +94,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let prefs = Prefs {
+            appearance: Appearance::Dark,
             terminal: Terminal::Custom,
             terminal_command: "wezterm start -- {}".into(),
             editor: Editor::TextApp,
@@ -68,7 +104,26 @@ mod tests {
         };
         let text = toml::to_string(&prefs).unwrap();
         assert!(text.contains("terminal = \"custom\""), "{text}");
+        assert!(text.contains("appearance = \"dark\""), "{text}");
         assert_eq!(toml::from_str::<Prefs>(&text).unwrap(), prefs);
         assert_eq!(toml::from_str::<Prefs>("").unwrap(), Prefs::default());
+    }
+
+    #[test]
+    fn appearance_follows_the_system_unless_set() {
+        use WindowAppearance::*;
+        for (window, mode) in [
+            (Light, ThemeMode::Light),
+            (VibrantLight, ThemeMode::Light),
+            (Dark, ThemeMode::Dark),
+            (VibrantDark, ThemeMode::Dark),
+        ] {
+            assert_eq!(Appearance::System.theme_mode(window), mode);
+            assert_eq!(Appearance::Light.theme_mode(window), ThemeMode::Light);
+            assert_eq!(Appearance::Dark.theme_mode(window), ThemeMode::Dark);
+        }
+        assert_eq!(Appearance::System.window_appearance(), None);
+        assert_eq!(Appearance::Dark.window_appearance(), Some(Dark));
+        assert_eq!(Appearance::Light.window_appearance(), Some(Light));
     }
 }

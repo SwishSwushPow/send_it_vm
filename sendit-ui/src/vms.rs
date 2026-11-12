@@ -137,7 +137,7 @@ impl SenditApp {
                                     name.as_ref().map_or("?".to_string(), VmName::to_string),
                                 ),
                             )
-                            .child(ui::vm_state_tag(vm.state)),
+                            .child(ui::vm_state_tag(vm.state, cx)),
                     )
                     .child(
                         div()
@@ -473,7 +473,7 @@ impl SenditApp {
                     .gap_3()
                     .items_center()
                     .child(div().text_lg().font_semibold().child(n.clone()))
-                    .child(ui::vm_state_tag(row.state)),
+                    .child(ui::vm_state_tag(row.state, cx)),
             )
             .when_some(blocked.filter(|_| !running), |this, why| {
                 this.child(ui::banner(why, false, cx))
@@ -999,7 +999,7 @@ fn status_rows(report: &StatusReport, show: &dyn Fn(&std::path::Path) -> String,
                 .gap_2()
                 .flex_wrap()
                 .child(image.to_string())
-                .child(ui::base_state_tag(report.base_state))
+                .child(ui::base_state_tag(report.base_state, cx))
                 .child(
                     div()
                         .text_color(cx.theme().muted_foreground)

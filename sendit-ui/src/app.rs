@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme, Theme, WindowExt};
 use gpui_kit::*;
 use send_it_vm::{Paths, VmName};
 use send_it_vm::{PrunePlan, PruneScope, StatusReport};
@@ -14,7 +14,7 @@ use send_it_vm::{PrunePlan, PruneScope, StatusReport};
 use crate::config_edit::{ConfigFile, Section};
 use crate::launch::{self, Launch};
 use crate::ops::{self, FollowUp, OpState, SharedOp};
-use crate::prefs::Prefs;
+use crate::prefs::{Appearance, Prefs};
 use crate::runopts::{self, RunOptions, Target};
 use crate::snapshot::{self, Snapshot};
 
@@ -141,6 +141,7 @@ pub struct SenditApp {
     /// The folder of the operations' logs.
     logs: Result<PathBuf, String>,
     _refresh: Task<()>,
+    _appearance: Subscription,
 }
 
 fn input(
@@ -174,6 +175,21 @@ fn paths_for(prefs: &Prefs) -> Result<Paths, String> {
         None => Paths::from_env(),
     };
     paths.map_err(|e| format!("{e:#}"))
+}
+
+/// Sets the app to `appearance`: its windows' frames, menus and system
+/// dialogs, and the theme it draws with.
+pub fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    cx.set_window_appearance(appearance.window_appearance());
+    sync_theme(appearance, window, cx);
+}
+
+/// Draws with the theme for `appearance`, given how macOS shows the window.
+fn sync_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    let mode = appearance.theme_mode(window.appearance());
+    if cx.theme().mode != mode {
+        Theme::change(mode, Some(window), cx);
+    }
 }
 
 impl SenditApp {
@@ -236,6 +252,13 @@ impl SenditApp {
         ] {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
+
+        apply_appearance(prefs.appearance, window, cx);
+        // When macOS switches between light and dark, or the app's own
+        // appearance is changed, which changes the window's too.
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            sync_theme(this.prefs.appearance, window, cx);
+        });
 
         let refresh = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -316,6 +339,7 @@ impl SenditApp {
             prefs_error,
             logs: ops::log_dir().map_err(|e| format!("{e:#}")),
             _refresh: refresh,
+            _appearance: appearance,
         };
         app.load_sendit_version(cx);
         if let Ok(logs) = &app.logs {
@@ -798,6 +822,29 @@ impl SenditApp {
             });
         })
         .detach();
+    }
+
+    /// Switches to `appearance` and saves it at once, apart from the rest of
+    /// the preferences' draft, as a Mac app's settings take effect.
+    pub fn set_appearance(
+        &mut self,
+        appearance: Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prefs_draft.appearance = appearance;
+        if self.prefs.appearance == appearance {
+            cx.notify();
+            return;
+        }
+        let mut prefs = self.prefs.clone();
+        prefs.appearance = appearance;
+        if let Err(e) = prefs.save() {
+            self.prefs_error = Some(format!("{e:#}"));
+        }
+        self.prefs = prefs;
+        apply_appearance(appearance, window, cx);
+        cx.notify();
     }
 
     /// Applies the preferences' draft, and saves it.

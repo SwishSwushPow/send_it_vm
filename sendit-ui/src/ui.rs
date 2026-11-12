@@ -3,7 +3,9 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme, IconName, Selectable, Sizable, StyledExt, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, ColorName, IconName, Selectable, Sizable, StyledExt, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use send_it_vm::BaseState;
@@ -123,24 +125,57 @@ pub fn banner(message: impl Into<SharedString>, danger: bool, cx: &App) -> Div {
         .child(div().flex_1().min_w_0().child(message.into()))
 }
 
-pub fn vm_state_tag(state: VmState) -> Tag {
-    let tag = match state {
-        VmState::Running => Tag::success(),
-        VmState::Busy => Tag::info(),
-        VmState::Outdated => Tag::warning(),
-        VmState::Stopped => Tag::secondary(),
-    };
-    tag.small().child(state.as_str())
+/// What a tag says about the state it shows, which sets its color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Good,
+    Busy,
+    Warning,
+    Bad,
+    Neutral,
 }
 
-pub fn base_state_tag(state: BaseState) -> Tag {
-    let (tag, text) = match state {
-        BaseState::Missing => (Tag::secondary(), "not provisioned"),
-        BaseState::Outdated => (Tag::danger(), "outdated"),
-        BaseState::ScriptsChanged => (Tag::warning(), "scripts changed"),
-        BaseState::Current => (Tag::success(), "provisioned"),
+/// A small tag with `text`, colored for `tone`. Solid in the light theme;
+/// tinted in the dark one, whose solid tags put dark text on a light color.
+pub fn tag(tone: Tone, text: impl Into<SharedString>, cx: &App) -> Tag {
+    let tag = if cx.theme().is_dark() {
+        match tone {
+            Tone::Good => Tag::color(ColorName::Green),
+            Tone::Busy => Tag::color(ColorName::Cyan),
+            Tone::Warning => Tag::color(ColorName::Yellow),
+            Tone::Bad => Tag::color(ColorName::Red),
+            Tone::Neutral => Tag::color(ColorName::Neutral),
+        }
+    } else {
+        match tone {
+            Tone::Good => Tag::success(),
+            Tone::Busy => Tag::info(),
+            Tone::Warning => Tag::warning(),
+            Tone::Bad => Tag::danger(),
+            Tone::Neutral => Tag::secondary(),
+        }
     };
-    tag.small().child(text)
+    tag.small().child(text.into())
+}
+
+pub fn vm_state_tag(state: VmState, cx: &App) -> Tag {
+    let tone = match state {
+        VmState::Running => Tone::Good,
+        VmState::Busy => Tone::Busy,
+        VmState::Outdated => Tone::Warning,
+        VmState::Stopped => Tone::Neutral,
+    };
+    tag(tone, state.as_str(), cx)
+}
+
+pub fn base_state_tag(state: BaseState, cx: &App) -> Tag {
+    let (tone, text) = match state {
+        BaseState::Missing => (Tone::Neutral, "not provisioned"),
+        BaseState::Outdated => (Tone::Bad, "outdated"),
+        BaseState::ScriptsChanged => (Tone::Warning, "scripts changed"),
+        BaseState::Current => (Tone::Good, "provisioned"),
+    };
+    tag(tone, text, cx)
 }
 
 /// One of a set of buttons that picks one option.

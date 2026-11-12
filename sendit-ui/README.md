@@ -25,6 +25,7 @@ It looks for `sendit` next to itself, in `~/.cargo/bin`, on `PATH` and in Homebr
 - **Configuration**: a form over `~/.config/sendit/config.toml`. It covers the settings for all projects, per image and per project. It changes only what you change, so comments and layout stay, and checks the file the way sendit reads it before saving. A config file that is a link, e.g. into a dotfiles repository, stays one.
 - **Maintenance**: clean up VMs as `sendit prune` does, with a preview; set up SSH host names (`sendit ssh-config`); see where sendit keeps things.
 - **Activity**: the sendit commands the app ran, with their output and log file, and Cancel for those that run.
+- **Preferences**: light or dark, or as macOS is set (the default), which the app follows when macOS switches; the terminal app and editor to open things in; where sendit and the VM folder are.
 
 ## How it works
 
@@ -40,4 +41,4 @@ sendit's output goes to a log file per operation, in `~/Library/Caches/sendit-ui
 SENDIT_UI_SCREENSHOT=/tmp/vms.png SENDIT_UI_SELECT=my-app cargo run --features screenshot
 ```
 
-It saves the window after a few seconds and quits. `SENDIT_UI_PAGE` picks the page (`images`, `config`, `maintenance`, `activity`, `preferences`), `SENDIT_UI_PANEL` a VM's panel (`start`, `worktree`, `command`, `rename`), `SENDIT_UI_ACTION` does what a button does (`build:IMAGE`, `start-dir:DIR`, `stop:NAME`), and `SENDIT_UI_WAIT` sets the seconds to wait before saving.
+It saves the window after a few seconds and quits. `SENDIT_UI_PAGE` picks the page (`images`, `config`, `maintenance`, `activity`, `preferences`), `SENDIT_UI_PANEL` a VM's panel (`start`, `worktree`, `command`, `rename`), `SENDIT_UI_ACTION` does what a button does (`build:IMAGE`, `start-dir:DIR`, `stop:NAME`), `SENDIT_UI_APPEARANCE` shows it `light` or `dark` without saving that, and `SENDIT_UI_WAIT` sets the seconds to wait before saving.

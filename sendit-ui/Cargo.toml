@@ -30,5 +30,5 @@ image = { version = "0.25.1", optional = true, default-features = false, feature
 # For development: with SENDIT_UI_SCREENSHOT=file.png set, saves the window
 # as an image after a few seconds and quits. SENDIT_UI_PAGE picks the page
 # (vms, images, config, maintenance, activity, preferences), SENDIT_UI_SELECT
-# a VM by name.
+# a VM by name, SENDIT_UI_APPEARANCE light or dark.
 screenshot = ["dep:gpui-pre", "dep:gpui-pre-macos", "dep:image"]

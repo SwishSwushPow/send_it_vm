@@ -184,7 +184,7 @@ impl SenditApp {
                         h_flex()
                             .gap_2()
                             .child(div().font_medium().child(id.clone()))
-                            .child(ui::base_state_tag(row.state)),
+                            .child(ui::base_state_tag(row.state, cx)),
                     )
                     .child(
                         div().text_xs().text_color(cx.theme().muted_foreground).child(format!(

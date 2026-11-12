@@ -24,6 +24,18 @@ pub fn schedule(window: AnyWindowHandle, view: Entity<SenditApp>, cx: &mut App) 
                     _ => Page::Vms,
                 };
                 app.set_page(page, window, cx);
+                // Applied as the preference would be, but not saved.
+                if let Ok(name) = std::env::var("SENDIT_UI_APPEARANCE") {
+                    use crate::prefs::Appearance;
+                    let appearance = match name.as_str() {
+                        "light" => Appearance::Light,
+                        "dark" => Appearance::Dark,
+                        _ => Appearance::System,
+                    };
+                    app.prefs.appearance = appearance;
+                    app.prefs_draft.appearance = appearance;
+                    crate::app::apply_appearance(appearance, window, cx);
+                }
                 if let Some(name) = std::env::var("SENDIT_UI_SELECT")
                     .ok()
                     .and_then(|n| n.parse().ok())

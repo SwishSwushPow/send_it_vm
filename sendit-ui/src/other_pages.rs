@@ -13,7 +13,8 @@ use send_it_vm::{PruneScope, PruneVm};
 use crate::app::SenditApp;
 use crate::launch::{Editor, Terminal};
 use crate::ops::{FollowUp, OpState};
-use crate::ui::{self, card, choice, field, header, mono, row, section};
+use crate::prefs::Appearance;
+use crate::ui::{self, Tone, card, choice, field, header, mono, row, section};
 
 impl SenditApp {
     pub fn render_maintenance(
@@ -191,9 +192,9 @@ impl SenditApp {
                     h_flex()
                         .gap_3()
                         .child(if set_up {
-                            gpui_kit::component::tag::Tag::success().small().child("set up")
+                            ui::tag(Tone::Good, "set up", cx)
                         } else {
-                            gpui_kit::component::tag::Tag::secondary().small().child("not set up")
+                            ui::tag(Tone::Neutral, "not set up", cx)
                         })
                         .child(
                             Button::new("ssh-config")
@@ -332,7 +333,7 @@ impl SenditApp {
                                     .truncate()
                                     .child(op.title.clone()),
                             )
-                            .child(state_tag(op.state)),
+                            .child(state_tag(op.state, cx)),
                     )
                     .child(
                         div()
@@ -457,6 +458,7 @@ impl SenditApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let draft = &self.prefs_draft;
+        let appearance = draft.appearance;
         let terminal = draft.terminal;
         let editor = draft.editor;
         let actions = Button::new("prefs-save")
@@ -472,6 +474,27 @@ impl SenditApp {
             .overflow_y_scrollbar()
             .child(header("Preferences", Some("This app's own settings, apart from sendit's configuration.".into()), actions, cx))
             .when_some(self.prefs_error.clone(), |this, e| this.child(ui::banner(e, true, cx)))
+            .child(
+                section("Appearance", cx).child(
+                    card(cx)
+                        .child(div().text_sm().child("This app is shown in:"))
+                        .child(h_flex().gap_1().children(
+                            [(Appearance::System, "As macOS"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")]
+                                .into_iter()
+                                .map(|(option, label)| {
+                                    choice(SharedString::from(format!("appearance-{label}")), label, appearance == option).on_click(
+                                        cx.listener(move |this, _, window, cx| this.set_appearance(option, window, cx)),
+                                    )
+                                }),
+                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Takes effect at once, without Save. With As macOS, the app switches when macOS does, e.g. at sunset."),
+                        ),
+                ),
+            )
             .child(
                 section("Terminal", cx).child(
                     card(cx)
@@ -547,13 +570,12 @@ impl SenditApp {
 /// The most lines of an operation's output shown at once.
 const MAX_LINES: usize = 400;
 
-fn state_tag(state: OpState) -> gpui_kit::component::tag::Tag {
-    use gpui_kit::component::tag::Tag;
+fn state_tag(state: OpState, cx: &App) -> gpui_kit::component::tag::Tag {
     match state {
-        OpState::Running => Tag::info().small().child("running"),
-        OpState::Succeeded => Tag::success().small().child("done"),
-        OpState::Failed(Some(code)) => Tag::danger().small().child(format!("failed ({code})")),
-        OpState::Failed(None) => Tag::danger().small().child("failed"),
+        OpState::Running => ui::tag(Tone::Busy, "running", cx),
+        OpState::Succeeded => ui::tag(Tone::Good, "done", cx),
+        OpState::Failed(Some(code)) => ui::tag(Tone::Bad, format!("failed ({code})"), cx),
+        OpState::Failed(None) => ui::tag(Tone::Bad, "failed", cx),
     }
 }
 
