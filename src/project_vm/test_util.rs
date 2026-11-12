@@ -14,13 +14,14 @@ use crate::vm::VmDir;
 use crate::worktree;
 
 /// A worktree `wt` of `main` in `temp`, and the VM of `main`, made from
-/// the `rust` image.
+/// build 1 of the `rust` image.
 pub(super) fn worktree_with_parent(temp: &Path, paths: &Paths) -> (Project, VmDir) {
     subdirectory_with_parent(temp, paths, "")
 }
 
 /// The subdirectory `sub` of a worktree `wt` of `main` in `temp`, and
-/// the VM of the same subdirectory of `main`, made from the `rust` image.
+/// the VM of the same subdirectory of `main`, made from build 1 of the
+/// `rust` image.
 pub(super) fn subdirectory_with_parent(temp: &Path, paths: &Paths, sub: &str) -> (Project, VmDir) {
     let (main, wt) = worktree::layout(temp);
     let (main, wt) = (main.join(sub), wt.join(sub));
@@ -43,6 +44,7 @@ pub(super) fn subdirectory_with_parent(temp: &Path, paths: &Paths, sub: &str) ->
     fs::write(parent.metadata(), toml::to_string(&metadata).unwrap()).unwrap();
     fs::write(parent.disk(), "disk").unwrap();
     fs::write(parent.efi_vars(), "efi").unwrap();
+    write_built(&parent.image_marker(), 1);
     (Project::at(&wt).unwrap(), parent)
 }
 
@@ -61,27 +63,28 @@ pub(super) fn state_once_released(dir: &VmDir) -> State {
     }
 }
 
-/// Writes the marker of a build made at `built`.
+/// Writes the marker of a build made at `built`, whose scripts asked for
+/// no shares.
 pub(super) fn write_built(path: &Path, built: u64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         path,
         format!(
-            "revision = {}\ncustom_scripts = []\nbuilt = {built}\n",
+            "revision = {}\ncustom_scripts = []\nmounts = []\nbuilt = {built}\n",
             provision::BASE_REVISION
         ),
     )
     .unwrap();
 }
 
-/// Writes an image's marker, or a VM's copy of one, to `path`, saying
-/// that the scripts asked for `mount`.
+/// Writes an image's marker, or a VM's copy of one, to `path`, of build 1,
+/// saying that the scripts asked for `mount`.
 pub(super) fn write_marker(path: &Path, mount: &str) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(
         path,
         format!(
-            "revision = {}\ncustom_scripts = []\n\
+            "revision = {}\ncustom_scripts = []\nbuilt = 1\n\
              [[mounts]]\nscript = \"images/rust.sh\"\nmount = \"{mount}\"\n",
             provision::BASE_REVISION
         ),

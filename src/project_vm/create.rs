@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use super::lock::{Lock, try_lock};
 use super::naming::{lock_names, names, unique_name, wanted_name};
+use super::origin::broken_marker_copy;
 use super::{Metadata, dir, metadata, parent, sendit_for, sendit_in};
 use crate::commands;
 use crate::paths::{ImageName, Paths, Project};
@@ -197,8 +198,7 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
     } = new_vm;
     let image = &image;
     // The marker of the image's build that the VM is made from, which it
-    // keeps a copy of. A parent made before VMs kept one shares what the
-    // latest build asked for; so does a copy of it, which keeps none either.
+    // keeps a copy of.
     let (from, base_revision, copy_of, marker) = match &source {
         Source::Parent {
             dir: parent,
@@ -245,10 +245,13 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
             paths.display(dir.path())
         )
     };
-    let copy = read_marker()?;
-    if matches!(source, Source::Base) && copy.is_none() {
-        return Err(rebuilt());
-    }
+    let Some(copy) = read_marker()? else {
+        return Err(match source {
+            Source::Base => rebuilt(),
+            // Deleted by hand, as `status` would tell.
+            Source::Parent { .. } => anyhow::anyhow!(broken_marker_copy(paths, &marker)),
+        });
+    };
     let partial = VmDir::new(paths.vms_dir().join(format!(".{}.partial", project.id)));
     util::fresh_dir(partial.path())?;
     let made = (|| {
@@ -257,14 +260,12 @@ pub fn create(paths: &Paths, project: &Project, new_vm: NewVm) -> Result<Option<
             crate::image::clone_file(&from.efi_vars(), &partial.efi_vars())
         })();
         // Also after an error, which an image deleted meanwhile causes.
-        if matches!(source, Source::Base) && read_marker()? != copy {
+        if matches!(source, Source::Base) && read_marker()?.as_ref() != Some(&copy) {
             return Err(rebuilt());
         }
         cloned?;
-        if let Some(copy) = &copy {
-            fs::write(partial.image_marker(), copy)
-                .with_context(|| format!("copying {}", marker.display()))?;
-        }
+        fs::write(partial.image_marker(), &copy)
+            .with_context(|| format!("copying {}", marker.display()))?;
         // Until the VM is in place, where the next one made finds its name.
         let _names = lock_names(paths)?;
         let taken = names(paths)?;
@@ -432,15 +433,7 @@ mod tests {
         let (wt, parent) = worktree_with_parent(temp.path(), &paths);
         let rust: ImageName = "rust".parse().unwrap();
         let base = VmDir::new(paths.image_dir(&rust));
-        fs::create_dir_all(base.path()).unwrap();
-        fs::write(
-            base.path().join("provisioned.toml"),
-            format!(
-                "revision = {}\ncustom_scripts = []\n",
-                provision::BASE_REVISION
-            ),
-        )
-        .unwrap();
+        write_built(&provision::marker(&paths, &rust), 1);
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
         let vm = dir(&paths, &wt);
@@ -499,7 +492,7 @@ mod tests {
                 let disk = fs::read_to_string(vm.disk()).unwrap();
                 let built = provision::build(&vm.image_marker())
                     .unwrap()
-                    .and_then(|build| build.built);
+                    .map(|build| build.built);
                 if built.map(|n| n.to_string()).as_ref() != Some(&disk) {
                     wrong.push(format!("disk of build {disk}, marker of {built:?}"));
                 }

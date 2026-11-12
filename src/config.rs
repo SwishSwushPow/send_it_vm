@@ -918,10 +918,13 @@ mod tests {
         fs::create_dir_all(marker.parent().unwrap()).unwrap();
         fs::write(
             marker,
-            "revision = 1\ncustom_scripts = []\n\
-             [[mounts]]\nscript = \"images/rust.sh\"\n\
-             mount = \"~/extra:/home/dev/.cargo/registry:ro\"\n\
-             [[mounts]]\nscript = \"tool.sh\"\nmount = \"~/not-here:ro\"\n",
+            format!(
+                "revision = {}\ncustom_scripts = []\nbuilt = 1\n\
+                 [[mounts]]\nscript = \"images/rust.sh\"\n\
+                 mount = \"~/extra:/home/dev/.cargo/registry:ro\"\n\
+                 [[mounts]]\nscript = \"tool.sh\"\nmount = \"~/not-here:ro\"\n",
+                provision::BASE_REVISION
+            ),
         )
         .unwrap();
         let image_file = fx.paths.image_file(&rust);

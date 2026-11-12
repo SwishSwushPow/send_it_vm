@@ -74,15 +74,18 @@ struct Marker {
     revision: u32,
     custom_scripts: Vec<ScriptStamp>,
     /// What the scripts asked to share when the image was built: the VMs
-    /// made from it share that, whatever the scripts ask for now. Empty for
-    /// images built before sendit recorded it.
-    #[serde(default)]
+    /// made from it share that, whatever the scripts ask for now.
     mounts: Vec<ScriptMount>,
     /// When the image was built, in seconds since the Unix epoch, which
-    /// tells a VM's build from a later one. None for images built before
-    /// sendit recorded it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    built: Option<u64>,
+    /// tells a VM's build from a later one.
+    built: u64,
+}
+
+/// What every marker has. Those of outdated builds may lack the rest of
+/// `Marker`, which earlier versions of sendit didn't write yet.
+#[derive(Deserialize)]
+struct Revision {
+    revision: u32,
 }
 
 fn marker_file(dir: &VmDir) -> PathBuf {
@@ -101,11 +104,16 @@ pub struct Build {
     /// What the image's scripts asked to share.
     pub mounts: Vec<ScriptMount>,
     /// When it was built (see `Marker::built`).
-    pub built: Option<u64>,
+    pub built: u64,
 }
 
-/// The build that `marker` records; `None` if the file doesn't exist.
+/// The build that `marker` records; `None` if the file doesn't exist, or
+/// is of an outdated build, which no VM is made from.
 pub fn build(marker: &Path) -> Result<Option<Build>> {
+    match util::read_toml::<Revision>(marker)? {
+        Some(Revision { revision }) if revision >= BASE_REVISION => {}
+        _ => return Ok(None),
+    }
     Ok(util::read_toml::<Marker>(marker)?.map(|marker| Build {
         mounts: marker.mounts,
         built: marker.built,
@@ -141,13 +149,17 @@ impl BaseState {
 }
 
 pub fn base_state(paths: &Paths, image: &ImageName) -> Result<BaseState> {
-    let base = VmDir::new(paths.image_dir(image));
-    let Some(marker) = util::read_toml::<Marker>(&marker_file(&base))? else {
+    let file = marker_file(&VmDir::new(paths.image_dir(image)));
+    let Some(Revision { revision }) = util::read_toml(&file)? else {
         return Ok(BaseState::Missing);
     };
-    if marker.revision < BASE_REVISION {
+    if revision < BASE_REVISION {
         return Ok(BaseState::Outdated);
     }
+    // Deleted meanwhile, e.g. by `images --delete`.
+    let Some(marker) = util::read_toml::<Marker>(&file)? else {
+        return Ok(BaseState::Missing);
+    };
     // Scripts with a mistake have changed since the build, which resolved
     // them, and so has an image file that points to nothing, which
     // `custom_scripts` takes for none. `provision` tells about them.
@@ -355,8 +367,7 @@ pub fn provision(
         // before 1970 only hides which VMs are from an earlier build.
         built: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .ok()
-            .map(|since| since.as_secs()),
+            .map_or(0, |since| since.as_secs()),
     })?;
     fs::write(marker_file(&partial), marker)?;
 
@@ -548,11 +559,18 @@ mod tests {
                 revision,
                 custom_scripts: Vec::new(),
                 mounts: Vec::new(),
-                built: None,
+                built: 1,
             };
             fs::write(marker_file(&base), toml::to_string(&marker).unwrap()).unwrap();
         };
         mark(BASE_REVISION - 1);
+        assert_eq!(why(), None);
+        // Also one of an earlier version of sendit, which wrote less.
+        fs::write(
+            marker_file(&base),
+            format!("revision = {}\ncustom_scripts = []\n", BASE_REVISION - 1),
+        )
+        .unwrap();
         assert_eq!(why(), None);
         mark(BASE_REVISION);
         assert_eq!(
@@ -602,7 +620,9 @@ mod tests {
             fs::write(base.disk(), "disk").unwrap();
             fs::write(
                 marker_file(&base),
-                format!("revision = {BASE_REVISION}\ncustom_scripts = []\n"),
+                format!(
+                    "revision = {BASE_REVISION}\ncustom_scripts = []\nmounts = []\nbuilt = 1\n"
+                ),
             )
             .unwrap();
         }
@@ -713,7 +733,7 @@ mod tests {
             revision: BASE_REVISION,
             custom_scripts: scripts.iter().map(CustomScript::stamp).collect(),
             mounts: mounts_of(&scripts).unwrap(),
-            built: None,
+            built: 1,
         };
         let names: Vec<_> = marker.custom_scripts.iter().map(|s| &s.name[..]).collect();
         assert_eq!(names, ["images/rust.sh", "a.sh", "b.sh"]);
@@ -757,7 +777,7 @@ mod tests {
         // without one.
         fs::write(
             marker_file(&base),
-            format!("revision = {BASE_REVISION}\ncustom_scripts = []\n"),
+            format!("revision = {BASE_REVISION}\ncustom_scripts = []\nmounts = []\nbuilt = 1\n"),
         )
         .unwrap();
         fs::remove_file(paths.image_file(&rust)).unwrap();
@@ -782,26 +802,25 @@ mod tests {
             revision: BASE_REVISION,
             custom_scripts: Vec::new(),
             mounts: mounts.clone(),
-            built: Some(1_760_000_000),
+            built: 1_760_000_000,
         };
         fs::write(&file, toml::to_string(&marker).unwrap()).unwrap();
         assert_eq!(
             build(&file).unwrap(),
             Some(Build {
                 mounts,
-                built: Some(1_760_000_000)
+                built: 1_760_000_000
             })
         );
 
-        // Images built before sendit recorded them have none.
-        fs::write(&file, "revision = 10\ncustom_scripts = []\n").unwrap();
-        assert_eq!(
-            build(&file).unwrap(),
-            Some(Build {
-                mounts: vec![],
-                built: None
-            })
-        );
+        // An outdated build, whose marker may lack both, records none that
+        // a VM is made from.
+        fs::write(
+            &file,
+            format!("revision = {}\ncustom_scripts = []\n", BASE_REVISION - 1),
+        )
+        .unwrap();
+        assert_eq!(build(&file).unwrap(), None);
     }
 
     #[test]

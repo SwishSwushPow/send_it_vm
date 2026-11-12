@@ -15,12 +15,11 @@ use crate::vm::VmDir;
 /// would be made from, next to the image's latest build.
 #[derive(Debug)]
 pub struct Origin {
-    /// Whether a VM counts: one of the image, made from a build that this
-    /// version of sendit can run. A new VM is made from the image's latest
-    /// build instead of copying any other, so it doesn't count then.
-    from_vm: bool,
-    /// The copy of its build's marker that the VM keeps, if it counts. None
-    /// for a VM made before VMs kept a copy.
+    /// The build that the VM was made from, as the copy of its marker that
+    /// the VM keeps says, if the VM counts: one of the image, made from a
+    /// build that this version of sendit can run. A new VM is made from the
+    /// image's latest build instead of copying any other, so none counts
+    /// then.
     kept: Option<Build>,
     /// The image's latest build; None before it has one.
     latest: Option<Build>,
@@ -28,8 +27,8 @@ pub struct Origin {
 
 impl Origin {
     /// The build that `vm` was made from: the copy of that build's marker
-    /// that it keeps. Without one, or for a VM of another image or an
-    /// outdated one, which `run` won't copy, the latest build's.
+    /// that it keeps. For a VM of another image or an outdated one, which
+    /// `run` won't copy, the latest build's.
     pub fn of_vm(paths: &Paths, vm: &VmDir, image: &ImageName) -> Result<Self> {
         Self::read(paths, Some(vm), image)
     }
@@ -59,16 +58,17 @@ impl Origin {
     }
 
     fn read(paths: &Paths, vm: Option<&VmDir>, image: &ImageName) -> Result<Self> {
-        let vm = vm.filter(|vm| made_from(vm, image));
-        let kept = match vm {
+        let kept = match vm.filter(|vm| made_from(vm, image)) {
             Some(vm) => {
                 let copy = vm.image_marker();
-                provision::build(&copy).with_context(|| broken_marker_copy(paths, &copy))?
+                let build = provision::build(&copy)
+                    .and_then(|build| build.context("it is missing, or from an outdated build"))
+                    .with_context(|| broken_marker_copy(paths, &copy))?;
+                Some(build)
             }
             None => None,
         };
         Ok(Self {
-            from_vm: vm.is_some(),
             kept,
             latest: provision::build(&provision::marker(paths, image))?,
         })
@@ -84,14 +84,11 @@ impl Origin {
     }
 
     /// Whether the VM was made from an earlier build than the latest one.
-    /// Unknown, and so false, while the latest build doesn't record when it
-    /// was made; a VM whose copy doesn't, or that has none, was made before
-    /// it.
     pub fn earlier_build(&self) -> bool {
-        let Some(latest) = self.latest.as_ref().and_then(|latest| latest.built) else {
-            return false;
-        };
-        self.from_vm && self.kept.as_ref().and_then(|kept| kept.built) != Some(latest)
+        match (&self.kept, &self.latest) {
+            (Some(kept), Some(latest)) => kept.built != latest.built,
+            _ => false,
+        }
     }
 
     /// Whether the image's latest build asked to share other directories.
@@ -115,8 +112,8 @@ fn made_from(vm: &VmDir, image: &ImageName) -> bool {
 }
 
 /// Says how to get past a VM's `copy` of its build's marker that can't be
-/// read, e.g. after it was edited by hand.
-fn broken_marker_copy(paths: &Paths, copy: &Path) -> String {
+/// read, e.g. after it was edited or deleted by hand.
+pub(super) fn broken_marker_copy(paths: &Paths, copy: &Path) -> String {
     format!(
         "reading {}; `sendit reset` in the VM's project makes it again",
         paths.display(copy)
@@ -147,17 +144,13 @@ mod tests {
         let made = || Origin::of_vm(&paths, &vm, &rust).unwrap().earlier_build();
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
 
-        // Unknown while the latest build doesn't say when it was made.
-        assert!(!new_vm(&rust, false));
-        write_marker(&provision::marker(&paths, &rust), "~/old:ro");
+        // Not before the image has a build.
         assert!(!new_vm(&rust, false));
 
-        // A parent made before VMs kept a copy, or before the builds were
-        // recorded, is from an earlier one, and so would be a copy of it,
-        // unless the VM is to be fresh, or of another image.
+        // A parent from an earlier build than the latest is behind, and so
+        // would be a copy of it, unless the VM is to be fresh, or of another
+        // image.
         build(2);
-        assert!(new_vm(&rust, false));
-        write_marker(&parent.image_marker(), "~/old:ro");
         assert!(new_vm(&rust, false));
         assert!(!new_vm(&rust, true));
         write_built(&provision::marker(&paths, &go), 1);
@@ -200,22 +193,14 @@ mod tests {
         let never = |_: &str, _: &str| -> Result<bool> { panic!("asked") };
 
         assert!(shares(&rust, false).is_empty());
-        // A parent made before VMs kept a copy of the image's marker shares
-        // what the latest build asked for, and so does a copy of it.
-        build("~/first:ro");
-        assert_eq!(shares(&rust, false), ["~/first:ro"]);
-        make_vm(&paths, &wt, &rust, false, &never).unwrap();
-        assert!(!vm.image_marker().exists());
-        build("~/second:ro");
-        assert_eq!(shares(&rust, false), ["~/second:ro"]);
-        fs::remove_dir_all(vm.path()).unwrap();
 
         // A parent's copy is what a copy of it would share, unless the VM
         // is to be fresh, or of another image: then it is made from the
         // image.
+        build("~/first:ro");
         write_marker(&parent.image_marker(), "~/parent:ro");
         assert_eq!(shares(&rust, false), ["~/parent:ro"]);
-        assert_eq!(shares(&rust, true), ["~/second:ro"]);
+        assert_eq!(shares(&rust, true), ["~/first:ro"]);
         write_marker(&provision::marker(&paths, &go), "~/go:ro");
         assert_eq!(shares(&go, false), ["~/go:ro"]);
 
@@ -226,11 +211,11 @@ mod tests {
             fs::read_to_string(vm.image_marker()).unwrap(),
             fs::read_to_string(parent.image_marker()).unwrap()
         );
-        build("~/third:ro");
+        build("~/second:ro");
         assert_eq!(shares(&rust, false), ["~/parent:ro"]);
         let new_vm = |fresh| mounts(Origin::of_new_vm(&paths, &wt, &rust, fresh));
         assert_eq!(new_vm(false), ["~/parent:ro"]);
-        assert_eq!(new_vm(true), ["~/third:ro"]);
+        assert_eq!(new_vm(true), ["~/second:ro"]);
 
         // Made from the image, it keeps that build's.
         fs::remove_dir_all(vm.path()).unwrap();
@@ -238,16 +223,12 @@ mod tests {
         fs::write(base.disk(), "base disk").unwrap();
         fs::write(base.efi_vars(), "base efi").unwrap();
         make_vm(&paths, &wt, &rust, true, &never).unwrap();
-        build("~/fourth:ro");
-        assert_eq!(shares(&rust, false), ["~/third:ro"]);
+        build("~/third:ro");
+        assert_eq!(shares(&rust, false), ["~/second:ro"]);
 
         // A copy that can't be read, e.g. after it was edited by hand, says
-        // how to get past it, also once the latest build says when it was
-        // made.
+        // how to get past it.
         fs::write(vm.image_marker(), "mounts = 1\n").unwrap();
-        let marker = provision::marker(&paths, &rust);
-        let latest = fs::read_to_string(&marker).unwrap();
-        fs::write(&marker, format!("built = 1\n{latest}")).unwrap();
         for error in [
             Origin::of(&paths, &wt, &rust, false).unwrap_err(),
             Origin::of_vm(&paths, &vm, &rust).unwrap_err(),
@@ -258,10 +239,5 @@ mod tests {
                 "{error}"
             );
         }
-
-        // A VM made before VMs kept a copy shares what the latest build
-        // asked for.
-        fs::remove_file(vm.image_marker()).unwrap();
-        assert_eq!(shares(&rust, false), ["~/fourth:ro"]);
     }
 }

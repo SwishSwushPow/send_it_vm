@@ -166,7 +166,7 @@ fn tells_when_the_vm_is_from_an_earlier_build() {
         fs::create_dir_all(&image).unwrap();
         fs::write(
             image.join("provisioned.toml"),
-            format!("revision = 1000\ncustom_scripts = []\nbuilt = {built}\n"),
+            format!("revision = 1000\ncustom_scripts = []\nmounts = []\nbuilt = {built}\n"),
         )
         .unwrap();
     };
@@ -301,7 +301,8 @@ fn lists_vms_and_images() {
     let images = env.home.join(".cache/sendit/images");
     // From a base revision no sendit has yet, so never outdated.
     fs::create_dir_all(images.join("rust")).unwrap();
-    let marker = |built: u32| format!("revision = 999\ncustom_scripts = []\nbuilt = {built}\n");
+    let marker =
+        |built: u32| format!("revision = 999\ncustom_scripts = []\nmounts = []\nbuilt = {built}\n");
     fs::write(images.join("rust/provisioned.toml"), marker(2)).unwrap();
     fs::write(images.join("rust/disk.img"), vec![1; 8192]).unwrap();
     // An image that only has an image file.
@@ -451,6 +452,11 @@ fn finds_vms_by_name() {
         ),
     )
     .unwrap();
+    fs::write(
+        vm.join("image.toml"),
+        "revision = 999\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
+    )
+    .unwrap();
 
     let (status, _) = ok(&["-n", "project", "status"]);
     let lines: Vec<_> = status.lines().collect();
@@ -585,7 +591,7 @@ fn deletes_images() {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("provisioned.toml"),
-            "revision = 999\ncustom_scripts = []\n",
+            "revision = 999\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
         )
         .unwrap();
         fs::create_dir_all(cache.join("provision").join(image)).unwrap();
@@ -804,7 +810,7 @@ fn reports_bad_image_files() {
     fs::create_dir_all(&built).unwrap();
     fs::write(
         built.join("provisioned.toml"),
-        "revision = 1000\ncustom_scripts = []\n",
+        "revision = 1000\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
     )
     .unwrap();
     assert_fails_with(&env.sendit(&["provision", "rust"]), missing);
@@ -837,7 +843,7 @@ fn reports_bad_image_files() {
     fs::create_dir_all(&built).unwrap();
     fs::write(
         built.join("provisioned.toml"),
-        "revision = 1000\ncustom_scripts = []\n",
+        "revision = 1000\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
     )
     .unwrap();
     let (status, _) = env.ok(&["status"]);
@@ -867,7 +873,7 @@ fn asks_before_risky_shares() {
     fs::create_dir_all(&image).unwrap();
     fs::write(
         image.join("provisioned.toml"),
-        "revision = 1000\ncustom_scripts = []\n",
+        "revision = 1000\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
     )
     .unwrap();
     // Without a terminal to ask on, sendit refuses before it makes or boots
@@ -992,7 +998,7 @@ fn moves_vms_to_sendit_vm_dir() {
     fs::create_dir_all(&image).unwrap();
     fs::write(
         image.join("provisioned.toml"),
-        "revision = 1000\ncustom_scripts = []\n",
+        "revision = 1000\ncustom_scripts = []\nmounts = []\nbuilt = 1\n",
     )
     .unwrap();
     let output = sendit(&vms, &["run", "--mount", external.to_str().unwrap()]);
