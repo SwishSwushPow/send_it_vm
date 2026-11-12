@@ -671,7 +671,8 @@ mod tests {
 
     #[test]
     fn finds_the_calls_in_the_bundled_examples() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // The examples are in the repository, next to the crate.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let calls = |path: &str| {
             CustomScript {
                 name: path.into(),

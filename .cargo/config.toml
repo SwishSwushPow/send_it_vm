@@ -1,4 +1,5 @@
 # Links through a wrapper that signs executables with the virtualization
-# entitlement, so `cargo build/run/test/install --path .` produce working binaries.
+# entitlement, so `cargo build/run/test` and `cargo install --path sendit-vm`
+# produce working binaries.
 [target.aarch64-apple-darwin]
 linker = "scripts/link-and-sign.sh"

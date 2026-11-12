@@ -1,14 +1,16 @@
 #!/bin/sh
-# Builds sendit-ui and packs it as "Send it.app" in target/, to start it from
-# the Finder or the Dock. The app uses the sendit you installed, e.g. with
-# `cargo install --path ..`; set another in its Preferences.
+# Builds sendit-ui and packs it as "Send it.app" in the workspace's target/,
+# to start it from the Finder or the Dock. The app uses the sendit you
+# installed, e.g. with `cargo install --path ../sendit-vm`; set another in its
+# Preferences.
 set -e
 cd "$(dirname "$0")"
 cargo build --release
-app="target/Send it.app"
+target=${CARGO_TARGET_DIR:-../target}
+app="$target/Send it.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp target/release/sendit-ui "$app/Contents/MacOS/"
+cp "$target/release/sendit-ui" "$app/Contents/MacOS/"
 cp icon/Assets.car icon/AppIcon.icns "$app/Contents/Resources/"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 cat > "$app/Contents/Info.plist" <<PLIST

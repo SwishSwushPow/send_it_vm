@@ -6,6 +6,10 @@
 set -e
 cc "$@"
 
+# sendit-ui, the desktop app in this workspace, runs no VMs: link it plainly.
+# rustc passes cargo's environment on to the linker.
+[ "${CARGO_PKG_NAME-}" = sendit-ui ] && exit 0
+
 # Find the output path. rustc may pass arguments in @response files, one per line.
 out=
 take=
@@ -30,7 +34,7 @@ done
 case $out in
     '' | *.dylib | *.so) exit 0 ;;
 esac
-entitlements="$(dirname "$0")/../entitlements.plist"
+entitlements="$(dirname "$0")/../sendit-vm/entitlements.plist"
 if ! msg=$(codesign --sign - --force --entitlements "$entitlements" "$out" 2>&1); then
     echo "$msg" >&2
     exit 1

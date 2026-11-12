@@ -12,7 +12,7 @@ You provision a Debian 13 (trixie, arm64) base image once, or several with diffe
 
 ## Building
 
-Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with `cargo install send_it_vm`, or `cargo install --path .` from a clone.
+Requires macOS 13 or later on Apple silicon (tested on 15 and 27). Install with `cargo install send_it_vm`, or `cargo install --path sendit-vm` from a clone. What changed in each version is in [the changelog](sendit-vm/CHANGELOG.md).
 
 Virtualization.framework only runs binaries signed with the virtualization entitlement. Builds from a clone are signed at link time by `scripts/link-and-sign.sh`; a binary installed from crates.io signs itself (ad hoc) on its first run and starts again.
 

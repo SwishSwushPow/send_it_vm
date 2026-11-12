@@ -6,10 +6,6 @@ license = "MIT OR Apache-2.0"
 description = "A desktop app for sendit: its VMs, base images and configuration"
 publish = false
 
-# A workspace of its own, so that GPUI's dependencies stay out of sendit's
-# Cargo.lock, its CI and its audit.
-[workspace]
-
 [[bin]]
 name = "sendit-ui"
 path = "src/main.rs"
@@ -22,7 +18,7 @@ libc = "0.2.189"
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSBundle", "NSData", "NSString"] }
-send_it_vm = { path = ".." }
+send_it_vm = { path = "../sendit-vm" }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
 toml_edit = "0.25.19"

@@ -1,37 +1,11 @@
-[package]
-name = "send_it_vm"
-version = "0.11.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-description = "Light and fast per-project Debian VMs on macOS, for running coding agents without giving them the rest of the machine"
-repository = "https://github.com/SwishSwushPow/send_it_vm"
-readme = "README.md"
-keywords = ["vm", "virtualization", "macos", "sandbox", "debian"]
-categories = ["command-line-utilities", "virtualization", "development-tools"]
-# Only what the crate builds from, so nothing else in the working directory
-# (such as VM disk images) can end up in a package. Cargo.toml and Cargo.lock
-# are always included. The linker wrapper (.cargo/ and scripts/) stays out:
-# it only signs builds in this repository, and installed binaries sign
-# themselves (see src/sign.rs), which needs entitlements.plist.
-include = ["/src/", "/entitlements.plist", "/README.md", "/CHANGELOG.md", "/LICENSE-*"]
-
-[[bin]]
-name = "sendit"
-path = "src/main.rs"
-
-[dependencies]
-anyhow = "1.0.104"
-block2 = "0.6"
-clap = { version = "4.6.7", features = ["derive"] }
-hex = "0.4.3"
-libc = "0.2.189"
-objc2 = { version = "0.6", features = ["exception"] }
-objc2-foundation = "0.3"
-objc2-virtualization = "0.3"
-serde = { version = "1.0.229", features = ["derive"] }
-sha2 = "0.11.0"
-toml = "1.1.6"
-uuid = { version = "1.26.1", features = ["v5"] }
+# sendit (sendit-vm/, the crate send_it_vm) and its desktop app (sendit-ui/)
+# share one Cargo.lock and target/. Plain `cargo build/test/clippy` here builds
+# sendit alone, as CI does; pass --workspace for both, or -p sendit-ui for the
+# app.
+[workspace]
+members = ["sendit-vm", "sendit-ui"]
+default-members = ["sendit-vm"]
+resolver = "3"
 
 [profile.release]
 # rustc's strip step runs after the linker and would replace the signature

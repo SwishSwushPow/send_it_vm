@@ -4,11 +4,11 @@ A desktop app for [sendit](../README.md), built with [GPUI](https://gpui.rs) and
 
 ## Building
 
-sendit-ui is a Cargo workspace of its own, so that GPUI's dependencies stay out of sendit's. It needs macOS on Apple silicon, like sendit, and sendit itself, e.g. from `cargo install --path ..` in this folder.
+sendit-ui is a member of sendit's Cargo workspace and shares its `Cargo.lock` and `target/`; a plain `cargo build` or `cargo test` in the repository's root builds sendit alone, `-p sendit-ui` or `--workspace` builds the app. It needs macOS on Apple silicon, like sendit, and sendit itself, e.g. from `cargo install --path ../sendit-vm` in this folder.
 
 ```sh
 cargo run --release      # run it from here
-./bundle.sh              # or build target/Send it.app, to start from the Finder
+./bundle.sh              # or build ../target/Send it.app, to start from the Finder
 ```
 
 It looks for `sendit` next to itself, in `~/.cargo/bin`, on `PATH` and in Homebrew's folders; Preferences can name another. An app started from the Finder doesn't see what your shell's profile sets, so if you set `SENDIT_VM_DIR` there, set the VM folder in Preferences too.
