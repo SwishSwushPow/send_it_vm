@@ -30,7 +30,11 @@ pub fn schedule(window: AnyWindowHandle, view: Entity<SenditApp>, cx: &mut App) 
                     let appearance = match name.as_str() {
                         "light" => Appearance::Light,
                         "dark" => Appearance::Dark,
-                        _ => Appearance::System,
+                        "system" => Appearance::System,
+                        _ => {
+                            eprintln!("SENDIT_UI_APPEARANCE: {name} is not light, dark or system");
+                            Appearance::System
+                        }
                     };
                     app.prefs.appearance = appearance;
                     app.prefs_draft.appearance = appearance;

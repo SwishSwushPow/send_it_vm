@@ -487,6 +487,7 @@ impl SenditApp {
                                     )
                                 }),
                         ))
+                        .when_some(self.appearance_error.clone(), |this, e| this.child(ui::banner(e, true, cx)))
                         .child(
                             div()
                                 .text_xs()

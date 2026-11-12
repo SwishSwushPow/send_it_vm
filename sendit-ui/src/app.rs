@@ -137,6 +137,11 @@ pub struct SenditApp {
     pub pref_sendit: Entity<InputState>,
     pub pref_vm_dir: Entity<InputState>,
     pub prefs_error: Option<String>,
+    /// Why the appearance last picked isn't saved.
+    pub appearance_error: Option<String>,
+    /// The settings file couldn't be read, so saving only the appearance
+    /// would replace what else it holds with the defaults.
+    prefs_unreadable: bool,
 
     /// The folder of the operations' logs.
     logs: Result<PathBuf, String>,
@@ -184,9 +189,11 @@ pub fn apply_appearance(appearance: Appearance, window: &mut Window, cx: &mut Ap
     sync_theme(appearance, window, cx);
 }
 
-/// Draws with the theme for `appearance`, given how macOS shows the window.
+/// Draws with the theme for `appearance`, given how macOS is set.
 fn sync_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
-    let mode = appearance.theme_mode(window.appearance());
+    // The app's appearance rather than the window's: GPUI updates the
+    // window's a tick after an override is cleared, the app's at once.
+    let mode = appearance.theme_mode(cx.window_appearance());
     if cx.theme().mode != mode {
         Theme::change(mode, Some(window), cx);
     }
@@ -336,7 +343,9 @@ impl SenditApp {
             pref_editor_command,
             pref_sendit,
             pref_vm_dir,
+            prefs_unreadable: prefs_error.is_some(),
             prefs_error,
+            appearance_error: None,
             logs: ops::log_dir().map_err(|e| format!("{e:#}")),
             _refresh: refresh,
             _appearance: appearance,
@@ -833,17 +842,19 @@ impl SenditApp {
         cx: &mut Context<Self>,
     ) {
         self.prefs_draft.appearance = appearance;
-        if self.prefs.appearance == appearance {
-            cx.notify();
-            return;
+        if self.prefs.appearance != appearance {
+            self.prefs.appearance = appearance;
+            apply_appearance(appearance, window, cx);
         }
-        let mut prefs = self.prefs.clone();
-        prefs.appearance = appearance;
-        if let Err(e) = prefs.save() {
-            self.prefs_error = Some(format!("{e:#}"));
-        }
-        self.prefs = prefs;
-        apply_appearance(appearance, window, cx);
+        self.appearance_error = if self.prefs_unreadable {
+            Some(
+                "Not saved, as the settings file can't be read: this holds until the app \
+                 quits. Save replaces the file with this page's settings."
+                    .to_string(),
+            )
+        } else {
+            self.prefs.save().err().map(|e| format!("Not saved: {e:#}"))
+        };
         cx.notify();
     }
 
@@ -878,6 +889,8 @@ impl SenditApp {
             return;
         }
         self.prefs_error = None;
+        self.appearance_error = None;
+        self.prefs_unreadable = false;
         self.sendit = launch::find_sendit(prefs.sendit.as_deref());
         self.paths = paths;
         self.prefs_draft = prefs.clone();

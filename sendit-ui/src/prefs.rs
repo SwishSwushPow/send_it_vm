@@ -50,11 +50,10 @@ impl Appearance {
         }
     }
 
-    /// The theme for a window that looks like `window`, i.e. the system's
-    /// appearance unless this one overrides it.
-    pub fn theme_mode(self, window: WindowAppearance) -> ThemeMode {
+    /// The theme for this appearance, where macOS shows the app as `system`.
+    pub fn theme_mode(self, system: WindowAppearance) -> ThemeMode {
         match self {
-            Self::System => window.into(),
+            Self::System => system.into(),
             Self::Light => ThemeMode::Light,
             Self::Dark => ThemeMode::Dark,
         }
