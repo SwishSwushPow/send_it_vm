@@ -594,8 +594,9 @@ pub fn delete_images(
     Ok(())
 }
 
-/// The image each VM was made from, of those whose metadata can be read.
-fn vm_images(paths: &Paths) -> Result<Vec<ImageName>> {
+/// The image each VM was made from, of those whose metadata can be read,
+/// for `image_rows`.
+pub fn vm_images(paths: &Paths) -> Result<Vec<ImageName>> {
     Ok(project_vm::all(paths)?
         .iter()
         .filter_map(|dir| Some(project_vm::metadata(dir).ok()?.image))
@@ -927,6 +928,21 @@ pub enum Activity {
     },
 }
 
+impl Activity {
+    /// In words, as `status` shows it, e.g. "running at 192.168.64.3".
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Stopped => "stopped".to_string(),
+            Self::Busy => {
+                "busy, another sendit process is making, starting, copying or deleting it"
+                    .to_string()
+            }
+            Self::Running { ip: Some(ip) } => format!("running at {ip}"),
+            Self::Running { ip: None } => "running".to_string(),
+        }
+    }
+}
+
 /// Why a VM is behind the image its project uses, so that a reset makes it
 /// again.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -939,6 +955,23 @@ pub enum Stale {
     /// for (`shares`). With `fresh_too`, a VM made again would be a copy of
     /// a parent VM that is behind too, which `run --fresh` avoids.
     EarlierBuild { shares: bool, fresh_too: bool },
+}
+
+impl Stale {
+    /// What makes the VM stale, in words, e.g. "made from an outdated base
+    /// image"; `image` is the one its project uses.
+    pub fn describe(&self, image: &ImageName) -> String {
+        match self {
+            Self::OtherImage(made_from) => format!("made from the {made_from} image"),
+            Self::Outdated => "made from an outdated base image".to_string(),
+            Self::EarlierBuild { shares: true, .. } => {
+                format!("shares what an earlier build of the {image} image asked for")
+            }
+            Self::EarlierBuild { shares: false, .. } => {
+                format!("made from an earlier build of the {image} image")
+            }
+        }
+    }
 }
 
 /// The state of the project's VM for `status`, and while it runs, what its
@@ -1022,38 +1055,25 @@ fn describe_vm(paths: &Paths, project: &Project, report: &StatusReport) -> Strin
         }
         VmStatus::Made { activity, stale } => (activity, stale),
     };
-    let state = match activity {
-        Activity::Stopped => "stopped".to_string(),
-        Activity::Busy => {
-            "busy, another sendit process is making, starting, copying or deleting it".to_string()
-        }
-        Activity::Running { ip: Some(ip) } => format!("running at {ip}"),
-        Activity::Running { ip: None } => "running".to_string(),
+    let state = activity.describe();
+    let Some(stale) = stale else {
+        return state;
     };
-    match stale {
-        None => state,
-        Some(Stale::OtherImage(made_from)) => format!(
-            "{state}; made from the {made_from} image, `{sendit} reset` recreates it from {image}"
-        ),
-        Some(Stale::Outdated) => {
-            format!("{state}; made from an outdated base image, `{sendit} reset` recreates it")
+    let how = match stale {
+        Stale::OtherImage(_) => format!("`{sendit} reset` recreates it from {image}"),
+        Stale::Outdated => format!("`{sendit} reset` recreates it"),
+        Stale::EarlierBuild {
+            fresh_too: true, ..
+        } => {
+            // Without the name, which goes with the VM.
+            let again = project_vm::sendit_in(project);
+            format!("`{sendit} reset` and `{again} run --fresh` recreate it from the current one")
         }
-        Some(Stale::EarlierBuild { shares, fresh_too }) => {
-            let how = if *fresh_too {
-                // Without the name, which goes with the VM.
-                let again = project_vm::sendit_in(project);
-                format!("`{sendit} reset` and `{again} run --fresh` recreate it")
-            } else {
-                format!("`{sendit} reset` recreates it")
-            };
-            let what = if *shares {
-                format!("shares what an earlier build of the {image} image asked for")
-            } else {
-                format!("made from an earlier build of the {image} image")
-            };
-            format!("{state}; {what}, {how} from the current one")
-        }
-    }
+        Stale::EarlierBuild {
+            fresh_too: false, ..
+        } => format!("`{sendit} reset` recreates it from the current one"),
+    };
+    format!("{state}; {}, {how}", stale.describe(image))
 }
 
 /// What `status` shows of a project's VM.

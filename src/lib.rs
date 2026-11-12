@@ -30,15 +30,16 @@ pub use cli::{Cli, Command};
 pub use commands::{
     Activity, ImageRow, ParentVm, ProjectDir, PrunePlan, PruneScope, PruneVm, SkipReason, Skipped,
     Stale, StatusReport, VmInfo, VmRow, VmState, VmStatus, image_rows, list_rows, prune_plan,
-    status_report,
+    status_report, vm_images,
 };
-pub use config::{ByteSize, Config, MountSpec, Resources, Settings};
+pub use config::{ByteSize, Config, Mount, MountSpec, Resources, Settings, VmSettings};
 pub use network::{Allow, Mode};
 pub use paths::{ImageName, Paths, Project, VmName};
 pub use project_vm::find;
 pub use provision::BaseState;
 pub use ssh_config::{HOST_PREFIX, is_set_up as ssh_is_set_up};
 pub use util::{canonical, read_toml, write_atomic};
+pub use vm::VmDir;
 
 /// sendit's command line, which its binary runs; nothing else should, as
 /// it re-runs the binary it is in.
