@@ -1,12 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- sendit-ui, a desktop app for sendit in `sendit-ui/`, built with GPUI. It shows the VMs with their state and settings, the base images and the configuration. It starts, stops, renames and resets VMs, also with run options or for a git worktree, and builds and deletes images. It edits the config file, keeping its comments, and cleans up VMs as `prune` does. Shells, consoles and commands open in a terminal app. It runs the `sendit` binary for everything that changes something. It is light or dark as macOS is, also when that changes, or always one of them, as set in Preferences. Its icon is the S of the banner a VM shows when it starts, light or dark.
+- `sendit run -y` (`--yes`) shares directories that let the VM get around its limits, e.g. your home directory, without asking, for programs that ask first themselves and have no terminal to pass on. Without a terminal and `--yes`, `sendit run` still refuses them. Without a terminal, it now also says that `--fresh` starts a worktree's VM from the image while the main worktree's VM runs, the question it can't ask then.
+
 ## 0.11.0 - 2026-11-12
 
 ### Added
 
 - sendit's crate has a library too, `send_it_vm`, through which a desktop app can read the VMs, base images and configuration as data, and whether `sendit ssh-config` is set up. It exports only what reads; the app runs `sendit` for the rest. It is sendit's internals, not a stable API. `sendit list`, `images`, `status` and `prune` print the same as before.
-- sendit-ui, a desktop app for sendit in `sendit-ui/`, built with GPUI. It shows the VMs with their state and settings, the base images and the configuration. It starts, stops, renames and resets VMs, also with run options or for a git worktree, and builds and deletes images. It edits the config file, keeping its comments, and cleans up VMs as `prune` does. Shells, consoles and commands open in a terminal app. It runs the `sendit` binary for everything that changes something. It is light or dark as macOS is, also when that changes, or always one of them, as set in Preferences. Its icon is the S of the banner a VM shows when it starts, light or dark.
-- `sendit run -y` (`--yes`) shares directories that let the VM get around its limits, e.g. your home directory, without asking, for programs that ask first themselves and have no terminal to pass on. Without a terminal and `--yes`, `sendit run` still refuses them. Without a terminal, it now also says that `--fresh` starts a worktree's VM from the image while the main worktree's VM runs, the question it can't ask then.
 - `sendit ssh-config` lets ssh, and the programs that use it, reach each running VM as `sendit-<name>`, e.g. `ssh sendit-my-app`, or in Rex, the host `ssh://sendit-my-app`. It writes a `Host sendit-*` block to `~/.cache/sendit/ssh/config` and asks to include it at the top of `~/.ssh/config`. For each connection, the block's ProxyCommand, `sendit ssh-proxy`, finds the VM by its name and connects to it as `sendit ssh` does, checking the VM's host key, so the block stays the same while VMs boot with other IP addresses, are renamed or reset.
 
 ### Changed
